@@ -1,0 +1,22 @@
+[package]
+name = "coda-cli"
+description = "Command line interface for CODA"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "coda"
+path = "src/main.rs"
+
+[dependencies]
+coda-core = { workspace = true }
+coda-pm = { workspace = true }
+clap = { workspace = true }
+ratatui = { workspace = true }
+crossterm = { workspace = true }
+tokio = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }

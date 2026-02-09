@@ -1,0 +1,17 @@
+[package]
+name = "coda-core"
+description = "Core execution engine for CODA"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+coda-pm = { workspace = true }
+tokio = { workspace = true }
+claude-agent-sdk-rs = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }

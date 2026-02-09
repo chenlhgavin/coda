@@ -1,5 +1,12 @@
-[package]
-name = "coda"
+[workspace]
+resolver = "2"
+members = [
+    "crates/coda-core",
+    "crates/coda-pm",
+    "apps/coda-cli",
+]
+
+[workspace.package]
 version = "0.1.0"
 authors = ["Your Name <YourName@yourdomain.com>"]
 edition = "2024"
@@ -7,16 +14,37 @@ license = "MIT"
 documentation = "https://docs.rs/"
 repository = "https://github.com/TODO"
 homepage = "https://github.com/TODO"
-description = """
-
-"""
 readme = "README.md"
 categories = ["development-tools"]
 keywords = []
 
-[dependencies]
-anyhow = "1.0.98"
-serde = { version = "1.0.219", features = ["derive"] }
-serde_json = "1.0.142"
-thiserror = "2.0.12"
-tokio = { version = "1.47.1", features = ["rt", "rt-multi-thread", "macros"] }
+[workspace.dependencies]
+# Internal crates
+coda-core = { path = "crates/coda-core" }
+coda-pm = { path = "crates/coda-pm" }
+
+# Async runtime
+tokio = { version = "1.43", features = ["rt", "rt-multi-thread", "macros", "sync", "time"] }
+
+# Claude Agent SDK
+claude-agent-sdk-rs = "0.6"
+
+# CLI
+clap = { version = "4.5", features = ["derive"] }
+ratatui = "0.30"
+crossterm = "0.29"
+
+# Template engine
+minijinja = { version = "2.6", features = ["loader"] }
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Error handling
+anyhow = "1.0"
+thiserror = "2.0"
+
+# Tracing
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
