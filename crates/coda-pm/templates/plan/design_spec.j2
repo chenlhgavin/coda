@@ -1,0 +1,65 @@
+Based on the approved plan, generate a detailed design specification document.
+
+## Feature
+
+- **Slug**: {{ feature_slug }}
+- **Feature ID**: {{ feature_id }}
+
+## Conversation Summary
+
+{{ conversation_history }}
+
+## Output Format
+
+Generate a Markdown document with the following structure:
+
+```markdown
+# Feature: {{ feature_slug }}
+
+## Overview
+<1-2 paragraph summary of what this feature does and why>
+
+## High-Level Design
+<Architecture decisions, component interactions, data flow>
+<Include an ASCII diagram if helpful>
+
+## Interface Design
+<New or modified public APIs, function signatures, trait definitions>
+<Use code blocks with the appropriate language>
+
+## Directory Structure
+<New files and directories to create>
+```
+path/to/new/file.rs    — description
+path/to/modified/file.rs — what changes
+```
+
+## Core Data Structures
+<Key structs, enums, and types with field descriptions>
+
+## Development Phases
+
+### Phase 1: <name>
+- **Goal**: <what this phase achieves>
+- **Tasks**:
+  - <specific task 1>
+  - <specific task 2>
+- **Commit message**: "<conventional commit message>"
+
+### Phase 2: <name>
+...
+
+## Dependencies
+<New crate dependencies needed, if any>
+
+## Risk & Trade-offs
+<Known risks, limitations, or trade-offs of this design>
+```
+
+## Guidelines
+
+- Each phase MUST result in code that compiles and passes existing tests
+- Phases should be ordered from foundational to feature-complete
+- Keep phases small — ideally 1-3 files changed per phase
+- Use conventional commit messages (feat:, fix:, refactor:, test:, docs:)
+- Reference existing patterns in the codebase where applicable

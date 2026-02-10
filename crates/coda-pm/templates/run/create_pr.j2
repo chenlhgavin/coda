@@ -1,0 +1,129 @@
+You are creating a pull request for a completed feature using the GitHub CLI (`gh`).
+
+## Design Specification
+
+{{ design_spec }}
+
+## Commits
+
+The following commits were made during development:
+
+{% for commit in commits %}
+- `{{ commit.sha }}` — {{ commit.message }}
+{% endfor %}
+
+## Execution Summary
+
+- **Feature**: {{ state.feature.slug }} ({{ state.feature.id }})
+- **Branch**: `{{ state.git.branch }}` → `{{ state.git.base_branch }}`
+- **Total turns**: {{ state.total.turns }}
+- **Total cost**: {{ state.total.cost.input_tokens }} input / {{ state.total.cost.output_tokens }} output tokens
+- **Duration**: {{ state.total.duration_secs }}s
+
+### Phase Results
+{% for phase in state.phases %}
+- **{{ phase.name }}**: {{ phase.status }} ({{ phase.turns }} turns, {{ phase.cost.input_tokens }}+{{ phase.cost.output_tokens }} tokens, {{ phase.duration_secs }}s)
+{% endfor %}
+
+### Review Summary
+- Rounds: {{ review_summary.rounds }}
+- Issues found: {{ review_summary.issues_found }}
+- Issues resolved: {{ review_summary.issues_resolved }}
+
+### Verification Summary
+- Checks passed: {{ verification_summary.checks_passed }}/{{ verification_summary.checks_total }}
+
+## Task
+
+### 1. Push the branch
+
+```bash
+git push -u origin {{ state.git.branch }}
+```
+
+### 2. Create the PR using `gh` CLI
+
+Generate a **detailed** PR title and body, then create the PR:
+
+**Title format**: `feat(<scope>): <concise description>`
+
+**Body** must include ALL of the following sections:
+
+```bash
+gh pr create \
+  --base "{{ state.git.base_branch }}" \
+  --head "{{ state.git.branch }}" \
+  --title "feat({{ state.feature.slug }}): <concise description>" \
+  --body "$(cat <<'PRBODY'
+## Summary
+
+<2-3 sentences: what this PR does, why it's needed, and the approach taken>
+
+## Changes
+
+<Group changes by area. Be specific — mention file names, function names, types added>
+
+### <Area 1 — e.g. Core Types>
+- Added `FooStruct` in `src/foo.rs` — <purpose>
+- Implemented `BarTrait` for `Baz` — <purpose>
+
+### <Area 2 — e.g. API Layer>
+- New endpoint `POST /api/xxx` in `routes.rs`
+- Updated `Config` to support new field `yyy`
+
+### <Area 3 — e.g. Tests>
+- Added unit tests for `FooStruct` (X tests)
+- Added integration test for end-to-end flow
+
+## Design Spec
+
+See [\`.coda/{{ state.feature.id }}-{{ state.feature.slug }}/specs/design.md\`](.coda/{{ state.feature.id }}-{{ state.feature.slug }}/specs/design.md) for the full design specification.
+
+## Verification
+
+- [x] All automated checks pass
+{% for check in checks %}
+  - [x] \`{{ check }}\`
+{% endfor %}
+- [x] Functional verification completed ({{ verification_summary.checks_passed }}/{{ verification_summary.checks_total }} checks passed)
+- [x] Code review completed ({{ review_summary.rounds }} round(s), {{ review_summary.issues_found }} issue(s) found and resolved)
+
+## Test Plan
+
+<Describe what was tested:>
+- Unit tests: <count> tests covering <areas>
+- Integration tests: <count> tests covering <scenarios>
+- Edge cases tested: <list key edge cases>
+
+## Commits
+
+{% for commit in commits %}
+- \`{{ commit.sha }}\` {{ commit.message }}
+{% endfor %}
+
+## Execution Stats
+
+| Metric | Value |
+|--------|-------|
+| Total turns | {{ state.total.turns }} |
+| Input tokens | {{ state.total.cost.input_tokens }} |
+| Output tokens | {{ state.total.cost.output_tokens }} |
+| Duration | {{ state.total.duration_secs }}s |
+| Review rounds | {{ review_summary.rounds }} |
+| Issues found/resolved | {{ review_summary.issues_found }}/{{ review_summary.issues_resolved }} |
+
+PRBODY
+)"
+```
+
+### 3. Report the PR URL
+
+After creating the PR, output the PR URL so it can be recorded in `state.yml`.
+
+## Guidelines
+
+- The PR body should be **comprehensive** — a reviewer should understand the full scope without reading every file
+- Group changes logically, not just by file
+- Mention any breaking changes, migration steps, or deployment considerations
+- If any manual testing steps are needed, include them in the Test Plan
+- Do NOT abbreviate — a detailed PR is always better than a sparse one

@@ -1,0 +1,50 @@
+You are implementing a new feature in an existing codebase. This is the **implement** phase.
+
+## Design Specification
+
+{{ design_spec }}
+
+{% if resume_context %}
+## Resume Context
+
+{{ resume_context }}
+{% endif %}
+
+## Current Phase
+
+You are working on **Phase {{ phase_index + 1 }}** of the development plan. Locate the corresponding phase in the "Development Phases" section of the design spec above and implement it.
+
+## Task
+
+Implement the code changes described in Phase {{ phase_index + 1 }}:
+
+1. Replace `todo!()` placeholders with actual implementations
+2. Follow the interface design from the spec exactly
+3. Handle all error cases properly — no `unwrap()` or `expect()` in production code
+4. Add appropriate logging with `tracing` macros
+
+## After Implementation
+
+Run the following checks and fix any issues:
+{% for check in checks %}
+- `{{ check }}`
+{% endfor %}
+
+If any check fails:
+1. Read the error output carefully
+2. Fix the issue
+3. Re-run the checks
+4. Repeat until all checks pass
+
+## Commit
+
+Once all checks pass, commit with an appropriate conventional commit message:
+`feat({{ feature_slug }}): <concise description of what this phase implements>`
+
+## Guidelines
+
+- Implement ONLY what is described in this phase — do not jump ahead
+- Each function should be focused and under 150 lines
+- Use the project's existing patterns and conventions
+- Prefer borrowing over cloning, iterators over explicit loops
+- Add inline comments only for non-obvious logic

@@ -1,0 +1,64 @@
+You are verifying a newly implemented feature against its verification plan.
+
+## Verification Plan
+
+{{ verification_spec }}
+
+## Task
+
+Execute each item in the verification plan systematically:
+
+### 1. Automated Checks
+
+Run the following configured checks:
+{% for check in checks %}
+- `{{ check }}`
+{% endfor %}
+
+### 2. Functional Verification
+
+For each scenario in the verification plan:
+1. Set up the test conditions
+2. Execute the scenario
+3. Verify the expected outcome
+4. Record pass/fail
+
+### 3. Edge Cases
+
+Test each edge case listed in the verification plan.
+
+### 4. Integration Points
+
+Verify each integration point listed in the verification plan.
+
+## Execution Rules
+
+- Run checks in the order listed
+- If a check fails, STOP and report the failure — do NOT continue to the next check
+- For each failed check, provide:
+  - What was expected
+  - What actually happened
+  - The error output (if any)
+
+## Output Format
+
+After running all checks, respond with a YAML summary:
+
+```yaml
+result: "passed"  # or "failed"
+checks:
+  - name: "<check name>"
+    status: "passed"  # or "failed"
+    details: "<optional details>"
+
+  - name: "<check name>"
+    status: "failed"
+    details: "<what went wrong>"
+    error: |
+      <error output>
+
+failed_count: 0
+total_count: 12
+```
+
+If the result is "failed", also provide a brief analysis of what needs to be fixed and which files are likely involved.

@@ -1,0 +1,80 @@
+You are implementing a new feature in an existing codebase. This is the **test** phase.
+
+## Design Specification
+
+{{ design_spec }}
+
+## Changed Files
+
+The following files were created or modified during the implement phase:
+
+{% for file in changed_files %}
+- `{{ file }}`
+{% endfor %}
+
+Read these files to understand the implementation before writing tests.
+
+## Task
+
+Write comprehensive tests for the implemented feature:
+
+### 1. Unit Tests
+
+Write unit tests in the same file using `#[cfg(test)] mod tests`:
+
+- Test every public function and method
+- Test error cases explicitly with `assert!(matches!(...))`
+- Use descriptive names: `test_should_<expected_behavior>_when_<condition>`
+- Use `rstest` for parameterized tests where appropriate
+
+### 2. Integration Tests (if applicable)
+
+Write integration tests in the `tests/` directory:
+
+- Test the feature from the public API perspective
+- Test interactions between components
+- Test with realistic inputs
+
+### 3. Doc Tests
+
+Add at least one example in doc comments for each public function:
+
+```rust
+/// # Examples
+///
+/// ```
+/// let result = my_function(input);
+/// assert_eq!(result, expected);
+/// ```
+```
+
+## Guidelines
+
+- Aim for high coverage on critical paths and edge cases
+- Test error cases — they are as important as happy paths
+- Avoid over-mocking; prefer real implementations when they are fast
+- Each test should be independent and not rely on test execution order
+- Use `#[ignore]` for slow tests with a comment explaining why
+
+## After Writing Tests
+
+Run the full test suite:
+
+```
+cargo test
+```
+
+If any test fails:
+1. Determine if the test is wrong or the implementation has a bug
+2. Fix the appropriate code
+3. Re-run tests until all pass
+
+Then run all project checks:
+{% for check in checks %}
+- `{{ check }}`
+{% endfor %}
+
+## Commit
+
+Once all tests pass and checks are green:
+`test({{ feature_slug }}): add unit and integration tests`

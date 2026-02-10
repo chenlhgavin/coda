@@ -1,0 +1,31 @@
+## Resume Context
+
+This is a **resumed execution**. The feature `{{ state.feature.slug }}` ({{ state.feature.id }}) was previously interrupted during the **{{ current_phase }}** phase.
+
+### Completed Phases
+
+{% for phase in completed_phases %}
+#### {{ loop.index }}. {{ phase.name }} — ✅ Completed
+- **Duration**: {{ phase.duration_secs }}s | **Turns**: {{ phase.turns }} | **Cost**: {{ phase.cost.input_tokens }} in / {{ phase.cost.output_tokens }} out
+- {{ phase.summary }}
+{% endfor %}
+
+### Current Phase: {{ current_phase }}
+
+Status: {{ current_phase_state.status }}
+{% if current_phase_state.started_at is defined %}
+Started at: {{ current_phase_state.started_at }}
+{% endif %}
+{% if current_phase_state.summary is defined %}
+Progress so far: {{ current_phase_state.summary }}
+{% endif %}
+
+### Git State
+
+- **Branch**: `{{ state.git.branch }}`
+- **Worktree**: `{{ state.git.worktree_path }}`
+- **Base**: `{{ state.git.base_branch }}`
+
+### Instructions
+
+**Continue from the `{{ current_phase }}` phase.** Do NOT repeat any work from completed phases. The codebase already contains all changes from previous phases. Pick up exactly where the previous execution left off.

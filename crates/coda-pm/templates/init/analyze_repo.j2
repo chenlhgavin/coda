@@ -1,0 +1,49 @@
+You are a senior software architect analyzing a repository structure.
+
+## Task
+
+Analyze the following repository tree and identify:
+1. **Important directories** — directories containing core source code, configuration, and infrastructure
+2. **Tech stack** — programming languages, frameworks, build tools, and key dependencies
+3. **Project type** — library, CLI tool, web service, monorepo, etc.
+4. **Architecture pattern** — if identifiable (e.g., layered, microservices, modular monolith)
+
+## Repository Tree
+
+```
+{{ repo_tree }}
+```
+
+## Sample Files
+
+The following files were sampled to help identify the tech stack:
+
+{% for sample in file_samples %}
+### `{{ sample.path }}`
+```
+{{ sample.content }}
+```
+{% endfor %}
+
+## Output Format
+
+Respond in valid YAML with the following structure:
+
+```yaml
+project_type: "<type>"
+tech_stack:
+  languages:
+    - "<language>"
+  frameworks:
+    - "<framework>"
+  build_tools:
+    - "<tool>"
+  key_dependencies:
+    - "<dependency>"
+important_dirs:
+  - path: "<dir>"
+    purpose: "<description>"
+ignore_dirs:
+  - "<dir>"
+architecture: "<brief description>"
+```

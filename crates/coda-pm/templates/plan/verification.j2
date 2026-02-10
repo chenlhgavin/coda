@@ -1,0 +1,66 @@
+Based on the following design specification, generate a verification plan.
+
+## Design Specification
+
+{{ design_spec }}
+
+## Pre-configured Checks
+
+The following checks are configured for this project:
+{% for check in checks %}
+- `{{ check }}`
+{% endfor %}
+
+## Output Format
+
+Generate a Markdown document with the following structure:
+
+```markdown
+# Verification Plan: {{ feature_slug }}
+
+## Automated Checks
+<List of automated checks that must pass>
+
+- [ ] All pre-configured checks pass:
+{% for check in checks %}
+  - [ ] `{{ check }}`
+{% endfor %}
+- [ ] All new tests pass
+- [ ] No regression in existing tests
+- [ ] Code coverage is maintained or improved
+
+## Functional Verification
+<Specific scenarios to verify the feature works correctly>
+
+- [ ] Scenario 1: <description>
+  - Input: <what to provide>
+  - Expected: <what should happen>
+
+- [ ] Scenario 2: <description>
+  ...
+
+## Edge Cases
+<Edge cases and error conditions to verify>
+
+- [ ] <edge case 1>
+- [ ] <edge case 2>
+
+## Integration Points
+<Verify integration with existing components>
+
+- [ ] <integration check 1>
+- [ ] <integration check 2>
+
+## Performance (if applicable)
+<Any performance criteria to verify>
+
+## Security (if applicable)
+<Security considerations to verify>
+```
+
+## Guidelines
+
+- Focus on behavioral verification, not implementation details
+- Each check should be independently verifiable
+- Include both happy path and error cases
+- Prioritize checks by importance (critical checks first)
