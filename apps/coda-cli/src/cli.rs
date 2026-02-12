@@ -1,10 +1,14 @@
 //! CLI argument parsing.
+//!
+//! Defines the command-line interface for CODA using clap.
+//! Supports three subcommands: `init`, `plan`, and `run`.
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 
 use crate::app::App;
 
+/// CODA - Claude Orchestrated Development Agent
 #[derive(Parser)]
 #[command(name = "coda")]
 #[command(
@@ -13,37 +17,39 @@ use crate::app::App;
     about = "CODA - Claude Orchestrated Development Agent"
 )]
 pub struct Cli {
+    /// Subcommand to execute.
     #[command(subcommand)]
-    command: Option<Commands>,
+    command: Commands,
 }
 
+/// Available CODA commands.
 #[derive(Subcommand)]
-enum Commands {
-    /// Start interactive TUI mode
-    Tui,
-    /// Run a single prompt
+pub enum Commands {
+    /// Initialize current repository as a CODA project.
+    Init,
+
+    /// Interactive feature planning.
+    Plan {
+        /// URL-safe feature slug (e.g., "add-user-auth").
+        feature_slug: String,
+    },
+
+    /// Execute feature development.
     Run {
-        /// The prompt to execute
-        #[arg(short, long)]
-        prompt: String,
+        /// URL-safe feature slug (e.g., "add-user-auth").
+        feature_slug: String,
     },
 }
 
 impl Cli {
+    /// Executes the parsed CLI command.
     pub async fn run(self) -> Result<()> {
+        let app = App::new().await?;
+
         match self.command {
-            Some(Commands::Tui) => {
-                let mut app = App::new();
-                app.run().await
-            }
-            Some(Commands::Run { prompt }) => {
-                let app = App::new();
-                app.execute(&prompt).await
-            }
-            None => {
-                let mut app = App::new();
-                app.run().await
-            }
+            Commands::Init => app.init().await,
+            Commands::Plan { feature_slug } => app.plan(&feature_slug).await,
+            Commands::Run { feature_slug } => app.run(&feature_slug).await,
         }
     }
 }

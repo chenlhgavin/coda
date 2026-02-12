@@ -1,11 +1,11 @@
 ---
 name: rust-code-review
-description: Review Rust code for quality, security, performance, and best practices following project coding standards. Uses GPT-5.3 Codex model. Use when reviewing pull requests, examining code changes, running code review, or when the user asks for a code review on Rust code.
+description: Review Rust code for quality, security, performance, and best practices following project coding standards. Use when reviewing pull requests, examining code changes, running code review, or when the user asks for a code review on Rust code.
 ---
 
 # Rust Code Review
 
-使用 GPT-5.3 Codex 模型对 Rust 代码进行全面审查，基于项目编码规范。
+对 Rust 代码进行全面审查，基于项目编码规范。建议在执行代码审查前，在 Cursor 模型选择器中切换到高能力模型以获得最佳审查效果。
 
 ## 前置步骤
 
@@ -146,14 +146,6 @@ Code Review Progress:
 - INFO: N 项
 - 总体评估：[APPROVE / REQUEST_CHANGES / COMMENT]
 ```
-
-## 使用 GPT-5.3 Codex 模型
-
-本 Skill 要求使用 **GPT-5.3 Codex** 模型执行审查，以获得最佳的代码理解和分析能力。审查时：
-
-1. 将代码变更和上述检查项作为 prompt 输入 Codex
-2. 要求 Codex 逐项检查并给出具体行号和修复建议
-3. 汇总 Codex 输出为上述反馈格式
 
 ## 快速命令
 

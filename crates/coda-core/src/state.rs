@@ -1,0 +1,383 @@
+//! Feature state types for tracking execution progress.
+//!
+//! Defines `FeatureState` which is persisted to `.coda/<feature>/state.yml`
+//! and supports resuming interrupted runs.
+
+use std::path::PathBuf;
+
+use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
+
+/// Complete state of a feature's execution, persisted to `state.yml`.
+///
+/// Tracks the progress of a feature through all execution phases,
+/// enabling crash recovery by resuming from the last completed phase.
+///
+/// # Examples
+///
+/// ```
+/// use coda_core::state::{FeatureState, FeatureStatus};
+///
+/// let yaml = r#"
+/// feature:
+///   id: "0001"
+///   slug: "add-auth"
+///   created_at: "2026-02-10T10:30:00Z"
+///   updated_at: "2026-02-10T10:30:00Z"
+/// status: planned
+/// current_phase: 0
+/// git:
+///   worktree_path: ".trees/0001-add-auth"
+///   branch: "feature/0001-add-auth"
+///   base_branch: "main"
+/// phases: []
+/// total:
+///   turns: 0
+///   cost_usd: 0.0
+///   cost:
+///     input_tokens: 0
+///     output_tokens: 0
+///   duration_secs: 0
+/// "#;
+///
+/// let state: FeatureState = serde_yaml::from_str(yaml).unwrap();
+/// assert_eq!(state.status, FeatureStatus::Planned);
+/// assert_eq!(state.feature.slug, "add-auth");
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FeatureState {
+    /// Basic feature metadata.
+    pub feature: FeatureInfo,
+
+    /// Overall feature execution status.
+    pub status: FeatureStatus,
+
+    /// Index of the current phase being executed (0-based).
+    pub current_phase: u32,
+
+    /// Git branch and worktree information.
+    pub git: GitInfo,
+
+    /// Records for each execution phase.
+    pub phases: Vec<PhaseRecord>,
+
+    /// Pull request information, populated after PR creation.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pr: Option<PrInfo>,
+
+    /// Cumulative statistics across all phases.
+    pub total: TotalStats,
+}
+
+/// Basic metadata identifying a feature.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FeatureInfo {
+    /// Feature identifier (e.g., `"0001"`).
+    pub id: String,
+
+    /// URL-safe feature slug (e.g., `"add-user-auth"`).
+    pub slug: String,
+
+    /// When this feature was created.
+    pub created_at: DateTime<Utc>,
+
+    /// When this feature was last updated.
+    pub updated_at: DateTime<Utc>,
+}
+
+/// Git branch and worktree details for a feature.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GitInfo {
+    /// Relative path to the git worktree.
+    pub worktree_path: PathBuf,
+
+    /// Branch name for this feature.
+    pub branch: String,
+
+    /// Base branch this feature was forked from.
+    pub base_branch: String,
+}
+
+/// Record of a single execution phase.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PhaseRecord {
+    /// Phase name (e.g., `"setup"`, `"implement"`, `"test"`).
+    pub name: String,
+
+    /// Current status of this phase.
+    pub status: PhaseStatus,
+
+    /// When execution of this phase started.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<DateTime<Utc>>,
+
+    /// When execution of this phase completed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub completed_at: Option<DateTime<Utc>>,
+
+    /// Number of agent conversation turns used.
+    pub turns: u32,
+
+    /// Total cost in USD for this phase.
+    pub cost_usd: f64,
+
+    /// Token usage breakdown.
+    pub cost: TokenCost,
+
+    /// Wall-clock duration in seconds.
+    pub duration_secs: u64,
+
+    /// Phase-specific details (flexible schema).
+    pub details: serde_json::Value,
+}
+
+/// Token usage breakdown for cost tracking.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct TokenCost {
+    /// Number of input tokens consumed.
+    pub input_tokens: u64,
+
+    /// Number of output tokens generated.
+    pub output_tokens: u64,
+}
+
+/// Pull request information for a completed feature.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PrInfo {
+    /// Full URL to the pull request.
+    pub url: String,
+
+    /// PR number in the repository.
+    pub number: u32,
+
+    /// PR title.
+    pub title: String,
+}
+
+/// Cumulative statistics across all phases.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TotalStats {
+    /// Total conversation turns across all phases.
+    pub turns: u32,
+
+    /// Total cost in USD across all phases.
+    pub cost_usd: f64,
+
+    /// Total token usage across all phases.
+    pub cost: TokenCost,
+
+    /// Total wall-clock duration in seconds.
+    pub duration_secs: u64,
+}
+
+/// Overall status of a feature.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum FeatureStatus {
+    /// Feature has been planned but not started.
+    Planned,
+    /// Feature is currently being executed.
+    InProgress,
+    /// Feature has been completed successfully.
+    Completed,
+    /// Feature execution failed.
+    Failed,
+}
+
+/// Status of an individual execution phase.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum PhaseStatus {
+    /// Phase has not started yet.
+    Pending,
+    /// Phase is currently executing.
+    Running,
+    /// Phase completed successfully.
+    Completed,
+    /// Phase failed.
+    Failed,
+}
+
+impl Default for TotalStats {
+    fn default() -> Self {
+        Self {
+            turns: 0,
+            cost_usd: 0.0,
+            cost: TokenCost::default(),
+            duration_secs: 0,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use super::*;
+
+    #[test]
+    fn test_should_serialize_feature_status() {
+        let status = FeatureStatus::InProgress;
+        let yaml = serde_yaml::to_string(&status).unwrap();
+        assert!(yaml.contains("in_progress"));
+    }
+
+    #[test]
+    fn test_should_serialize_phase_status() {
+        let status = PhaseStatus::Running;
+        let yaml = serde_yaml::to_string(&status).unwrap();
+        assert!(yaml.contains("running"));
+    }
+
+    #[test]
+    fn test_should_round_trip_token_cost() {
+        let cost = TokenCost {
+            input_tokens: 3000,
+            output_tokens: 1500,
+        };
+        let yaml = serde_yaml::to_string(&cost).unwrap();
+        let deserialized: TokenCost = serde_yaml::from_str(&yaml).unwrap();
+        assert_eq!(deserialized.input_tokens, 3000);
+        assert_eq!(deserialized.output_tokens, 1500);
+    }
+
+    #[test]
+    fn test_should_round_trip_feature_state() {
+        let now = chrono::Utc::now();
+        let state = FeatureState {
+            feature: FeatureInfo {
+                id: "0001".to_string(),
+                slug: "add-user-auth".to_string(),
+                created_at: now,
+                updated_at: now,
+            },
+            status: FeatureStatus::InProgress,
+            current_phase: 2,
+            git: GitInfo {
+                worktree_path: PathBuf::from(".trees/0001-add-user-auth"),
+                branch: "feature/0001-add-user-auth".to_string(),
+                base_branch: "main".to_string(),
+            },
+            phases: vec![
+                PhaseRecord {
+                    name: "setup".to_string(),
+                    status: PhaseStatus::Completed,
+                    started_at: Some(now),
+                    completed_at: Some(now),
+                    turns: 3,
+                    cost_usd: 0.12,
+                    cost: TokenCost {
+                        input_tokens: 3000,
+                        output_tokens: 1500,
+                    },
+                    duration_secs: 300,
+                    details: serde_json::json!({"files_created": 4}),
+                },
+                PhaseRecord {
+                    name: "implement".to_string(),
+                    status: PhaseStatus::Completed,
+                    started_at: Some(now),
+                    completed_at: Some(now),
+                    turns: 12,
+                    cost_usd: 1.85,
+                    cost: TokenCost {
+                        input_tokens: 25000,
+                        output_tokens: 12000,
+                    },
+                    duration_secs: 5100,
+                    details: serde_json::json!({"files_changed": 8}),
+                },
+                PhaseRecord {
+                    name: "test".to_string(),
+                    status: PhaseStatus::Running,
+                    started_at: Some(now),
+                    completed_at: None,
+                    turns: 5,
+                    cost_usd: 0.52,
+                    cost: TokenCost {
+                        input_tokens: 8000,
+                        output_tokens: 4000,
+                    },
+                    duration_secs: 900,
+                    details: serde_json::json!({"tests_added": 12}),
+                },
+            ],
+            pr: Some(PrInfo {
+                url: "https://github.com/org/repo/pull/42".to_string(),
+                number: 42,
+                title: "feat: add user authentication".to_string(),
+            }),
+            total: TotalStats {
+                turns: 20,
+                cost_usd: 2.49,
+                cost: TokenCost {
+                    input_tokens: 36000,
+                    output_tokens: 17500,
+                },
+                duration_secs: 6300,
+            },
+        };
+
+        let yaml = serde_yaml::to_string(&state).unwrap();
+        let deserialized: FeatureState = serde_yaml::from_str(&yaml).unwrap();
+
+        assert_eq!(deserialized.feature.id, "0001");
+        assert_eq!(deserialized.feature.slug, "add-user-auth");
+        assert_eq!(deserialized.status, FeatureStatus::InProgress);
+        assert_eq!(deserialized.current_phase, 2);
+        assert_eq!(deserialized.git.branch, "feature/0001-add-user-auth");
+        assert_eq!(deserialized.git.base_branch, "main");
+        assert_eq!(deserialized.phases.len(), 3);
+        assert_eq!(deserialized.phases[0].status, PhaseStatus::Completed);
+        assert_eq!(deserialized.phases[1].turns, 12);
+        assert_eq!(deserialized.phases[2].status, PhaseStatus::Running);
+        assert!(deserialized.pr.is_some());
+        assert_eq!(deserialized.pr.as_ref().unwrap().number, 42);
+        assert_eq!(deserialized.total.turns, 20);
+        assert!((deserialized.total.cost_usd - 2.49).abs() < f64::EPSILON);
+        assert_eq!(deserialized.total.cost.input_tokens, 36000);
+    }
+
+    #[test]
+    fn test_should_create_default_total_stats() {
+        let stats = TotalStats::default();
+        assert_eq!(stats.turns, 0);
+        assert!((stats.cost_usd - 0.0).abs() < f64::EPSILON);
+        assert_eq!(stats.cost.input_tokens, 0);
+        assert_eq!(stats.cost.output_tokens, 0);
+        assert_eq!(stats.duration_secs, 0);
+    }
+
+    #[test]
+    fn test_should_serialize_pr_info_as_none() {
+        let now = chrono::Utc::now();
+        let state = FeatureState {
+            feature: FeatureInfo {
+                id: "0001".to_string(),
+                slug: "test".to_string(),
+                created_at: now,
+                updated_at: now,
+            },
+            status: FeatureStatus::Planned,
+            current_phase: 0,
+            git: GitInfo {
+                worktree_path: PathBuf::from(".trees/0001-test"),
+                branch: "feature/0001-test".to_string(),
+                base_branch: "main".to_string(),
+            },
+            phases: vec![],
+            pr: None,
+            total: TotalStats::default(),
+        };
+
+        let yaml = serde_yaml::to_string(&state).unwrap();
+        // pr field should be omitted entirely when None
+        assert!(!yaml.contains("pr:"));
+
+        let deserialized: FeatureState = serde_yaml::from_str(&yaml).unwrap();
+        assert!(deserialized.pr.is_none());
+        assert_eq!(deserialized.status, FeatureStatus::Planned);
+    }
+}

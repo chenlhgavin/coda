@@ -1,9 +1,11 @@
 //! CODA CLI - Command Line Interface
 //!
-//! A terminal-based interface for CODA.
+//! Entry point for the CODA development agent. Initializes tracing,
+//! parses CLI arguments, and dispatches to the appropriate command handler.
 
 mod app;
 mod cli;
+#[allow(dead_code)]
 mod ui;
 
 use anyhow::Result;

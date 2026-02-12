@@ -1,35 +1,220 @@
-//! Application state and logic.
+//! Application state and command dispatch logic.
+//!
+//! The `App` struct wraps the core [`Engine`](coda_core::Engine) and
+//! dispatches CLI commands to the appropriate engine methods, providing
+//! user-facing progress display and timing information.
+
+use std::time::Instant;
 
 use anyhow::Result;
 use coda_core::Engine;
+use tracing::error;
 
-use crate::ui::Ui;
+use crate::ui::PlanUi;
 
+/// Application state holding the core engine.
 pub struct App {
+    /// Core execution engine for CODA operations.
     engine: Engine,
 }
 
-impl App {
-    pub fn new() -> Self {
-        Self {
-            engine: Engine::new(),
-        }
-    }
-
-    pub async fn run(&mut self) -> Result<()> {
-        let mut ui = Ui::new()?;
-        ui.run(&mut self.engine).await
-    }
-
-    pub async fn execute(&self, prompt: &str) -> Result<()> {
-        let result = self.engine.run(prompt).await?;
-        println!("{}", result);
-        Ok(())
+impl std::fmt::Debug for App {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("App").field("engine", &self.engine).finish()
     }
 }
 
-impl Default for App {
-    fn default() -> Self {
-        Self::new()
+impl App {
+    /// Creates a new application instance by discovering the project root
+    /// and initializing the engine.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the project root cannot be found or the engine
+    /// fails to initialize.
+    pub async fn new() -> Result<Self> {
+        let project_root = coda_core::find_project_root().or_else(|_| {
+            std::env::current_dir().map_err(|e| {
+                coda_core::CoreError::ConfigError(format!("Cannot determine project root: {e}"))
+            })
+        })?;
+
+        let engine = Engine::new(project_root).await?;
+        Ok(Self { engine })
+    }
+
+    /// Handles the `coda init` command.
+    ///
+    /// Runs the init flow (analyze repo + setup project) and prints a
+    /// success message.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if initialization fails (e.g., already initialized,
+    /// agent SDK errors).
+    pub async fn init(&self) -> Result<()> {
+        println!(
+            "Initializing CODA in {}...",
+            self.engine.project_root().display()
+        );
+        match self.engine.init().await {
+            Ok(()) => {
+                println!("CODA project initialized successfully!");
+                println!("  Created .coda/ directory with config.yml");
+                println!("  Created .trees/ directory for worktrees");
+                println!("  Generated .coda.md repository overview");
+                println!(
+                    "\nNext step: run `coda plan <feature-slug>` to start planning a feature."
+                );
+                Ok(())
+            }
+            Err(e) => {
+                error!("Init failed: {e}");
+                Err(e.into())
+            }
+        }
+    }
+
+    /// Handles the `coda plan <feature_slug>` command.
+    ///
+    /// Opens an interactive ratatui chat interface for multi-turn
+    /// conversation with the planning agent. When the user types `/done`,
+    /// the session is finalized and artifacts are generated.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the planning session or UI fails.
+    pub async fn plan(&self, feature_slug: &str) -> Result<()> {
+        let mut session = self.engine.plan(feature_slug)?;
+        let mut ui = PlanUi::new()?;
+
+        match ui.run_plan(&mut session).await? {
+            Some(output) => {
+                // UI is dropped here (restores terminal)
+                drop(ui);
+                println!("Planning complete!");
+                println!("  Design spec: {}", output.design_spec.display());
+                println!("  Verification: {}", output.verification.display());
+                println!("  State: {}", output.state.display());
+                println!("  Worktree: {}", output.worktree.display());
+                println!("\nNext step: run `coda run {feature_slug}` to execute the plan.");
+            }
+            None => {
+                drop(ui);
+                println!("Planning cancelled.");
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Handles the `coda run <feature_slug>` command.
+    ///
+    /// Executes all remaining phases and displays phase-by-phase progress
+    /// with timing information and a final summary.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the run fails.
+    pub async fn run(&self, feature_slug: &str) -> Result<()> {
+        let run_start = Instant::now();
+
+        println!();
+        println!("  CODA Run: {feature_slug}");
+        println!("  ═══════════════════════════════════════");
+        println!();
+        println!("  Phases: setup → implement → test → review → verify → PR");
+        println!();
+
+        match self.engine.run(feature_slug).await {
+            Ok(results) => {
+                let total_elapsed = run_start.elapsed();
+
+                println!();
+                println!("  ═══════════════════════════════════════");
+                println!("  Run completed successfully!");
+                println!("  ─────────────────────────────────────");
+                println!();
+
+                let mut total_turns = 0u32;
+                let mut total_cost = 0.0f64;
+
+                for result in &results {
+                    let (status_icon, status_style) = match &result.status {
+                        coda_core::TaskStatus::Completed => ("✓", ""),
+                        coda_core::TaskStatus::Failed { error } => ("✗", error.as_str()),
+                        _ => ("?", "unknown status"),
+                    };
+
+                    let phase_name = format_task_name(&result.task);
+                    let duration = format_duration(result.duration);
+
+                    println!(
+                        "  [{status_icon}] {phase_name:<12} {duration:>8}  {turns:>3} turns  ${cost:.4}",
+                        turns = result.turns,
+                        cost = result.cost_usd
+                    );
+
+                    if !status_style.is_empty() {
+                        println!("      Error: {status_style}");
+                    }
+
+                    total_turns += result.turns;
+                    total_cost += result.cost_usd;
+                }
+
+                println!();
+                println!("  ─────────────────────────────────────");
+                println!(
+                    "  Total: {} elapsed, {total_turns} turns, ${total_cost:.4} USD",
+                    format_duration(total_elapsed)
+                );
+                println!("  ═══════════════════════════════════════");
+                println!();
+
+                Ok(())
+            }
+            Err(e) => {
+                let elapsed = run_start.elapsed();
+                error!("Run failed after {}: {e}", format_duration(elapsed));
+                println!();
+                println!("  [✗] Run failed after {}", format_duration(elapsed));
+                println!("      Error: {e}");
+                println!();
+                Err(e.into())
+            }
+        }
+    }
+}
+
+/// Formats a `Duration` into a human-readable string (e.g., `"1m 23s"`, `"45s"`).
+fn format_duration(d: std::time::Duration) -> String {
+    let total_secs = d.as_secs();
+    if total_secs >= 3600 {
+        let hours = total_secs / 3600;
+        let mins = (total_secs % 3600) / 60;
+        let secs = total_secs % 60;
+        format!("{hours}h {mins}m {secs}s")
+    } else if total_secs >= 60 {
+        let mins = total_secs / 60;
+        let secs = total_secs % 60;
+        format!("{mins}m {secs}s")
+    } else {
+        format!("{total_secs}s")
+    }
+}
+
+/// Formats a `Task` variant into a short phase display name.
+fn format_task_name(task: &coda_core::Task) -> &'static str {
+    match task {
+        coda_core::Task::Init => "init",
+        coda_core::Task::Plan { .. } => "plan",
+        coda_core::Task::Setup { .. } => "setup",
+        coda_core::Task::Implement { .. } => "implement",
+        coda_core::Task::Test { .. } => "test",
+        coda_core::Task::Review { .. } => "review",
+        coda_core::Task::Verify { .. } => "verify",
+        coda_core::Task::CreatePr { .. } => "create-pr",
+        _ => "unknown",
     }
 }
