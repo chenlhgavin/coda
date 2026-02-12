@@ -81,6 +81,11 @@ pub struct GitConfig {
     /// Prefix for feature branch names (e.g., `"feature"` produces
     /// `feature/0001-slug`).
     pub branch_prefix: String,
+
+    /// Base branch to fork feature worktrees from (e.g., `"main"` or
+    /// `"master"`). When set to `"auto"`, the actual default branch is
+    /// detected at runtime via `git symbolic-ref`.
+    pub base_branch: String,
 }
 
 /// Code review configuration.
@@ -135,6 +140,7 @@ impl Default for GitConfig {
         Self {
             auto_commit: true,
             branch_prefix: "feature".to_string(),
+            base_branch: "auto".to_string(),
         }
     }
 }

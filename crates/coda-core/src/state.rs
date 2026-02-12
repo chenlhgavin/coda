@@ -3,7 +3,7 @@
 //! Defines `FeatureState` which is persisted to `.coda/<feature>/state.yml`
 //! and supports resuming interrupted runs.
 
-use std::path::PathBuf;
+use std::path::{Component, PathBuf};
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -67,6 +67,49 @@ pub struct FeatureState {
 
     /// Cumulative statistics across all phases.
     pub total: TotalStats,
+}
+
+/// Expected number of execution phases.
+const EXPECTED_PHASE_COUNT: usize = 5;
+
+impl FeatureState {
+    /// Validates structural invariants after deserialization.
+    ///
+    /// Checks that `phases` has the expected length, `current_phase` is
+    /// within bounds, and `worktree_path` does not contain parent-directory
+    /// references (`..`) that could cause path traversal.
+    ///
+    /// # Errors
+    ///
+    /// Returns a human-readable error description when validation fails.
+    pub fn validate(&self) -> Result<(), String> {
+        if self.phases.len() != EXPECTED_PHASE_COUNT {
+            return Err(format!(
+                "expected {EXPECTED_PHASE_COUNT} phases, found {}",
+                self.phases.len(),
+            ));
+        }
+
+        if (self.current_phase as usize) > self.phases.len() {
+            return Err(format!(
+                "current_phase {} exceeds phases count {}",
+                self.current_phase,
+                self.phases.len(),
+            ));
+        }
+
+        // Reject worktree paths that escape the project root via `..`
+        for component in self.git.worktree_path.components() {
+            if matches!(component, Component::ParentDir) {
+                return Err(format!(
+                    "worktree_path '{}' contains parent directory traversal",
+                    self.git.worktree_path.display(),
+                ));
+            }
+        }
+
+        Ok(())
+    }
 }
 
 /// Basic metadata identifying a feature.
@@ -370,6 +413,104 @@ mod tests {
         assert_eq!(stats.cost.input_tokens, 0);
         assert_eq!(stats.cost.output_tokens, 0);
         assert_eq!(stats.duration_secs, 0);
+    }
+
+    #[test]
+    fn test_should_validate_correct_state() {
+        let now = chrono::Utc::now();
+        let state = FeatureState {
+            feature: FeatureInfo {
+                id: "0001".to_string(),
+                slug: "test".to_string(),
+                created_at: now,
+                updated_at: now,
+            },
+            status: FeatureStatus::Planned,
+            current_phase: 0,
+            git: GitInfo {
+                worktree_path: PathBuf::from(".trees/0001-test"),
+                branch: "feature/0001-test".to_string(),
+                base_branch: "main".to_string(),
+            },
+            phases: (0..5)
+                .map(|i| PhaseRecord {
+                    name: format!("phase-{i}"),
+                    status: PhaseStatus::Pending,
+                    started_at: None,
+                    completed_at: None,
+                    turns: 0,
+                    cost_usd: 0.0,
+                    cost: TokenCost::default(),
+                    duration_secs: 0,
+                    details: serde_json::json!({}),
+                })
+                .collect(),
+            pr: None,
+            total: TotalStats::default(),
+        };
+        assert!(state.validate().is_ok());
+    }
+
+    #[test]
+    fn test_should_reject_wrong_phase_count() {
+        let now = chrono::Utc::now();
+        let state = FeatureState {
+            feature: FeatureInfo {
+                id: "0001".to_string(),
+                slug: "test".to_string(),
+                created_at: now,
+                updated_at: now,
+            },
+            status: FeatureStatus::Planned,
+            current_phase: 0,
+            git: GitInfo {
+                worktree_path: PathBuf::from(".trees/0001-test"),
+                branch: "feature/0001-test".to_string(),
+                base_branch: "main".to_string(),
+            },
+            phases: vec![], // wrong: should be 5
+            pr: None,
+            total: TotalStats::default(),
+        };
+        let err = state.validate().unwrap_err();
+        assert!(err.contains("expected 5 phases"));
+    }
+
+    #[test]
+    fn test_should_reject_path_traversal_in_worktree() {
+        let now = chrono::Utc::now();
+        let state = FeatureState {
+            feature: FeatureInfo {
+                id: "0001".to_string(),
+                slug: "test".to_string(),
+                created_at: now,
+                updated_at: now,
+            },
+            status: FeatureStatus::Planned,
+            current_phase: 0,
+            git: GitInfo {
+                worktree_path: PathBuf::from("../../etc/shadow"),
+                branch: "feature/0001-test".to_string(),
+                base_branch: "main".to_string(),
+            },
+            phases: (0..5)
+                .map(|i| PhaseRecord {
+                    name: format!("phase-{i}"),
+                    status: PhaseStatus::Pending,
+                    started_at: None,
+                    completed_at: None,
+                    turns: 0,
+                    cost_usd: 0.0,
+                    cost: TokenCost::default(),
+                    duration_secs: 0,
+                    details: serde_json::json!({}),
+                })
+                .collect(),
+            pr: None,
+            total: TotalStats::default(),
+        };
+        let err = state.validate().unwrap_err();
+        assert!(err.contains("parent directory traversal"));
     }
 
     #[test]

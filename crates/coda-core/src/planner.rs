@@ -210,8 +210,14 @@ impl PlanSession {
         debug!(path = %verification_path.display(), "Wrote verification plan");
 
         // Create git worktree
+        let base_branch = detect_default_branch(&self.project_root, &self.config.git.base_branch);
         let branch_name = format!("{}/{}", self.config.git.branch_prefix, feature_dir_name);
-        create_worktree(&self.project_root, &worktree_path, &branch_name)?;
+        create_worktree(
+            &self.project_root,
+            &worktree_path,
+            &branch_name,
+            &base_branch,
+        )?;
         info!(
             branch = %branch_name,
             worktree = %worktree_path.display(),
@@ -224,6 +230,7 @@ impl PlanSession {
             &self.feature_slug,
             &worktree_path,
             &branch_name,
+            &base_branch,
         );
         let state_path = coda_feature_dir.join("state.yml");
         let state_yaml = serde_yaml::to_string(&state)?;
@@ -273,11 +280,12 @@ impl std::fmt::Debug for PlanSession {
     }
 }
 
-/// Creates a git worktree at `worktree_path` with a new branch from `main`.
+/// Creates a git worktree at `worktree_path` with a new branch from `base_branch`.
 fn create_worktree(
     project_root: &Path,
     worktree_path: &Path,
     branch: &str,
+    base_branch: &str,
 ) -> Result<(), CoreError> {
     if let Some(parent) = worktree_path.parent() {
         std::fs::create_dir_all(parent).map_err(CoreError::IoError)?;
@@ -290,7 +298,7 @@ fn create_worktree(
             &worktree_path.display().to_string(),
             "-b",
             branch,
-            "main",
+            base_branch,
         ])
         .current_dir(project_root)
         .output()
@@ -299,11 +307,41 @@ fn create_worktree(
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(CoreError::GitError(format!(
-            "Failed to create worktree: {stderr}"
+            "Failed to create worktree from '{base_branch}': {stderr}"
         )));
     }
 
     Ok(())
+}
+
+/// Detects the repository's default branch.
+///
+/// When `configured` is `"auto"`, queries git for the default branch via
+/// `symbolic-ref`. Otherwise returns the configured value as-is.
+fn detect_default_branch(project_root: &Path, configured: &str) -> String {
+    if configured != "auto" {
+        return configured.to_string();
+    }
+
+    // Try git symbolic-ref to find what origin/HEAD points to
+    let output = std::process::Command::new("git")
+        .args(["symbolic-ref", "refs/remotes/origin/HEAD", "--short"])
+        .current_dir(project_root)
+        .output();
+
+    if let Ok(output) = output
+        && output.status.success()
+    {
+        let branch = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        // Output is like "origin/main" – strip the remote prefix
+        if let Some(name) = branch.strip_prefix("origin/") {
+            return name.to_string();
+        }
+        return branch;
+    }
+
+    // Fallback: "main" is the most common default
+    "main".to_string()
 }
 
 /// Builds an initial `FeatureState` for a newly planned feature.
@@ -315,6 +353,7 @@ pub(crate) fn build_initial_state(
     feature_slug: &str,
     worktree_path: &Path,
     branch: &str,
+    base_branch: &str,
 ) -> FeatureState {
     let now = chrono::Utc::now();
 
@@ -345,7 +384,7 @@ pub(crate) fn build_initial_state(
         git: GitInfo {
             worktree_path: worktree_path.to_path_buf(),
             branch: branch.to_string(),
-            base_branch: "main".to_string(),
+            base_branch: base_branch.to_string(),
         },
         phases,
         pr: None,
@@ -360,7 +399,13 @@ mod tests {
     #[test]
     fn test_should_build_initial_state_with_correct_structure() {
         let worktree = PathBuf::from(".trees/0001-add-auth");
-        let state = build_initial_state("0001", "add-auth", &worktree, "feature/0001-add-auth");
+        let state = build_initial_state(
+            "0001",
+            "add-auth",
+            &worktree,
+            "feature/0001-add-auth",
+            "main",
+        );
 
         // Feature info
         assert_eq!(state.feature.id, "0001");
@@ -411,8 +456,13 @@ mod tests {
     #[test]
     fn test_should_build_initial_state_serializable_to_yaml() {
         let worktree = PathBuf::from(".trees/0002-new-feature");
-        let state =
-            build_initial_state("0002", "new-feature", &worktree, "feature/0002-new-feature");
+        let state = build_initial_state(
+            "0002",
+            "new-feature",
+            &worktree,
+            "feature/0002-new-feature",
+            "main",
+        );
 
         let yaml = serde_yaml::to_string(&state).unwrap();
         assert!(yaml.contains("planned"));

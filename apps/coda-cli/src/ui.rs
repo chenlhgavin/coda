@@ -45,17 +45,27 @@ impl PlanUi {
     /// Returns an error if terminal setup fails.
     pub fn new() -> Result<Self> {
         enable_raw_mode()?;
-        let mut stdout = io::stdout();
-        execute!(stdout, EnterAlternateScreen)?;
-        let backend = CrosstermBackend::new(stdout);
-        let terminal = Terminal::new(backend)?;
-        Ok(Self {
-            terminal,
-            messages: Vec::new(),
-            input: String::new(),
-            scroll_offset: 0,
-            status: "Type your message and press Enter. /done to finalize, /quit to exit."
-                .to_string(),
+
+        // After enabling raw mode, any failure must restore terminal state.
+        // Use a closure + inspect_err so cleanup runs on every error path.
+        let init = || -> Result<Self> {
+            let mut stdout = io::stdout();
+            execute!(stdout, EnterAlternateScreen)?;
+            let backend = CrosstermBackend::new(stdout);
+            let terminal = Terminal::new(backend)?;
+            Ok(Self {
+                terminal,
+                messages: Vec::new(),
+                input: String::new(),
+                scroll_offset: 0,
+                status: "Type your message and press Enter. /done to finalize, /quit to exit."
+                    .to_string(),
+            })
+        };
+
+        init().inspect_err(|_| {
+            let _ = execute!(io::stdout(), LeaveAlternateScreen);
+            let _ = disable_raw_mode();
         })
     }
 

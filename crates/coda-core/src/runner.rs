@@ -100,10 +100,17 @@ impl Runner {
         let feature_dir = find_feature_dir(&project_root, feature_slug)?;
         let state_path = feature_dir.join("state.yml");
 
-        // Load state
+        // Load and validate state
         let state_content = std::fs::read_to_string(&state_path)
             .map_err(|e| CoreError::StateError(format!("Cannot read state.yml: {e}")))?;
         let state: FeatureState = serde_yaml::from_str(&state_content)?;
+
+        state.validate().map_err(|e| {
+            CoreError::StateError(format!(
+                "Invalid state.yml at {}: {e}",
+                state_path.display()
+            ))
+        })?;
 
         let worktree_path = project_root.join(&state.git.worktree_path);
 
@@ -716,24 +723,22 @@ impl Runner {
 
     /// Gets the git diff of all changes from the base branch.
     fn get_diff(&self) -> Result<String, CoreError> {
-        let output = std::process::Command::new("git")
-            .args(["diff", &self.state.git.base_branch, "HEAD"])
-            .current_dir(&self.worktree_path)
-            .output()
-            .map_err(CoreError::IoError)?;
-
-        Ok(String::from_utf8_lossy(&output.stdout).to_string())
+        run_command(
+            "git",
+            &["diff", &self.state.git.base_branch, "HEAD"],
+            &self.worktree_path,
+        )
     }
 
     /// Gets a list of files changed from the base branch.
     fn get_changed_files(&self) -> Result<Vec<String>, CoreError> {
-        let output = std::process::Command::new("git")
-            .args(["diff", "--name-only", &self.state.git.base_branch, "HEAD"])
-            .current_dir(&self.worktree_path)
-            .output()
-            .map_err(CoreError::IoError)?;
+        let stdout = run_command(
+            "git",
+            &["diff", "--name-only", &self.state.git.base_branch, "HEAD"],
+            &self.worktree_path,
+        )?;
 
-        let files = String::from_utf8_lossy(&output.stdout)
+        let files = stdout
             .lines()
             .filter(|l| !l.is_empty())
             .map(String::from)
@@ -744,18 +749,14 @@ impl Runner {
 
     /// Gets the list of commits from the base branch to HEAD.
     fn get_commits(&self) -> Result<Vec<CommitInfo>, CoreError> {
-        let output = std::process::Command::new("git")
-            .args([
-                "log",
-                &format!("{}..HEAD", self.state.git.base_branch),
-                "--oneline",
-                "--no-decorate",
-            ])
-            .current_dir(&self.worktree_path)
-            .output()
-            .map_err(CoreError::IoError)?;
+        let range = format!("{}..HEAD", self.state.git.base_branch);
+        let stdout = run_command(
+            "git",
+            &["log", &range, "--oneline", "--no-decorate"],
+            &self.worktree_path,
+        )?;
 
-        let commits = String::from_utf8_lossy(&output.stdout)
+        let commits = stdout
             .lines()
             .filter(|l| !l.is_empty())
             .filter_map(|line| {
@@ -771,8 +772,9 @@ impl Runner {
 
     /// Gathers a simple tree listing of the worktree.
     fn gather_worktree_tree(&self) -> Result<String, CoreError> {
-        let output = std::process::Command::new("find")
-            .args([
+        run_command(
+            "find",
+            &[
                 ".",
                 "-not",
                 "-path",
@@ -782,12 +784,9 @@ impl Runner {
                 "./target/*",
                 "-type",
                 "f",
-            ])
-            .current_dir(&self.worktree_path)
-            .output()
-            .map_err(CoreError::IoError)?;
-
-        Ok(String::from_utf8_lossy(&output.stdout).to_string())
+            ],
+            &self.worktree_path,
+        )
     }
 
     /// Builds resume context for interrupted executions.
@@ -866,6 +865,30 @@ impl std::fmt::Debug for Runner {
 }
 
 // ── Free Functions ──────────────────────────────────────────────────
+
+/// Runs an external command and returns its stdout, checking the exit status.
+///
+/// # Errors
+///
+/// Returns `CoreError::GitError` if the command exits with a non-zero status,
+/// including the captured stderr for diagnostics.
+fn run_command(cmd: &str, args: &[&str], cwd: &Path) -> Result<String, CoreError> {
+    let output = std::process::Command::new(cmd)
+        .args(args)
+        .current_dir(cwd)
+        .output()
+        .map_err(CoreError::IoError)?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(CoreError::GitError(format!(
+            "{cmd} {} failed: {stderr}",
+            args.join(" "),
+        )));
+    }
+
+    Ok(String::from_utf8_lossy(&output.stdout).to_string())
+}
 
 /// Finds the `.coda/<id>-<slug>` directory for a feature by its slug.
 ///
@@ -998,8 +1021,15 @@ fn parse_verification_result(response: &str) -> (u32, Vec<String>) {
         }
     }
 
-    // If we can't parse, assume it passed (the agent's response might not be YAML)
-    (0, Vec::new())
+    // If we can't parse, treat as a failure to avoid false positives.
+    // The verification loop will ask the agent to fix / re-run, or exhaust retries.
+    (
+        0,
+        vec![
+            "Unable to parse verification result from agent response. Manual review required."
+                .to_string(),
+        ],
+    )
 }
 
 /// Extracts a YAML code block from a response string.
@@ -1278,11 +1308,12 @@ result: "passed"
     }
 
     #[test]
-    fn test_should_parse_verification_with_unparsable_response() {
+    fn test_should_treat_unparsable_verification_as_failure() {
         let text = "All tests passed successfully!";
         let (passed, failed) = parse_verification_result(text);
-        // When we can't parse, returns (0, []) as a fallback
+        // Unparsable responses must not be treated as "all passed"
         assert_eq!(passed, 0);
-        assert!(failed.is_empty());
+        assert_eq!(failed.len(), 1);
+        assert!(failed[0].contains("Unable to parse"));
     }
 }
