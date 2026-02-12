@@ -45,7 +45,8 @@ const PHASE_NAMES: &[&str] = &["setup", "implement", "test", "review", "verify"]
 ///
 /// 1. Create via [`PlanSession::new`]
 /// 2. Call [`send`](Self::send) repeatedly for conversation turns
-/// 3. Call [`finalize`](Self::finalize) to generate specs and create a worktree
+/// 3. Call [`approve`](Self::approve) to formalize the approved design
+/// 4. Call [`finalize`](Self::finalize) to write specs and create a worktree
 pub struct PlanSession {
     client: ClaudeClient,
     feature_slug: String,
@@ -54,6 +55,8 @@ pub struct PlanSession {
     pm: PromptManager,
     config: CodaConfig,
     connected: bool,
+    /// The formalized design spec produced by [`approve`](Self::approve).
+    approved_design: Option<String>,
 }
 
 impl PlanSession {
@@ -96,6 +99,7 @@ impl PlanSession {
             pm: pm.clone(),
             config: config.clone(),
             connected: false,
+            approved_design: None,
         })
     }
 
@@ -154,6 +158,35 @@ impl PlanSession {
         Ok(response)
     }
 
+    /// Formalizes the approved design by asking the agent to produce
+    /// a structured design specification document.
+    ///
+    /// Stores the result in `approved_design` so that [`finalize`](Self::finalize)
+    /// can write it directly without re-generating.
+    ///
+    /// # Errors
+    ///
+    /// Returns `CoreError` if template rendering or agent communication fails.
+    pub async fn approve(&mut self) -> Result<String, CoreError> {
+        let approve_prompt = self.pm.render(
+            "plan/approve",
+            minijinja::context!(
+                feature_slug => &self.feature_slug,
+                feature_id => &self.feature_id,
+            ),
+        )?;
+
+        let design = self.send(&approve_prompt).await?;
+        self.approved_design = Some(design.clone());
+        info!("Design approved and formalized");
+        Ok(design)
+    }
+
+    /// Returns `true` if the design has been approved via [`approve`](Self::approve).
+    pub fn is_approved(&self) -> bool {
+        self.approved_design.is_some()
+    }
+
     /// Finalizes the planning session by generating specs and creating a worktree.
     ///
     /// This method:
@@ -173,21 +206,18 @@ impl PlanSession {
         let specs_dir = coda_feature_dir.join("specs");
         let worktree_path = self.project_root.join(".trees").join(&feature_dir_name);
 
+        // Guard: design must be approved before finalizing
+        let design_content = self.approved_design.take().ok_or_else(|| {
+            CoreError::PlanError(
+                "Cannot finalize: design has not been approved. Use /approve first.".to_string(),
+            )
+        })?;
+
         // Create directories
         std::fs::create_dir_all(&specs_dir).map_err(CoreError::IoError)?;
 
-        // Generate design spec via agent
-        info!("Generating design specification...");
-        let design_prompt = self.pm.render(
-            "plan/design_spec",
-            minijinja::context!(
-                feature_slug => &self.feature_slug,
-                feature_id => &self.feature_id,
-                conversation_history => "Based on our conversation above",
-            ),
-        )?;
-        let design_content = self.send(&design_prompt).await?;
-
+        // Write the approved design spec directly (no re-generation needed)
+        info!("Writing approved design specification...");
         let design_spec_path = specs_dir.join("design.md");
         std::fs::write(&design_spec_path, &design_content).map_err(CoreError::IoError)?;
         debug!(path = %design_spec_path.display(), "Wrote design spec");

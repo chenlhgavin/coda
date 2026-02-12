@@ -5,6 +5,7 @@
 
 mod app;
 mod cli;
+mod line_editor;
 #[allow(dead_code)]
 mod ui;
 

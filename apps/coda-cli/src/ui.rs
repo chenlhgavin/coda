@@ -14,13 +14,53 @@ use crossterm::{
 };
 use ratatui::{
     prelude::*,
-    widgets::{Block, Borders, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Wrap},
+    widgets::{
+        Block, BorderType, Borders, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState,
+        Wrap,
+    },
 };
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 /// Role label for user messages in the chat history.
 const USER_ROLE: &str = "You";
 /// Role label for agent messages in the chat history.
-const AGENT_ROLE: &str = "Agent";
+const AGENT_ROLE: &str = "Assistant";
+
+/// Border color used throughout the plan UI.
+const BORDER_COLOR: Color = Color::Cyan;
+
+/// Input prompt displayed before the cursor.
+const INPUT_PROMPT: &str = "> ";
+
+/// Spinner animation frames for the thinking indicator.
+const SPINNER_FRAMES: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+
+/// Current phase of the planning session, displayed in the header.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PlanPhase {
+    /// Waiting for user input — discussing the design.
+    Discussing,
+    /// Agent is processing a response.
+    Thinking,
+    /// Agent is formalizing the approved design.
+    Approving,
+    /// Design has been approved, ready to finalize.
+    Approved,
+    /// Generating final specs and worktree.
+    Finalizing,
+}
+
+impl std::fmt::Display for PlanPhase {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Discussing => write!(f, "Discussing"),
+            Self::Thinking => write!(f, "Thinking"),
+            Self::Approving => write!(f, "Approving"),
+            Self::Approved => write!(f, "Approved"),
+            Self::Finalizing => write!(f, "Finalizing"),
+        }
+    }
+}
 
 /// A single message in the chat history.
 struct ChatMessage {
@@ -32,9 +72,10 @@ struct ChatMessage {
 pub struct PlanUi {
     terminal: Terminal<CrosstermBackend<Stdout>>,
     messages: Vec<ChatMessage>,
-    input: String,
+    editor: crate::line_editor::LineEditor,
     scroll_offset: u16,
-    status: String,
+    feature_slug: String,
+    phase: PlanPhase,
 }
 
 impl PlanUi {
@@ -56,10 +97,10 @@ impl PlanUi {
             Ok(Self {
                 terminal,
                 messages: Vec::new(),
-                input: String::new(),
+                editor: crate::line_editor::LineEditor::new(),
                 scroll_offset: 0,
-                status: "Type your message and press Enter. /done to finalize, /quit to exit."
-                    .to_string(),
+                feature_slug: String::new(),
+                phase: PlanPhase::Discussing,
             })
         };
 
@@ -80,10 +121,15 @@ impl PlanUi {
     /// Returns an error if terminal I/O, agent communication, or
     /// finalization fails.
     pub async fn run_plan(&mut self, session: &mut PlanSession) -> Result<Option<PlanOutput>> {
+        self.feature_slug = session.feature_slug().to_string();
+        self.phase = PlanPhase::Discussing;
+
         self.messages.push(ChatMessage {
             role: AGENT_ROLE.to_string(),
             content: format!(
-                "Welcome! Let's plan feature '{}'. Please describe what you'd like to build.",
+                "I'm ready to help you plan the **{}** feature.\n\n\
+                 Can you tell me more about what you want this feature to do? \
+                 Include any requirements, constraints, or specs you have in mind.",
                 session.feature_slug()
             ),
         });
@@ -99,73 +145,255 @@ impl PlanUi {
                     continue;
                 }
 
+                // Global keybindings (not delegated to line editor)
                 match key.code {
-                    KeyCode::Enter => {
-                        let input = self.input.trim().to_string();
-                        if input.is_empty() {
-                            continue;
-                        }
-                        self.input.clear();
-
-                        // Handle special commands
-                        if input == "/quit" {
-                            return Ok(None);
-                        }
-
-                        if input == "/done" {
-                            self.status = "Finalizing plan...".to_string();
-                            self.draw()?;
-
-                            let output = session.finalize().await?;
-                            return Ok(Some(output));
-                        }
-
-                        // Add user message to history
-                        self.messages.push(ChatMessage {
-                            role: USER_ROLE.to_string(),
-                            content: input.clone(),
-                        });
-                        self.scroll_to_bottom();
-
-                        // Send to agent and get response
-                        self.status = "Agent is thinking...".to_string();
-                        self.draw()?;
-
-                        match session.send(&input).await {
-                            Ok(response) => {
-                                self.messages.push(ChatMessage {
-                                    role: AGENT_ROLE.to_string(),
-                                    content: response,
-                                });
-                                self.scroll_to_bottom();
-                                self.status = "Type your message and press Enter. /done to finalize, /quit to exit.".to_string();
-                            }
-                            Err(e) => {
-                                self.status = format!("Error: {e}");
-                            }
-                        }
-                    }
                     KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                         return Ok(None);
                     }
-                    KeyCode::Char(c) => {
-                        self.input.push(c);
+                    KeyCode::Esc => return Ok(None),
+                    KeyCode::PageUp => {
+                        self.scroll_offset = self.scroll_offset.saturating_add(10);
+                        continue;
                     }
-                    KeyCode::Backspace => {
-                        self.input.pop();
+                    KeyCode::PageDown => {
+                        self.scroll_offset = self.scroll_offset.saturating_sub(10);
+                        continue;
                     }
                     KeyCode::Up => {
                         self.scroll_offset = self.scroll_offset.saturating_add(1);
+                        continue;
                     }
                     KeyCode::Down => {
                         self.scroll_offset = self.scroll_offset.saturating_sub(1);
-                    }
-                    KeyCode::Esc => {
-                        return Ok(None);
+                        continue;
                     }
                     _ => {}
                 }
+
+                // Submit on Enter
+                if key.code == KeyCode::Enter {
+                    let input = self.editor.take_trimmed();
+                    if input.is_empty() {
+                        continue;
+                    }
+
+                    // Handle special commands
+                    if input == "/quit" {
+                        return Ok(None);
+                    }
+
+                    if input == "/approve" {
+                        if session.is_approved() {
+                            self.messages.push(ChatMessage {
+                                role: AGENT_ROLE.to_string(),
+                                content: "Design is already approved. Type /done to finalize."
+                                    .to_string(),
+                            });
+                            self.scroll_to_bottom();
+                            continue;
+                        }
+
+                        self.messages.push(ChatMessage {
+                            role: USER_ROLE.to_string(),
+                            content: "/approve".to_string(),
+                        });
+                        self.scroll_to_bottom();
+
+                        // Show spinner while the agent formalizes the design
+                        let result = self.approve_with_spinner(session).await;
+
+                        match result {
+                            Ok(Some(design)) => {
+                                self.messages.push(ChatMessage {
+                                    role: AGENT_ROLE.to_string(),
+                                    content: design,
+                                });
+                                self.scroll_to_bottom();
+                                self.phase = PlanPhase::Approved;
+                            }
+                            Ok(None) => {
+                                // User cancelled with Ctrl+C
+                                return Ok(None);
+                            }
+                            Err(e) => {
+                                self.messages.push(ChatMessage {
+                                    role: AGENT_ROLE.to_string(),
+                                    content: format!("Error during approval: {e}"),
+                                });
+                                self.scroll_to_bottom();
+                                self.phase = PlanPhase::Discussing;
+                            }
+                        }
+                        continue;
+                    }
+
+                    if input == "/done" {
+                        if !session.is_approved() {
+                            self.messages.push(ChatMessage {
+                                role: AGENT_ROLE.to_string(),
+                                content: "Design has not been approved yet. Type /approve first."
+                                    .to_string(),
+                            });
+                            self.scroll_to_bottom();
+                            continue;
+                        }
+
+                        self.phase = PlanPhase::Finalizing;
+                        self.draw()?;
+
+                        let output = session.finalize().await?;
+                        return Ok(Some(output));
+                    }
+
+                    // Add user message to history
+                    self.messages.push(ChatMessage {
+                        role: USER_ROLE.to_string(),
+                        content: input.clone(),
+                    });
+                    self.scroll_to_bottom();
+
+                    // Send to agent with animated spinner
+                    let result = self.send_with_spinner(session, &input).await;
+
+                    match result {
+                        Ok(Some(response)) => {
+                            self.messages.push(ChatMessage {
+                                role: AGENT_ROLE.to_string(),
+                                content: response,
+                            });
+                            self.scroll_to_bottom();
+                            self.phase = PlanPhase::Discussing;
+                        }
+                        Ok(None) => {
+                            // User cancelled with Ctrl+C during thinking
+                            return Ok(None);
+                        }
+                        Err(e) => {
+                            self.messages.push(ChatMessage {
+                                role: AGENT_ROLE.to_string(),
+                                content: format!("Error: {e}"),
+                            });
+                            self.scroll_to_bottom();
+                            self.phase = PlanPhase::Discussing;
+                        }
+                    }
+                    continue;
+                }
+
+                // Delegate all other keys to the readline-style line editor
+                self.editor.handle_key(&key);
             }
+        }
+    }
+
+    /// Sends a message to the agent while displaying an animated spinner.
+    ///
+    /// Returns `Ok(Some(response))` on success, `Ok(None)` if the user
+    /// cancels with Ctrl+C, or `Err` on failure.
+    async fn send_with_spinner(
+        &mut self,
+        session: &mut PlanSession,
+        input: &str,
+    ) -> Result<Option<String>> {
+        // Add thinking indicator to chat
+        self.messages.push(ChatMessage {
+            role: AGENT_ROLE.to_string(),
+            content: format!("{} Thinking...", SPINNER_FRAMES[0]),
+        });
+        let thinking_idx = self.messages.len() - 1;
+        self.scroll_to_bottom();
+        self.phase = PlanPhase::Thinking;
+
+        // Pin the send future so we can poll it inside select!
+        let send_future = session.send(input);
+        tokio::pin!(send_future);
+
+        let mut spinner_tick: usize = 0;
+
+        let result = loop {
+            // Update spinner animation
+            self.messages[thinking_idx].content = format!(
+                "{} Thinking...",
+                SPINNER_FRAMES[spinner_tick % SPINNER_FRAMES.len()]
+            );
+            spinner_tick += 1;
+            self.draw()?;
+
+            tokio::select! {
+                result = &mut send_future => break result,
+                () = tokio::time::sleep(std::time::Duration::from_millis(100)) => {
+                    // Check for Ctrl+C to cancel
+                    if event::poll(std::time::Duration::from_millis(0))?
+                        && let Event::Key(key) = event::read()?
+                        && key.kind == KeyEventKind::Press
+                        && key.code == KeyCode::Char('c')
+                        && key.modifiers.contains(KeyModifiers::CONTROL)
+                    {
+                        self.messages.pop();
+                        return Ok(None);
+                    }
+                }
+            }
+        };
+
+        // Remove the thinking indicator
+        self.messages.pop();
+
+        match result {
+            Ok(response) => Ok(Some(response)),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    /// Runs `session.approve()` while displaying an animated spinner.
+    ///
+    /// Returns `Ok(Some(design))` on success, `Ok(None)` if the user
+    /// cancels with Ctrl+C, or `Err` on failure.
+    async fn approve_with_spinner(&mut self, session: &mut PlanSession) -> Result<Option<String>> {
+        // Add thinking indicator
+        self.messages.push(ChatMessage {
+            role: AGENT_ROLE.to_string(),
+            content: format!("{} Formalizing design...", SPINNER_FRAMES[0]),
+        });
+        let thinking_idx = self.messages.len() - 1;
+        self.scroll_to_bottom();
+        self.phase = PlanPhase::Approving;
+
+        let approve_future = session.approve();
+        tokio::pin!(approve_future);
+
+        let mut spinner_tick: usize = 0;
+
+        let result = loop {
+            self.messages[thinking_idx].content = format!(
+                "{} Formalizing design...",
+                SPINNER_FRAMES[spinner_tick % SPINNER_FRAMES.len()]
+            );
+            spinner_tick += 1;
+            self.draw()?;
+
+            tokio::select! {
+                result = &mut approve_future => break result,
+                () = tokio::time::sleep(std::time::Duration::from_millis(100)) => {
+                    if event::poll(std::time::Duration::from_millis(0))?
+                        && let Event::Key(key) = event::read()?
+                        && key.kind == KeyEventKind::Press
+                        && key.code == KeyCode::Char('c')
+                        && key.modifiers.contains(KeyModifiers::CONTROL)
+                    {
+                        self.messages.pop();
+                        return Ok(None);
+                    }
+                }
+            }
+        };
+
+        // Remove thinking indicator
+        self.messages.pop();
+
+        match result {
+            Ok(design) => Ok(Some(design)),
+            Err(e) => Err(e.into()),
         }
     }
 
@@ -177,72 +405,174 @@ impl PlanUi {
     /// Draws the current UI state to the terminal.
     fn draw(&mut self) -> Result<()> {
         let messages = &self.messages;
-        let input = &self.input;
-        let status = &self.status;
+        let input = self.editor.content();
+        let input_display_width = self.editor.display_width();
+        let cursor_display_offset = self.editor.cursor_display_offset();
         let scroll_offset = self.scroll_offset;
+        let feature_slug = &self.feature_slug;
+        let phase = self.phase;
 
         self.terminal.draw(|frame| {
             let area = frame.area();
 
-            // Layout: chat area (flexible) + input (3 lines) + status (1 line)
+            // Calculate dynamic input height based on content wrapping.
+            // All widths are in terminal columns (display width), not bytes.
+            let inner_width = area.width.saturating_sub(2).max(1);
+            #[allow(clippy::cast_possible_truncation)]
+            let prompt_display_width = UnicodeWidthStr::width(INPUT_PROMPT) as u16;
+            #[allow(clippy::cast_possible_truncation)]
+            let total_display_len = prompt_display_width + input_display_width as u16;
+            #[allow(clippy::cast_possible_truncation)]
+            let cursor_col = prompt_display_width + cursor_display_offset as u16;
+            // Lines needed for the text content
+            let text_lines = total_display_len.div_ceil(inner_width).max(1);
+            // Lines needed so the cursor remains visible (cursor may sit one
+            // position past the last character when at the end of a full line)
+            let cursor_line = (cursor_col / inner_width) + 1;
+            let wrapped_lines = text_lines.max(cursor_line);
+            // +2 for top and bottom borders, cap to avoid stealing all chat space
+            let input_height = (wrapped_lines + 2).min(area.height / 3);
+
+            // Layout: header (1) + chat (flex) + input (dynamic) + help bar (1)
             let chunks = Layout::default()
                 .direction(Direction::Vertical)
                 .constraints([
-                    Constraint::Min(5),    // Chat history
-                    Constraint::Length(3), // Input box
-                    Constraint::Length(1), // Status bar
+                    Constraint::Length(1),            // Header
+                    Constraint::Min(5),               // Chat history
+                    Constraint::Length(input_height), // Input box (dynamic)
+                    Constraint::Length(1),            // Help bar
                 ])
                 .split(area);
 
+            // Render header
+            render_header(frame, chunks[0], feature_slug, phase);
+
             // Render chat history
-            render_chat(frame, chunks[0], messages, scroll_offset);
+            render_chat(frame, chunks[1], messages, scroll_offset);
 
-            // Render input box
-            let input_block = Block::default().title(" Input ").borders(Borders::ALL);
-            let input_text = Paragraph::new(input.as_str()).block(input_block);
-            frame.render_widget(input_text, chunks[1]);
+            // Render input box with manual wrapping for correct cursor alignment.
+            let input_block = Block::default()
+                .title(" Input ")
+                .title_style(Style::default().fg(Color::White).bold())
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .border_style(Style::default().fg(BORDER_COLOR));
+            let inner_area = input_block.inner(chunks[2]);
+            let visual_lines = build_input_visual_lines(input, inner_area.width);
 
-            // Render status bar
-            let status_paragraph =
-                Paragraph::new(status.as_str()).style(Style::default().fg(Color::DarkGray));
-            frame.render_widget(status_paragraph, chunks[2]);
+            // Scroll the input so the cursor line is always visible.
+            let iw = inner_area.width.max(1);
+            let cursor_visual_line = cursor_col / iw;
+            let input_scroll =
+                cursor_visual_line.saturating_sub(inner_area.height.saturating_sub(1));
+
+            let input_paragraph = Paragraph::new(visual_lines)
+                .scroll((input_scroll, 0))
+                .block(input_block);
+            frame.render_widget(input_paragraph, chunks[2]);
+
+            // Place cursor using display-width offsets for correct CJK support.
+            let cursor_x = inner_area.x + (cursor_col % iw);
+            let cursor_y = inner_area.y + cursor_visual_line.saturating_sub(input_scroll);
+            frame.set_cursor_position(Position::new(cursor_x, cursor_y));
+
+            // Render context-sensitive help bar
+            render_help_bar(frame, chunks[3], phase);
         })?;
 
         Ok(())
     }
 }
 
+/// Renders the header line showing feature name and current phase.
+fn render_header(frame: &mut Frame, area: Rect, feature_slug: &str, phase: PlanPhase) {
+    let header = Line::from(vec![
+        Span::styled(
+            format!(" CODA Plan: {feature_slug} "),
+            Style::default().fg(Color::White).bold(),
+        ),
+        Span::styled(format!("[{phase}]"), Style::default().fg(Color::Yellow)),
+    ]);
+    let paragraph = Paragraph::new(header).style(Style::default().bg(Color::DarkGray));
+    frame.render_widget(paragraph, area);
+}
+
+/// Calculates the number of visual (wrapped) lines a single [`Line`] occupies
+/// when rendered into the given `width`, using Unicode display widths so that
+/// CJK characters (2 columns each) are accounted for correctly.
+fn visual_line_count(line: &Line, width: u16) -> u16 {
+    if width == 0 {
+        return 1;
+    }
+    let line_width: u16 = line
+        .spans
+        .iter()
+        .map(|s| {
+            #[allow(clippy::cast_possible_truncation)]
+            let w = UnicodeWidthStr::width(s.content.as_ref()) as u16;
+            w
+        })
+        .sum();
+    if line_width == 0 {
+        return 1;
+    }
+    line_width.div_ceil(width)
+}
+
 /// Renders the chat history in the given area.
 fn render_chat(frame: &mut Frame, area: Rect, messages: &[ChatMessage], scroll_offset: u16) {
     let chat_block = Block::default()
-        .title(" CODA Plan - Chat ")
-        .borders(Borders::ALL);
+        .title(" Chat ")
+        .title_style(Style::default().fg(Color::White).bold())
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(BORDER_COLOR));
     let inner = chat_block.inner(area);
     frame.render_widget(chat_block, area);
 
     // Build chat text with styled roles
     let mut lines: Vec<Line> = Vec::new();
     for msg in messages {
-        let role_style = if msg.role == USER_ROLE {
-            Style::default().fg(Color::Cyan).bold()
+        let (role_style, role_label) = if msg.role == USER_ROLE {
+            (Style::default().fg(Color::Cyan).bold(), "You: ")
         } else {
-            Style::default().fg(Color::Green).bold()
+            (Style::default().fg(Color::Yellow).bold(), "Assistant: ")
         };
 
-        lines.push(Line::from(vec![Span::styled(
-            format!("[{}]", msg.role),
-            role_style,
-        )]));
+        // First line: role label + first line of content
+        let mut content_lines: Vec<&str> = msg.content.lines().collect();
+        let first_content_line = if content_lines.is_empty() {
+            ""
+        } else {
+            content_lines.remove(0)
+        };
 
-        for line in msg.content.lines() {
-            lines.push(Line::from(line.to_string()));
+        lines.push(Line::from(vec![
+            Span::styled(role_label, role_style),
+            Span::raw(first_content_line),
+        ]));
+
+        // Remaining lines with indentation matching the role label width
+        let indent = " ".repeat(role_label.len());
+        for line in content_lines {
+            if line.is_empty() {
+                lines.push(Line::from(""));
+            } else {
+                lines.push(Line::from(format!("{indent}{line}")));
+            }
         }
+
+        // Blank line between messages
         lines.push(Line::from(""));
     }
 
-    let total_lines = lines.len() as u16;
+    // Calculate total visual lines (accounting for wrapping)
+    let total_visual_lines: u16 = lines
+        .iter()
+        .map(|l| visual_line_count(l, inner.width))
+        .sum();
     let visible_height = inner.height;
-    let max_scroll = total_lines.saturating_sub(visible_height);
+    let max_scroll = total_visual_lines.saturating_sub(visible_height);
     let effective_scroll = max_scroll.saturating_sub(scroll_offset);
 
     let paragraph = Paragraph::new(lines)
@@ -252,9 +582,112 @@ fn render_chat(frame: &mut Frame, area: Rect, messages: &[ChatMessage], scroll_o
 
     // Render scrollbar
     let mut scrollbar_state =
-        ScrollbarState::new(total_lines as usize).position(effective_scroll as usize);
+        ScrollbarState::new(total_visual_lines as usize).position(effective_scroll as usize);
     let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight);
     frame.render_stateful_widget(scrollbar, area, &mut scrollbar_state);
+}
+
+/// Renders the bottom help bar with context-sensitive keyboard shortcuts.
+fn render_help_bar(frame: &mut Frame, area: Rect, phase: PlanPhase) {
+    let key_style = Style::default().fg(Color::White);
+    let sep = Span::raw("  ");
+
+    let help = match phase {
+        PlanPhase::Discussing => Line::from(vec![
+            Span::styled("[Enter] Send", key_style),
+            sep.clone(),
+            Span::styled("[/approve] Lock design", key_style),
+            sep.clone(),
+            Span::styled("[/done] Finalize", key_style),
+            sep.clone(),
+            Span::styled("[Ctrl+C] Quit", key_style),
+            sep,
+            Span::styled("[PgUp/PgDn] Scroll", key_style),
+        ]),
+        PlanPhase::Approved => Line::from(vec![
+            Span::styled("[/done] Finalize & create worktree", key_style),
+            sep.clone(),
+            Span::styled("[Enter] Continue discussing", key_style),
+            sep.clone(),
+            Span::styled("[Ctrl+C] Quit", key_style),
+            sep,
+            Span::styled("[PgUp/PgDn] Scroll", key_style),
+        ]),
+        PlanPhase::Thinking | PlanPhase::Approving => {
+            Line::from(vec![Span::styled("[Ctrl+C] Cancel", key_style)])
+        }
+        PlanPhase::Finalizing => Line::from(vec![Span::styled(
+            "Finalizing — writing specs and creating worktree...",
+            key_style,
+        )]),
+    };
+    let paragraph = Paragraph::new(help).style(Style::default().fg(Color::DarkGray));
+    frame.render_widget(paragraph, area);
+}
+
+/// Builds visual lines for the input box by manually wrapping at exact
+/// column boundaries.
+///
+/// This ensures the rendered text aligns perfectly with the cursor position
+/// calculation (`cursor_col % width` / `cursor_col / width`). Using
+/// ratatui's `Wrap` can produce misaligned results because its
+/// `WordWrapper` breaks at word boundaries rather than fixed column widths.
+fn build_input_visual_lines(input: &str, width: u16) -> Vec<Line<'static>> {
+    let width = width as usize;
+    let prompt = INPUT_PROMPT;
+    let prompt_style = Style::default().fg(Color::DarkGray);
+
+    if width == 0 {
+        return vec![Line::from(vec![
+            Span::styled(prompt.to_string(), prompt_style),
+            Span::raw(input.to_string()),
+        ])];
+    }
+
+    let prompt_width = UnicodeWidthStr::width(prompt);
+    let first_line_available = width.saturating_sub(prompt_width);
+
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    let mut chars = input.chars().peekable();
+
+    // First visual line: styled prompt + as many input characters as fit.
+    let mut first_chunk = String::new();
+    let mut col = 0;
+    while let Some(&ch) = chars.peek() {
+        let ch_w = UnicodeWidthChar::width(ch).unwrap_or(0);
+        if col + ch_w > first_line_available {
+            break;
+        }
+        first_chunk.push(chars.next().expect("peek guarantees Some"));
+        col += ch_w;
+    }
+    lines.push(Line::from(vec![
+        Span::styled(prompt.to_string(), prompt_style),
+        Span::raw(first_chunk),
+    ]));
+
+    // Subsequent visual lines: full-width chunks.
+    while chars.peek().is_some() {
+        let mut chunk = String::new();
+        col = 0;
+        while let Some(&ch) = chars.peek() {
+            let ch_w = UnicodeWidthChar::width(ch).unwrap_or(0);
+            if col + ch_w > width {
+                break;
+            }
+            chunk.push(chars.next().expect("peek guarantees Some"));
+            col += ch_w;
+        }
+        if chunk.is_empty() {
+            // Character wider than the available width; skip to avoid
+            // an infinite loop (should not happen with normal text).
+            chars.next();
+            continue;
+        }
+        lines.push(Line::from(chunk));
+    }
+
+    lines
 }
 
 impl Drop for PlanUi {

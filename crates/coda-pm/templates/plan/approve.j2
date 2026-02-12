@@ -1,19 +1,14 @@
-Based on the approved plan, generate a detailed design specification document.
+The user has approved the design. Please produce the final, formal design specification document.
 
 ## Feature
 
 - **Slug**: {{ feature_slug }}
 - **Feature ID**: {{ feature_id }}
 
-## Conversation Summary
+## Instructions
 
-{{ conversation_history }}
+Based on our conversation, produce a clean Markdown document using the following structure. Include ONLY the document content — no preamble, no commentary, no code fences wrapping the entire document.
 
-## Output Format
-
-Generate a Markdown document with the following structure:
-
-```markdown
 # Feature: {{ feature_slug }}
 
 ## Overview
@@ -28,11 +23,7 @@ Generate a Markdown document with the following structure:
 <Use code blocks with the appropriate language>
 
 ## Directory Structure
-<New files and directories to create>
-```
-path/to/new/file.rs    — description
-path/to/modified/file.rs — what changes
-```
+<New files and directories to create or modify>
 
 ## Core Data Structures
 <Key structs, enums, and types with field descriptions>
@@ -54,7 +45,6 @@ path/to/modified/file.rs — what changes
 
 ## Risk & Trade-offs
 <Known risks, limitations, or trade-offs of this design>
-```
 
 ## Guidelines
 

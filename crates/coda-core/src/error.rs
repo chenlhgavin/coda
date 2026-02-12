@@ -33,6 +33,10 @@ pub enum CoreError {
     #[error("Agent SDK error: {0}")]
     AgentSdkError(String),
 
+    /// A planning workflow error (e.g. finalizing without approval).
+    #[error("Plan error: {0}")]
+    PlanError(String),
+
     /// A git operation error.
     #[error("Git error: {0}")]
     GitError(String),

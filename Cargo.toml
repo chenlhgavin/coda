@@ -33,6 +33,7 @@ claude-agent-sdk-rs = "0.6"
 clap = { version = "4.5", features = ["derive"] }
 ratatui = "0.30"
 crossterm = "0.29"
+unicode-width = "0.2"
 
 # Template engine
 minijinja = { version = "2.6", features = ["loader"] }
