@@ -1,7 +1,7 @@
 //! CLI argument parsing.
 //!
 //! Defines the command-line interface for CODA using clap.
-//! Supports three subcommands: `init`, `plan`, and `run`.
+//! Supports five subcommands: `init`, `plan`, `run`, `list`, and `status`.
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
@@ -39,6 +39,15 @@ pub enum Commands {
         /// URL-safe feature slug (e.g., "add-user-auth").
         feature_slug: String,
     },
+
+    /// List all planned features.
+    List,
+
+    /// Show detailed status of a specific feature.
+    Status {
+        /// URL-safe feature slug (e.g., "add-user-auth").
+        feature_slug: String,
+    },
 }
 
 impl Cli {
@@ -50,6 +59,8 @@ impl Cli {
             Commands::Init => app.init().await,
             Commands::Plan { feature_slug } => app.plan(&feature_slug).await,
             Commands::Run { feature_slug } => app.run(&feature_slug).await,
+            Commands::List => app.list(),
+            Commands::Status { feature_slug } => app.status(&feature_slug),
         }
     }
 }

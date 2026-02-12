@@ -273,6 +273,112 @@ impl Engine {
         )
     }
 
+    /// Lists all features found in `.coda/` by reading their `state.yml` files.
+    ///
+    /// Scans the `.coda/` directory for subdirectories containing a `state.yml`
+    /// file and returns the parsed feature states sorted by feature ID.
+    ///
+    /// # Errors
+    ///
+    /// Returns `CoreError::ConfigError` if `.coda/` does not exist, or
+    /// `CoreError` if a `state.yml` file cannot be read or parsed.
+    pub fn list_features(&self) -> Result<Vec<crate::state::FeatureState>, CoreError> {
+        let coda_dir = self.project_root.join(".coda");
+        if !coda_dir.is_dir() {
+            return Err(CoreError::ConfigError(
+                "No .coda/ directory found. Run `coda init` first.".into(),
+            ));
+        }
+
+        let mut features = Vec::new();
+        let entries = fs::read_dir(&coda_dir)?;
+
+        for entry in entries.flatten() {
+            if !entry.file_type().is_ok_and(|ft| ft.is_dir()) {
+                continue;
+            }
+
+            let state_path = entry.path().join("state.yml");
+            if !state_path.is_file() {
+                continue;
+            }
+
+            let content = fs::read_to_string(&state_path).map_err(|e| {
+                CoreError::StateError(format!("Cannot read {}: {e}", state_path.display()))
+            })?;
+
+            match serde_yaml::from_str::<crate::state::FeatureState>(&content) {
+                Ok(state) => features.push(state),
+                Err(e) => {
+                    debug!(
+                        path = %state_path.display(),
+                        error = %e,
+                        "Skipping invalid state.yml"
+                    );
+                }
+            }
+        }
+
+        // Sort by feature ID
+        features.sort_by(|a, b| a.feature.id.cmp(&b.feature.id));
+        Ok(features)
+    }
+
+    /// Returns detailed state for a specific feature identified by its slug.
+    ///
+    /// # Errors
+    ///
+    /// Returns `CoreError::ConfigError` if `.coda/` does not exist, or
+    /// `CoreError::StateError` if no matching feature is found.
+    pub fn feature_status(
+        &self,
+        feature_slug: &str,
+    ) -> Result<crate::state::FeatureState, CoreError> {
+        let coda_dir = self.project_root.join(".coda");
+        if !coda_dir.is_dir() {
+            return Err(CoreError::ConfigError(
+                "No .coda/ directory found. Run `coda init` first.".into(),
+            ));
+        }
+
+        let entries = fs::read_dir(&coda_dir)?;
+        let mut available = Vec::new();
+
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let name_str = name.to_string_lossy();
+
+            if !entry.file_type().is_ok_and(|ft| ft.is_dir()) {
+                continue;
+            }
+
+            if name_str.ends_with(feature_slug) {
+                let state_path = entry.path().join("state.yml");
+                let content = fs::read_to_string(&state_path).map_err(|e| {
+                    CoreError::StateError(format!("Cannot read {}: {e}", state_path.display()))
+                })?;
+                return serde_yaml::from_str(&content).map_err(|e| {
+                    CoreError::StateError(format!(
+                        "Invalid state.yml at {}: {e}",
+                        state_path.display()
+                    ))
+                });
+            }
+
+            available.push(name_str.to_string());
+        }
+
+        let hint = if available.is_empty() {
+            "No features have been planned yet.".to_string()
+        } else {
+            format!("Available features: {}", available.join(", "))
+        };
+
+        Err(CoreError::StateError(format!(
+            "No feature found for slug '{feature_slug}'. {hint}"
+        )))
+    }
+
     /// Executes a feature development run through all phases.
     ///
     /// Reads `state.yml` and resumes from the last completed phase. Uses
