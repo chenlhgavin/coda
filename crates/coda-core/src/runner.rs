@@ -1,13 +1,14 @@
 //! Runner for executing feature development through phased stages.
 //!
 //! Manages a single continuous `ClaudeClient` session that progresses
-//! through setup → implement → test → review → verify phases, with
-//! state persistence for crash recovery.
+//! through dynamic development phases (from the design spec) followed by
+//! fixed review → verify quality phases, with state persistence for crash
+//! recovery.
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use claude_agent_sdk_rs::{ClaudeClient, ContentBlock, Message, ResultMessage};
+use claude_agent_sdk_rs::{ClaudeClient, ContentBlock, Message, ResultMessage, ToolResultContent};
 use coda_pm::PromptManager;
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
@@ -17,11 +18,8 @@ use tracing::{debug, error, info, warn};
 use crate::CoreError;
 use crate::config::CodaConfig;
 use crate::profile::AgentProfile;
-use crate::state::{FeatureState, FeatureStatus, PhaseStatus};
+use crate::state::{FeatureState, FeatureStatus, PhaseKind, PhaseStatus};
 use crate::task::{Task, TaskResult, TaskStatus};
-
-/// Phase names in execution order.
-const PHASE_NAMES: [&str; 5] = ["setup", "implement", "test", "review", "verify"];
 
 /// Real-time progress events emitted during a feature run.
 ///
@@ -30,6 +28,11 @@ const PHASE_NAMES: [&str; 5] = ["setup", "implement", "test", "review", "verify"
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub enum RunEvent {
+    /// Emitted once at the beginning of a run with the full phase list.
+    RunStarting {
+        /// Ordered list of phase names for the entire pipeline.
+        phases: Vec<String>,
+    },
     /// A phase is about to start executing.
     PhaseStarting {
         /// Phase name (e.g., `"setup"`, `"implement"`).
@@ -111,6 +114,31 @@ pub struct VerificationSummary {
     pub checks_total: u32,
 }
 
+/// Collected output from a single agent interaction.
+///
+/// Separates assistant text from tool execution output so callers can
+/// search both independently (e.g., extracting a PR URL from bash stdout).
+#[derive(Debug, Default)]
+struct AgentResponse {
+    /// Text content from assistant messages.
+    text: String,
+    /// Combined tool result output (bash stdout/stderr, etc.).
+    tool_output: String,
+    /// SDK result message with metrics.
+    result: Option<ResultMessage>,
+}
+
+impl AgentResponse {
+    /// Returns all collected text (assistant text + tool output) for searching.
+    fn all_text(&self) -> String {
+        if self.tool_output.is_empty() {
+            self.text.clone()
+        } else {
+            format!("{}\n{}", self.text, self.tool_output)
+        }
+    }
+}
+
 /// Orchestrates the execution of a feature through all phases.
 ///
 /// Uses a single continuous `ClaudeClient` session with the Coder profile,
@@ -126,6 +154,8 @@ pub struct Runner {
     review_summary: ReviewSummary,
     verification_summary: VerificationSummary,
     progress_tx: Option<UnboundedSender<RunEvent>>,
+    /// Running cumulative cost from the SDK, used to compute per-phase incremental costs.
+    cumulative_cost_usd: f64,
 }
 
 impl Runner {
@@ -172,6 +202,7 @@ impl Runner {
             worktree_path.clone(),
             100, // generous turn limit for full run
             config.agent.max_budget_usd,
+            &config.agent.model,
         );
 
         let client = ClaudeClient::new(options);
@@ -187,6 +218,7 @@ impl Runner {
             review_summary: ReviewSummary::default(),
             verification_summary: VerificationSummary::default(),
             progress_tx: None,
+            cumulative_cost_usd: 0.0,
         })
     }
 
@@ -201,7 +233,10 @@ impl Runner {
     /// Executes all remaining phases from the current checkpoint.
     ///
     /// Connects the client, iterates through phases from `current_phase`,
-    /// and returns results for each completed phase.
+    /// dispatching each phase based on its [`PhaseKind`]:
+    ///
+    /// - **Dev** phases are handled by [`run_dev_phase`](Self::run_dev_phase)
+    /// - **Quality** phases dispatch to `run_review` or `run_verify` by name
     ///
     /// # Errors
     ///
@@ -220,37 +255,46 @@ impl Runner {
 
         let mut results = Vec::new();
         let start_phase = self.state.current_phase as usize;
-        let total_phases = PHASE_NAMES.len();
+        let total_phases = self.state.phases.len();
 
-        for (phase_idx, &phase_name) in PHASE_NAMES.iter().enumerate().skip(start_phase) {
-            info!(phase = phase_name, index = phase_idx, "Starting phase");
+        // Emit initial phase list so the UI can display the full pipeline
+        let phase_names: Vec<String> = self.state.phases.iter().map(|p| p.name.clone()).collect();
+        self.emit_event(RunEvent::RunStarting {
+            phases: phase_names,
+        });
+
+        for phase_idx in start_phase..total_phases {
+            let phase_name = self.state.phases[phase_idx].name.clone();
+            let phase_kind = self.state.phases[phase_idx].kind.clone();
+
+            info!(phase = %phase_name, index = phase_idx, "Starting phase");
             self.emit_event(RunEvent::PhaseStarting {
-                name: phase_name.to_string(),
+                name: phase_name.clone(),
                 index: phase_idx,
                 total: total_phases,
             });
 
-            let result = match phase_name {
-                "setup" => self.run_setup().await,
-                "implement" => self.run_implement().await,
-                "test" => self.run_test().await,
-                "review" => self.run_review().await,
-                "verify" => self.run_verify().await,
-                _ => Err(CoreError::AgentError(format!(
-                    "Unknown phase: {phase_name}"
-                ))),
+            let result = match phase_kind {
+                PhaseKind::Dev => self.run_dev_phase(phase_idx).await,
+                PhaseKind::Quality => match phase_name.as_str() {
+                    "review" => self.run_review(phase_idx).await,
+                    "verify" => self.run_verify(phase_idx).await,
+                    _ => Err(CoreError::AgentError(format!(
+                        "Unknown quality phase: {phase_name}"
+                    ))),
+                },
             };
 
             match result {
                 Ok(task_result) => {
                     info!(
-                        phase = phase_name,
+                        phase = %phase_name,
                         turns = task_result.turns,
                         cost_usd = task_result.cost_usd,
                         "Phase completed"
                     );
                     self.emit_event(RunEvent::PhaseCompleted {
-                        name: phase_name.to_string(),
+                        name: phase_name.clone(),
                         index: phase_idx,
                         duration: task_result.duration,
                         turns: task_result.turns,
@@ -259,15 +303,15 @@ impl Runner {
                     results.push(task_result);
 
                     // Advance to next phase
-                    if phase_idx + 1 < PHASE_NAMES.len() {
+                    if phase_idx + 1 < total_phases {
                         self.state.current_phase = (phase_idx + 1) as u32;
                     }
                     self.save_state()?;
                 }
                 Err(e) => {
-                    error!(phase = phase_name, error = %e, "Phase failed");
+                    error!(phase = %phase_name, error = %e, "Phase failed");
                     self.emit_event(RunEvent::PhaseFailed {
-                        name: phase_name.to_string(),
+                        name: phase_name.clone(),
                         index: phase_idx,
                         error: e.to_string(),
                     });
@@ -307,145 +351,77 @@ impl Runner {
         Ok(results)
     }
 
-    /// Executes the setup phase: scaffold directory structure.
-    async fn run_setup(&mut self) -> Result<TaskResult, CoreError> {
-        let phase_idx = 0;
-        self.mark_phase_running(phase_idx);
-
-        let design_spec = self.load_design_spec()?;
-        let repo_tree = self.gather_worktree_tree()?;
-        let checks = &self.config.checks;
-        let feature_slug = self.state.feature.slug.clone();
-
-        let prompt = self.pm.render(
-            "run/setup",
-            minijinja::context!(
-                design_spec => design_spec,
-                repo_tree => repo_tree,
-                checks => checks,
-                feature_slug => feature_slug,
-            ),
-        )?;
-
-        let (response, result_msg) = self.send_and_collect(&prompt).await?;
-        debug!(
-            response_len = response.len(),
-            "Setup phase response received"
-        );
-
-        self.mark_phase_completed(phase_idx, &result_msg);
-
-        Ok(TaskResult {
-            task: Task::Setup {
-                feature_slug: self.state.feature.slug.clone(),
-            },
-            status: TaskStatus::Completed,
-            turns: result_msg.as_ref().map_or(1, |r| r.num_turns),
-            cost_usd: result_msg
-                .as_ref()
-                .and_then(|r| r.total_cost_usd)
-                .unwrap_or(0.0),
-            duration: std::time::Duration::from_millis(
-                result_msg.as_ref().map_or(0, |r| r.duration_ms),
-            ),
-            artifacts: vec![],
-        })
-    }
-
-    /// Executes the implement phase: code changes for each development step.
-    async fn run_implement(&mut self) -> Result<TaskResult, CoreError> {
-        let phase_idx = 1;
+    /// Executes a development phase from the design spec.
+    ///
+    /// Renders the `run/dev_phase` prompt template with the phase name,
+    /// index, and design spec, then sends it to the agent.
+    async fn run_dev_phase(&mut self, phase_idx: usize) -> Result<TaskResult, CoreError> {
         let was_running = self.state.phases[phase_idx].status == PhaseStatus::Running;
         self.mark_phase_running(phase_idx);
 
         let design_spec = self.load_design_spec()?;
         let checks = &self.config.checks;
         let feature_slug = self.state.feature.slug.clone();
+        let phase_name = self.state.phases[phase_idx].name.clone();
 
-        // Build resume context if resuming mid-implement
+        // Determine the 1-based phase number among dev phases
+        let dev_phase_number = self
+            .state
+            .phases
+            .iter()
+            .take(phase_idx + 1)
+            .filter(|p| p.kind == PhaseKind::Dev)
+            .count();
+        let total_dev_phases = self
+            .state
+            .phases
+            .iter()
+            .filter(|p| p.kind == PhaseKind::Dev)
+            .count();
+        let is_first = phase_idx == 0;
+
+        // Build resume context if resuming mid-phase
         let resume_context = if was_running {
             self.build_resume_context()?
         } else {
             String::new()
         };
 
-        // Send a single implement prompt (the agent handles all sub-phases)
         let prompt = self.pm.render(
-            "run/implement",
+            "run/dev_phase",
             minijinja::context!(
                 design_spec => design_spec,
-                phase_index => 0,
+                phase_name => phase_name,
+                phase_number => dev_phase_number,
+                total_dev_phases => total_dev_phases,
+                is_first => is_first,
                 checks => checks,
                 feature_slug => feature_slug,
                 resume_context => resume_context,
             ),
         )?;
 
-        let (response, result_msg) = self.send_and_collect(&prompt).await?;
+        let resp = self.send_and_collect(&prompt).await?;
         debug!(
-            response_len = response.len(),
-            "Implement phase response received"
+            response_len = resp.text.len(),
+            phase = %phase_name,
+            "Dev phase response received"
         );
 
-        self.mark_phase_completed(phase_idx, &result_msg);
+        let phase_cost = self.compute_incremental_cost(&resp.result);
+        self.mark_phase_completed(phase_idx, &resp.result);
+        self.state.phases[phase_idx].cost_usd = phase_cost;
 
         Ok(TaskResult {
-            task: Task::Implement {
+            task: Task::DevPhase {
+                name: phase_name,
                 feature_slug: self.state.feature.slug.clone(),
             },
             status: TaskStatus::Completed,
-            turns: result_msg.as_ref().map_or(1, |r| r.num_turns),
-            cost_usd: result_msg
-                .as_ref()
-                .and_then(|r| r.total_cost_usd)
-                .unwrap_or(0.0),
+            turns: resp.result.as_ref().map_or(1, |r| r.num_turns),
+            cost_usd: phase_cost,
             duration: std::time::Duration::from_millis(
-                result_msg.as_ref().map_or(0, |r| r.duration_ms),
-            ),
-            artifacts: vec![],
-        })
-    }
-
-    /// Executes the test phase: write and run tests.
-    async fn run_test(&mut self) -> Result<TaskResult, CoreError> {
-        let phase_idx = 2;
-        self.mark_phase_running(phase_idx);
-
-        let design_spec = self.load_design_spec()?;
-        let changed_files = self.get_changed_files()?;
-        let checks = &self.config.checks;
-        let feature_slug = self.state.feature.slug.clone();
-
-        let prompt = self.pm.render(
-            "run/test",
-            minijinja::context!(
-                design_spec => design_spec,
-                changed_files => changed_files,
-                checks => checks,
-                feature_slug => feature_slug,
-            ),
-        )?;
-
-        let (response, result_msg) = self.send_and_collect(&prompt).await?;
-        debug!(
-            response_len = response.len(),
-            "Test phase response received"
-        );
-
-        self.mark_phase_completed(phase_idx, &result_msg);
-
-        Ok(TaskResult {
-            task: Task::Test {
-                feature_slug: self.state.feature.slug.clone(),
-            },
-            status: TaskStatus::Completed,
-            turns: result_msg.as_ref().map_or(1, |r| r.num_turns),
-            cost_usd: result_msg
-                .as_ref()
-                .and_then(|r| r.total_cost_usd)
-                .unwrap_or(0.0),
-            duration: std::time::Duration::from_millis(
-                result_msg.as_ref().map_or(0, |r| r.duration_ms),
+                resp.result.as_ref().map_or(0, |r| r.duration_ms),
             ),
             artifacts: vec![],
         })
@@ -456,8 +432,7 @@ impl Runner {
     /// Sends the diff for review, parses the YAML response for issues,
     /// and if critical/major issues are found, asks the agent to fix them
     /// and re-reviews. Loops up to `max_review_rounds`.
-    async fn run_review(&mut self) -> Result<TaskResult, CoreError> {
-        let phase_idx = 3;
+    async fn run_review(&mut self, phase_idx: usize) -> Result<TaskResult, CoreError> {
         self.mark_phase_running(phase_idx);
 
         if !self.config.review.enabled {
@@ -493,17 +468,14 @@ impl Runner {
                 ),
             )?;
 
-            let (response, result_msg) = self.send_and_collect(&review_prompt).await?;
-            total_turns += result_msg.as_ref().map_or(1, |r| r.num_turns);
-            total_cost += result_msg
-                .as_ref()
-                .and_then(|r| r.total_cost_usd)
-                .unwrap_or(0.0);
+            let resp = self.send_and_collect(&review_prompt).await?;
+            total_turns += resp.result.as_ref().map_or(1, |r| r.num_turns);
+            total_cost += self.compute_incremental_cost(&resp.result);
 
             self.review_summary.rounds += 1;
 
             // Parse review issues from response
-            let issues = parse_review_issues(&response);
+            let issues = parse_review_issues(&resp.text);
             let issue_count = issues.len() as u32;
             self.review_summary.issues_found += issue_count;
 
@@ -526,12 +498,9 @@ impl Runner {
                     .join("\n")
             );
 
-            let (_fix_response, fix_result) = self.send_and_collect(&fix_prompt).await?;
-            total_turns += fix_result.as_ref().map_or(1, |r| r.num_turns);
-            total_cost += fix_result
-                .as_ref()
-                .and_then(|r| r.total_cost_usd)
-                .unwrap_or(0.0);
+            let fix_resp = self.send_and_collect(&fix_prompt).await?;
+            total_turns += fix_resp.result.as_ref().map_or(1, |r| r.num_turns);
+            total_cost += self.compute_incremental_cost(&fix_resp.result);
 
             self.review_summary.issues_resolved += issue_count;
         }
@@ -564,8 +533,7 @@ impl Runner {
     ///
     /// Runs the verification plan, and if any check fails, asks the
     /// agent to fix the issue and re-verifies.
-    async fn run_verify(&mut self) -> Result<TaskResult, CoreError> {
-        let phase_idx = 4;
+    async fn run_verify(&mut self, phase_idx: usize) -> Result<TaskResult, CoreError> {
         self.mark_phase_running(phase_idx);
 
         let verification_spec = self.load_verification_spec()?;
@@ -590,15 +558,12 @@ impl Runner {
                 ),
             )?;
 
-            let (response, result_msg) = self.send_and_collect(&verify_prompt).await?;
-            total_turns += result_msg.as_ref().map_or(1, |r| r.num_turns);
-            total_cost += result_msg
-                .as_ref()
-                .and_then(|r| r.total_cost_usd)
-                .unwrap_or(0.0);
+            let resp = self.send_and_collect(&verify_prompt).await?;
+            total_turns += resp.result.as_ref().map_or(1, |r| r.num_turns);
+            total_cost += self.compute_incremental_cost(&resp.result);
 
             // Parse verification result
-            let (passed, failed_details) = parse_verification_result(&response);
+            let (passed, failed_details) = parse_verification_result(&resp.text);
             self.verification_summary.checks_total = passed + failed_details.len() as u32;
             self.verification_summary.checks_passed = passed;
 
@@ -622,12 +587,9 @@ impl Runner {
                 failed_details.join("\n")
             );
 
-            let (_fix_response, fix_result) = self.send_and_collect(&fix_prompt).await?;
-            total_turns += fix_result.as_ref().map_or(1, |r| r.num_turns);
-            total_cost += fix_result
-                .as_ref()
-                .and_then(|r| r.total_cost_usd)
-                .unwrap_or(0.0);
+            let fix_resp = self.send_and_collect(&fix_prompt).await?;
+            total_turns += fix_resp.result.as_ref().map_or(1, |r| r.num_turns);
+            total_cost += self.compute_incremental_cost(&fix_resp.result);
         }
 
         self.mark_phase_completed(phase_idx, &None);
@@ -654,6 +616,13 @@ impl Runner {
     }
 
     /// Creates a pull request after all phases complete.
+    ///
+    /// Sends a PR creation prompt to the agent, then extracts the PR URL from:
+    /// 1. Assistant text response
+    /// 2. Tool result output (bash stdout from `gh pr create`)
+    /// 3. Fallback: queries `gh pr list --head <branch>` directly
+    ///
+    /// Returns `TaskStatus::Failed` if no PR could be found after all attempts.
     async fn create_pr(&mut self) -> Result<TaskResult, CoreError> {
         let design_spec = self.load_design_spec()?;
         let commits = self.get_commits()?;
@@ -672,29 +641,41 @@ impl Runner {
             ),
         )?;
 
-        let (response, result_msg) = self.send_and_collect(&pr_prompt).await?;
+        let resp = self.send_and_collect(&pr_prompt).await?;
+        let pr_cost = self.compute_incremental_cost(&resp.result);
 
-        // Try to extract PR URL from response
-        if let Some(pr_url) = extract_pr_url(&response) {
-            info!(url = %pr_url, "PR created");
+        // Try to extract PR URL from all collected text (assistant text + tool output)
+        let all_text = resp.all_text();
+        let pr_url = extract_pr_url(&all_text).or_else(|| {
+            // Fallback: query GitHub CLI directly
+            info!("PR URL not found in agent response, checking via gh CLI...");
+            self.check_pr_exists_via_gh()
+        });
+
+        let status = if let Some(ref url) = pr_url {
+            info!(url = %url, "PR created");
             self.state.pr = Some(crate::state::PrInfo {
-                url: pr_url.clone(),
-                number: extract_pr_number(&pr_url).unwrap_or(0),
+                url: url.clone(),
+                number: extract_pr_number(url).unwrap_or(0),
                 title: format!("feat({}): feature implementation", self.state.feature.slug),
             });
             self.save_state()?;
-        }
+            TaskStatus::Completed
+        } else {
+            let msg = "PR creation failed: no PR URL found in agent response or via gh CLI";
+            warn!(msg);
+            TaskStatus::Failed {
+                error: msg.to_string(),
+            }
+        };
 
         Ok(TaskResult {
             task: Task::CreatePr {
                 feature_slug: self.state.feature.slug.clone(),
             },
-            status: TaskStatus::Completed,
-            turns: result_msg.as_ref().map_or(1, |r| r.num_turns),
-            cost_usd: result_msg
-                .as_ref()
-                .and_then(|r| r.total_cost_usd)
-                .unwrap_or(0.0),
+            status,
+            turns: resp.result.as_ref().map_or(1, |r| r.num_turns),
+            cost_usd: pr_cost,
             duration: start.elapsed(),
             artifacts: vec![],
         })
@@ -737,18 +718,18 @@ impl Runner {
         Ok(())
     }
 
-    /// Sends a prompt and collects the full response text + ResultMessage.
-    async fn send_and_collect(
-        &mut self,
-        prompt: &str,
-    ) -> Result<(String, Option<ResultMessage>), CoreError> {
+    /// Sends a prompt and collects the full response text, tool output, and `ResultMessage`.
+    ///
+    /// Captures both assistant text blocks and tool result content (e.g., bash
+    /// stdout from `gh pr create`) so callers can search all output for
+    /// expected patterns.
+    async fn send_and_collect(&mut self, prompt: &str) -> Result<AgentResponse, CoreError> {
         self.client
             .query(prompt)
             .await
             .map_err(|e| CoreError::AgentSdkError(e.to_string()))?;
 
-        let mut response = String::new();
-        let mut result_msg = None;
+        let mut resp = AgentResponse::default();
 
         {
             let mut stream = self.client.receive_response();
@@ -757,13 +738,34 @@ impl Runner {
                 match msg {
                     Message::Assistant(assistant) => {
                         for block in &assistant.message.content {
-                            if let ContentBlock::Text(text) = block {
-                                response.push_str(&text.text);
+                            match block {
+                                ContentBlock::Text(text) => {
+                                    resp.text.push_str(&text.text);
+                                }
+                                ContentBlock::ToolResult(tr) => {
+                                    collect_tool_result_text(
+                                        tr.content.as_ref(),
+                                        &mut resp.tool_output,
+                                    );
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                    Message::User(user) => {
+                        if let Some(blocks) = &user.content {
+                            for block in blocks {
+                                if let ContentBlock::ToolResult(tr) = block {
+                                    collect_tool_result_text(
+                                        tr.content.as_ref(),
+                                        &mut resp.tool_output,
+                                    );
+                                }
                             }
                         }
                     }
                     Message::Result(r) => {
-                        result_msg = Some(r);
+                        resp.result = Some(r);
                         break;
                     }
                     _ => {}
@@ -771,7 +773,7 @@ impl Runner {
             }
         }
 
-        Ok((response, result_msg))
+        Ok(resp)
     }
 
     /// Marks a phase as running and saves state.
@@ -783,14 +785,16 @@ impl Runner {
         }
     }
 
-    /// Marks a phase as completed and records metrics from the ResultMessage.
+    /// Marks a phase as completed and records timing from the `ResultMessage`.
+    ///
+    /// **Note:** `cost_usd` is NOT set here — callers set it explicitly via
+    /// `compute_incremental_cost` to avoid storing cumulative SDK costs.
     fn mark_phase_completed(&mut self, phase_idx: usize, result_msg: &Option<ResultMessage>) {
         self.state.phases[phase_idx].status = PhaseStatus::Completed;
         self.state.phases[phase_idx].completed_at = Some(chrono::Utc::now());
 
         if let Some(r) = result_msg {
             self.state.phases[phase_idx].turns = r.num_turns;
-            self.state.phases[phase_idx].cost_usd = r.total_cost_usd.unwrap_or(0.0);
             self.state.phases[phase_idx].duration_secs = r.duration_ms / 1000;
         }
 
@@ -846,23 +850,6 @@ impl Runner {
         )
     }
 
-    /// Gets a list of files changed from the base branch.
-    fn get_changed_files(&self) -> Result<Vec<String>, CoreError> {
-        let stdout = run_command(
-            "git",
-            &["diff", "--name-only", &self.state.git.base_branch, "HEAD"],
-            &self.worktree_path,
-        )?;
-
-        let files = stdout
-            .lines()
-            .filter(|l| !l.is_empty())
-            .map(String::from)
-            .collect();
-
-        Ok(files)
-    }
-
     /// Gets the list of commits from the base branch to HEAD.
     fn get_commits(&self) -> Result<Vec<CommitInfo>, CoreError> {
         let range = format!("{}..HEAD", self.state.git.base_branch);
@@ -884,25 +871,6 @@ impl Runner {
             .collect();
 
         Ok(commits)
-    }
-
-    /// Gathers a simple tree listing of the worktree.
-    fn gather_worktree_tree(&self) -> Result<String, CoreError> {
-        run_command(
-            "find",
-            &[
-                ".",
-                "-not",
-                "-path",
-                "./.git/*",
-                "-not",
-                "-path",
-                "./target/*",
-                "-type",
-                "f",
-            ],
-            &self.worktree_path,
-        )
     }
 
     /// Builds resume context for interrupted executions.
@@ -968,6 +936,59 @@ impl Runner {
         self.state.total.cost.input_tokens = total_input_tokens;
         self.state.total.cost.output_tokens = total_output_tokens;
     }
+
+    /// Computes the incremental cost of an agent interaction.
+    ///
+    /// The SDK's `ResultMessage.total_cost_usd` is cumulative for the entire
+    /// session. This method returns the delta since the last call, and updates
+    /// the running cumulative tracker so the next call computes correctly.
+    fn compute_incremental_cost(&mut self, result: &Option<ResultMessage>) -> f64 {
+        let new_cumulative = result
+            .as_ref()
+            .and_then(|r| r.total_cost_usd)
+            .unwrap_or(self.cumulative_cost_usd);
+        let incremental = (new_cumulative - self.cumulative_cost_usd).max(0.0);
+        self.cumulative_cost_usd = new_cumulative;
+        incremental
+    }
+
+    /// Checks whether a PR exists for the given branch using `gh pr list`.
+    ///
+    /// Falls back to querying the GitHub CLI directly when the agent's text
+    /// response does not contain an extractable PR URL.
+    fn check_pr_exists_via_gh(&self) -> Option<String> {
+        let branch = &self.state.git.branch;
+        let result = run_command(
+            "gh",
+            &[
+                "pr", "list", "--head", branch, "--json", "url", "--limit", "1",
+            ],
+            &self.worktree_path,
+        );
+
+        match result {
+            Ok(output) => {
+                let trimmed = output.trim();
+                if trimmed.is_empty() || trimmed == "[]" {
+                    debug!(branch = %branch, "No PR found via gh pr list");
+                    return None;
+                }
+                // Parse JSON array: [{"url":"https://..."}]
+                if let Ok(arr) = serde_json::from_str::<Vec<serde_json::Value>>(trimmed) {
+                    arr.first()
+                        .and_then(|v| v.get("url"))
+                        .and_then(|v| v.as_str())
+                        .map(String::from)
+                } else {
+                    extract_pr_url(trimmed)
+                }
+            }
+            Err(e) => {
+                warn!(error = %e, "gh pr list failed");
+                None
+            }
+        }
+    }
 }
 
 impl std::fmt::Debug for Runner {
@@ -981,6 +1002,29 @@ impl std::fmt::Debug for Runner {
 }
 
 // ── Free Functions ──────────────────────────────────────────────────
+
+/// Extracts text content from a `ToolResultContent` and appends it to the buffer.
+fn collect_tool_result_text(content: Option<&ToolResultContent>, buf: &mut String) {
+    match content {
+        Some(ToolResultContent::Text(text)) => {
+            if !buf.is_empty() {
+                buf.push('\n');
+            }
+            buf.push_str(text);
+        }
+        Some(ToolResultContent::Blocks(blocks)) => {
+            for block in blocks {
+                if let Some(text) = block.get("text").and_then(|v| v.as_str()) {
+                    if !buf.is_empty() {
+                        buf.push('\n');
+                    }
+                    buf.push_str(text);
+                }
+            }
+        }
+        None => {}
+    }
+}
 
 /// Runs an external command and returns its stdout, checking the exit status.
 ///

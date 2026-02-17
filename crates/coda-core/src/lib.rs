@@ -8,7 +8,7 @@
 //!
 //! - [`Engine`] orchestrates init, plan, and run operations
 //! - [`PlanSession`] manages interactive planning conversations
-//! - [`Runner`] executes phased development (setup → implement → test → review → verify)
+//! - [`Runner`] executes phased development (dynamic dev phases → review → verify)
 //! - [`CodaConfig`] holds project configuration from `.coda/config.yml`
 //! - [`FeatureState`](state::FeatureState) tracks execution progress in `state.yml`
 

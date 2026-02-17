@@ -21,20 +21,11 @@ pub enum Task {
         feature_slug: String,
     },
 
-    /// Set up the directory structure and scaffold code.
-    Setup {
-        /// URL-safe feature slug.
-        feature_slug: String,
-    },
-
-    /// Implement the feature according to the design spec.
-    Implement {
-        /// URL-safe feature slug.
-        feature_slug: String,
-    },
-
-    /// Write and run tests for the feature.
-    Test {
+    /// A development phase derived from the design spec's
+    /// "Development Phases" section.
+    DevPhase {
+        /// Human-readable phase name (e.g., `"pub-item-extraction"`).
+        name: String,
         /// URL-safe feature slug.
         feature_slug: String,
     },
@@ -71,7 +62,10 @@ pub enum Task {
 /// use coda_core::task::{Task, TaskResult, TaskStatus};
 ///
 /// let result = TaskResult {
-///     task: Task::Setup { feature_slug: "add-auth".to_string() },
+///     task: Task::DevPhase {
+///         name: "setup-types".to_string(),
+///         feature_slug: "add-auth".to_string(),
+///     },
 ///     status: TaskStatus::Completed,
 ///     turns: 3,
 ///     cost_usd: 0.12,

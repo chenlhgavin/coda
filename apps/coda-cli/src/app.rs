@@ -266,8 +266,6 @@ impl App {
         println!("  CODA Run: {feature_slug}");
         println!("  ═══════════════════════════════════════");
         println!();
-        println!("  Phases: setup → implement → test → review → verify → PR");
-        println!();
 
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<RunEvent>();
 
@@ -275,8 +273,18 @@ impl App {
         let display_handle = tokio::spawn(async move {
             while let Some(event) = rx.recv().await {
                 match event {
+                    RunEvent::RunStarting { phases } => {
+                        let pipeline = phases
+                            .iter()
+                            .map(String::as_str)
+                            .chain(std::iter::once("PR"))
+                            .collect::<Vec<_>>()
+                            .join(" → ");
+                        println!("  Phases: {pipeline}");
+                        println!();
+                    }
                     RunEvent::PhaseStarting { name, index, total } => {
-                        println!("  [▸] {name:<12} Running...  ({}/{})", index + 1, total);
+                        println!("  [▸] {name:<24} Running...  ({}/{})", index + 1, total);
                     }
                     RunEvent::PhaseCompleted {
                         name,
@@ -286,22 +294,23 @@ impl App {
                         ..
                     } => {
                         println!(
-                            "  [✓] {name:<12} {duration:>8}  {turns:>3} turns  ${cost_usd:.4}",
+                            "  [✓] {name:<24} {duration:>8}  {turns:>3} turns  ${cost_usd:.4}",
                             duration = format_duration(duration),
                         );
                     }
                     RunEvent::PhaseFailed { name, error, .. } => {
-                        println!("  [✗] {name:<12} Failed");
+                        println!("  [✗] {name:<24} Failed");
                         println!("      Error: {error}");
                     }
                     RunEvent::CreatingPr => {
-                        println!("  [▸] create-pr    Running...");
+                        println!("  [▸] create-pr              Running...");
                     }
                     RunEvent::PrCreated { url } => {
                         if let Some(url) = url {
-                            println!("  [✓] create-pr    PR: {url}");
+                            println!("  [✓] create-pr              PR: {url}");
                         } else {
-                            println!("  [✓] create-pr    Done");
+                            println!("  [✗] create-pr              No PR created");
+                            println!("      Try manually: gh pr create --head <branch>");
                         }
                     }
                     _ => {}

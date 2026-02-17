@@ -68,23 +68,23 @@ pub struct FeatureState {
     pub total: TotalStats,
 }
 
-/// Expected number of execution phases.
-const EXPECTED_PHASE_COUNT: usize = 5;
+/// Minimum number of phases: at least 1 dev phase + review + verify.
+const MIN_PHASE_COUNT: usize = 3;
 
 impl FeatureState {
     /// Validates structural invariants after deserialization.
     ///
-    /// Checks that `phases` has the expected length, `current_phase` is
-    /// within bounds, and `worktree_path` does not contain parent-directory
-    /// references (`..`) that could cause path traversal.
+    /// Checks that `phases` has at least [`MIN_PHASE_COUNT`] entries
+    /// (1+ dev phases + review + verify), `current_phase` is within bounds,
+    /// and `worktree_path` does not contain parent-directory references.
     ///
     /// # Errors
     ///
     /// Returns a human-readable error description when validation fails.
     pub fn validate(&self) -> Result<(), String> {
-        if self.phases.len() != EXPECTED_PHASE_COUNT {
+        if self.phases.len() < MIN_PHASE_COUNT {
             return Err(format!(
-                "expected {EXPECTED_PHASE_COUNT} phases, found {}",
+                "expected at least {MIN_PHASE_COUNT} phases (dev + review + verify), found {}",
                 self.phases.len(),
             ));
         }
@@ -140,11 +140,34 @@ pub struct GitInfo {
     pub base_branch: String,
 }
 
+/// Distinguishes development phases (from the design spec) from fixed
+/// quality-assurance phases (review, verify).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PhaseKind {
+    /// Development phase derived from the design spec's "Development Phases".
+    Dev,
+    /// Fixed quality-assurance phase (review or verify).
+    Quality,
+}
+
+impl Default for PhaseKind {
+    /// Defaults to `Dev` so that legacy `state.yml` files without a `kind`
+    /// field are treated as development phases.
+    fn default() -> Self {
+        Self::Dev
+    }
+}
+
 /// Record of a single execution phase.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PhaseRecord {
-    /// Phase name (e.g., `"setup"`, `"implement"`, `"test"`).
+    /// Phase name (e.g., `"pub-item-extraction"`, `"review"`, `"verify"`).
     pub name: String,
+
+    /// Whether this is a development or quality-assurance phase.
+    #[serde(default)]
+    pub kind: PhaseKind,
 
     /// Current status of this phase.
     pub status: PhaseStatus,
@@ -325,7 +348,8 @@ mod tests {
             },
             phases: vec![
                 PhaseRecord {
-                    name: "setup".to_string(),
+                    name: "auth-types".to_string(),
+                    kind: PhaseKind::Dev,
                     status: PhaseStatus::Completed,
                     started_at: Some(now),
                     completed_at: Some(now),
@@ -339,7 +363,8 @@ mod tests {
                     details: serde_json::json!({"files_created": 4}),
                 },
                 PhaseRecord {
-                    name: "implement".to_string(),
+                    name: "auth-middleware".to_string(),
+                    kind: PhaseKind::Dev,
                     status: PhaseStatus::Completed,
                     started_at: Some(now),
                     completed_at: Some(now),
@@ -353,7 +378,8 @@ mod tests {
                     details: serde_json::json!({"files_changed": 8}),
                 },
                 PhaseRecord {
-                    name: "test".to_string(),
+                    name: "review".to_string(),
+                    kind: PhaseKind::Quality,
                     status: PhaseStatus::Running,
                     started_at: Some(now),
                     completed_at: None,
@@ -364,7 +390,7 @@ mod tests {
                         output_tokens: 4000,
                     },
                     duration_secs: 900,
-                    details: serde_json::json!({"tests_added": 12}),
+                    details: serde_json::json!({}),
                 },
             ],
             pr: Some(PrInfo {
@@ -392,8 +418,11 @@ mod tests {
         assert_eq!(deserialized.git.branch, "feature/add-user-auth");
         assert_eq!(deserialized.git.base_branch, "main");
         assert_eq!(deserialized.phases.len(), 3);
+        assert_eq!(deserialized.phases[0].kind, PhaseKind::Dev);
         assert_eq!(deserialized.phases[0].status, PhaseStatus::Completed);
+        assert_eq!(deserialized.phases[1].kind, PhaseKind::Dev);
         assert_eq!(deserialized.phases[1].turns, 12);
+        assert_eq!(deserialized.phases[2].kind, PhaseKind::Quality);
         assert_eq!(deserialized.phases[2].status, PhaseStatus::Running);
         assert!(deserialized.pr.is_some());
         assert_eq!(deserialized.pr.as_ref().unwrap().number, 42);
@@ -428,9 +457,10 @@ mod tests {
                 branch: "feature/test".to_string(),
                 base_branch: "main".to_string(),
             },
-            phases: (0..5)
-                .map(|i| PhaseRecord {
-                    name: format!("phase-{i}"),
+            phases: vec![
+                PhaseRecord {
+                    name: "dev-phase-1".to_string(),
+                    kind: PhaseKind::Dev,
                     status: PhaseStatus::Pending,
                     started_at: None,
                     completed_at: None,
@@ -439,8 +469,32 @@ mod tests {
                     cost: TokenCost::default(),
                     duration_secs: 0,
                     details: serde_json::json!({}),
-                })
-                .collect(),
+                },
+                PhaseRecord {
+                    name: "review".to_string(),
+                    kind: PhaseKind::Quality,
+                    status: PhaseStatus::Pending,
+                    started_at: None,
+                    completed_at: None,
+                    turns: 0,
+                    cost_usd: 0.0,
+                    cost: TokenCost::default(),
+                    duration_secs: 0,
+                    details: serde_json::json!({}),
+                },
+                PhaseRecord {
+                    name: "verify".to_string(),
+                    kind: PhaseKind::Quality,
+                    status: PhaseStatus::Pending,
+                    started_at: None,
+                    completed_at: None,
+                    turns: 0,
+                    cost_usd: 0.0,
+                    cost: TokenCost::default(),
+                    duration_secs: 0,
+                    details: serde_json::json!({}),
+                },
+            ],
             pr: None,
             total: TotalStats::default(),
         };
@@ -448,7 +502,7 @@ mod tests {
     }
 
     #[test]
-    fn test_should_reject_wrong_phase_count() {
+    fn test_should_reject_too_few_phases() {
         let now = chrono::Utc::now();
         let state = FeatureState {
             feature: FeatureInfo {
@@ -463,17 +517,29 @@ mod tests {
                 branch: "feature/test".to_string(),
                 base_branch: "main".to_string(),
             },
-            phases: vec![], // wrong: should be 5
+            phases: vec![], // wrong: need at least 3
             pr: None,
             total: TotalStats::default(),
         };
         let err = state.validate().unwrap_err();
-        assert!(err.contains("expected 5 phases"));
+        assert!(err.contains("at least 3 phases"));
     }
 
     #[test]
     fn test_should_reject_path_traversal_in_worktree() {
         let now = chrono::Utc::now();
+        let make_phase = |name: &str, kind: PhaseKind| PhaseRecord {
+            name: name.to_string(),
+            kind,
+            status: PhaseStatus::Pending,
+            started_at: None,
+            completed_at: None,
+            turns: 0,
+            cost_usd: 0.0,
+            cost: TokenCost::default(),
+            duration_secs: 0,
+            details: serde_json::json!({}),
+        };
         let state = FeatureState {
             feature: FeatureInfo {
                 slug: "test".to_string(),
@@ -487,19 +553,11 @@ mod tests {
                 branch: "feature/test".to_string(),
                 base_branch: "main".to_string(),
             },
-            phases: (0..5)
-                .map(|i| PhaseRecord {
-                    name: format!("phase-{i}"),
-                    status: PhaseStatus::Pending,
-                    started_at: None,
-                    completed_at: None,
-                    turns: 0,
-                    cost_usd: 0.0,
-                    cost: TokenCost::default(),
-                    duration_secs: 0,
-                    details: serde_json::json!({}),
-                })
-                .collect(),
+            phases: vec![
+                make_phase("dev-1", PhaseKind::Dev),
+                make_phase("review", PhaseKind::Quality),
+                make_phase("verify", PhaseKind::Quality),
+            ],
             pr: None,
             total: TotalStats::default(),
         };

@@ -25,7 +25,7 @@ use crate::{PromptError, PromptTemplate};
 ///     └── setup.j2
 /// ```
 ///
-/// This produces templates named `init/system`, `init/analyze_repo`, and `run/setup`.
+/// This produces templates named `init/system`, `init/analyze_repo`, and `run/dev_phase`.
 ///
 /// # Errors
 ///

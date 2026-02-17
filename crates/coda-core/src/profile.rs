@@ -44,6 +44,7 @@ impl AgentProfile {
         cwd: PathBuf,
         max_turns: u32,
         max_budget_usd: f64,
+        model: &str,
     ) -> ClaudeAgentOptions {
         let system_prompt = SystemPrompt::Preset(SystemPromptPreset::with_append(
             "claude_code",
@@ -57,6 +58,7 @@ impl AgentProfile {
                 .cwd(cwd)
                 .max_turns(max_turns)
                 .max_budget_usd(max_budget_usd)
+                .model(model.to_string())
                 .tools(Tools::from(["Read", "Glob", "Grep"]))
                 .build(),
 
@@ -66,6 +68,7 @@ impl AgentProfile {
                 .cwd(cwd)
                 .max_turns(max_turns)
                 .max_budget_usd(max_budget_usd)
+                .model(model.to_string())
                 .tools(Tools::from(["Read", "Write", "Bash", "Glob", "Grep"]))
                 .hooks(build_safety_hooks())
                 .build(),
@@ -206,10 +209,17 @@ mod tests {
     #[test]
     fn test_should_create_planner_options() {
         let profile = AgentProfile::Planner;
-        let options = profile.to_options("Test append", PathBuf::from("/tmp"), 10, 5.0);
+        let options = profile.to_options(
+            "Test append",
+            PathBuf::from("/tmp"),
+            10,
+            5.0,
+            "claude-opus-4-6",
+        );
 
         assert_eq!(options.max_turns, Some(10));
         assert_eq!(options.max_budget_usd, Some(5.0));
+        assert_eq!(options.model, Some("claude-opus-4-6".to_string()));
         assert_eq!(
             options.permission_mode,
             Some(PermissionMode::BypassPermissions)
@@ -231,10 +241,17 @@ mod tests {
     #[test]
     fn test_should_create_coder_options() {
         let profile = AgentProfile::Coder;
-        let options = profile.to_options("Test append", PathBuf::from("/tmp"), 20, 10.0);
+        let options = profile.to_options(
+            "Test append",
+            PathBuf::from("/tmp"),
+            20,
+            10.0,
+            "claude-opus-4-6",
+        );
 
         assert_eq!(options.max_turns, Some(20));
         assert_eq!(options.max_budget_usd, Some(10.0));
+        assert_eq!(options.model, Some("claude-opus-4-6".to_string()));
         assert!(options.hooks.is_some());
 
         match options.tools {

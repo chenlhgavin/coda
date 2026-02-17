@@ -217,6 +217,7 @@ impl Engine {
             self.project_root.clone(),
             5, // max_turns for analysis
             self.config.agent.max_budget_usd,
+            &self.config.agent.model,
         );
 
         let messages = claude_agent_sdk_rs::query(analyze_prompt, Some(planner_options))
@@ -246,6 +247,7 @@ impl Engine {
             self.project_root.clone(),
             10, // max_turns for setup
             self.config.agent.max_budget_usd,
+            &self.config.agent.model,
         );
 
         let _messages = claude_agent_sdk_rs::query(setup_prompt, Some(coder_options))

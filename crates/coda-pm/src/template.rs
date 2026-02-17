@@ -21,7 +21,7 @@ use serde::{Deserialize, Serialize};
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PromptTemplate {
-    /// Template identifier (e.g., `"init/system"`, `"run/setup"`).
+    /// Template identifier (e.g., `"init/system"`, `"run/dev_phase"`).
     pub name: String,
 
     /// Raw minijinja template content.
