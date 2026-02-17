@@ -1,0 +1,27 @@
+# CODA Project Configuration
+version: 1
+
+next_feature_id: 1
+
+agent:
+  model: "claude-opus-4-6"
+  permission_mode: "auto"
+  max_retries: 3
+
+prompts:
+  extra_dirs: []
+
+git:
+  auto_commit: true
+  branch_prefix: "feature"
+  commit_prefix: "feat"
+
+review:
+  enabled: true
+  checks:
+    - "cargo build"
+    - "cargo +nightly fmt -- --check"
+    - "cargo clippy -- -D warnings"
+    - "cargo test"
+    - "cargo deny check"
+  max_review_rounds: 5

@@ -51,7 +51,7 @@ pub struct CodaConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AgentConfig {
-    /// Model identifier to use (e.g., `"claude-sonnet-4-20250514"`).
+    /// Model identifier to use (e.g., `"claude-opus-4-6"`).
     pub model: String,
 
     /// Maximum budget in USD for a single `coda run` invocation.
@@ -120,7 +120,7 @@ impl Default for CodaConfig {
 impl Default for AgentConfig {
     fn default() -> Self {
         Self {
-            model: "claude-sonnet-4-20250514".to_string(),
+            model: "claude-opus-4-6".to_string(),
             max_budget_usd: 20.0,
             max_retries: 3,
         }
@@ -257,7 +257,7 @@ review:
         let yaml = "version: 1\n";
         let config: CodaConfig = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(config.version, 1);
-        assert_eq!(config.agent.model, "claude-sonnet-4-20250514");
+        assert_eq!(config.agent.model, "claude-opus-4-6");
         assert!((config.agent.max_budget_usd - 20.0).abs() < f64::EPSILON);
         assert!(config.git.auto_commit);
     }
