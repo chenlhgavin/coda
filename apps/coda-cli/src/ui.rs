@@ -127,9 +127,9 @@ impl PlanUi {
         self.messages.push(ChatMessage {
             role: AGENT_ROLE.to_string(),
             content: format!(
-                "I'm ready to help you plan the **{}** feature.\n\n\
-                 Can you tell me more about what you want this feature to do? \
-                 Include any requirements, constraints, or specs you have in mind.",
+                "Planning session started for **{}**.\n\n\
+                 Please describe what you want to build. \
+                 I'll first make sure I understand your intent before proposing a design.",
                 session.feature_slug()
             ),
         });

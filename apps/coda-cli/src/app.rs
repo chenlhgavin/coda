@@ -125,10 +125,10 @@ impl App {
 
         println!();
         println!(
-            "  {:<6} {:<24} {:<14} {:<28} {:>8} {:>8}",
-            "ID", "Slug", "Status", "Branch", "Turns", "Cost"
+            "  {:<28} {:<14} {:<28} {:>8} {:>8}",
+            "Feature", "Status", "Branch", "Turns", "Cost"
         );
-        println!("  {}", "─".repeat(94));
+        println!("  {}", "─".repeat(90));
 
         for f in &features {
             let status_icon = match f.status {
@@ -140,9 +140,8 @@ impl App {
             };
 
             println!(
-                "  {:<6} {:<24} {status_icon} {:<12} {:<28} {:>8} {:>8}",
-                f.feature.id,
-                truncate_str(&f.feature.slug, 24),
+                "  {:<28} {status_icon} {:<12} {:<28} {:>8} {:>8}",
+                truncate_str(&f.feature.slug, 28),
                 f.status,
                 truncate_str(&f.git.branch, 28),
                 f.total.turns,
@@ -177,7 +176,7 @@ impl App {
         };
 
         println!();
-        println!("  Feature: {} ({})", state.feature.slug, state.feature.id);
+        println!("  Feature: {}", state.feature.slug);
         println!("  ═══════════════════════════════════════");
         println!();
         println!("  Status:     {status_icon} {}", state.status);

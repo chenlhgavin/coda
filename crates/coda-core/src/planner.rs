@@ -50,7 +50,6 @@ const PHASE_NAMES: &[&str] = &["setup", "implement", "test", "review", "verify"]
 pub struct PlanSession {
     client: ClaudeClient,
     feature_slug: String,
-    feature_id: String,
     project_root: PathBuf,
     pm: PromptManager,
     config: CodaConfig,
@@ -74,8 +73,6 @@ impl PlanSession {
         pm: &PromptManager,
         config: &CodaConfig,
     ) -> Result<Self, CoreError> {
-        let feature_id = format!("{:04}", config.next_feature_id);
-
         // Load .coda.md for repository context
         let coda_md_path = project_root.join(".coda.md");
         let coda_md = std::fs::read_to_string(&coda_md_path).unwrap_or_default();
@@ -94,7 +91,6 @@ impl PlanSession {
         Ok(Self {
             client,
             feature_slug,
-            feature_id,
             project_root,
             pm: pm.clone(),
             config: config.clone(),
@@ -172,7 +168,6 @@ impl PlanSession {
             "plan/approve",
             minijinja::context!(
                 feature_slug => &self.feature_slug,
-                feature_id => &self.feature_id,
             ),
         )?;
 
@@ -201,7 +196,7 @@ impl PlanSession {
     /// Returns `CoreError` if directory creation, agent queries, git
     /// operations, or file writes fail.
     pub async fn finalize(&mut self) -> Result<PlanOutput, CoreError> {
-        let feature_dir_name = self.feature_dir_name();
+        let feature_dir_name = self.feature_dir_name().to_string();
         let coda_feature_dir = self.project_root.join(".coda").join(&feature_dir_name);
         let specs_dir = coda_feature_dir.join("specs");
         let worktree_path = self.project_root.join(".trees").join(&feature_dir_name);
@@ -256,7 +251,6 @@ impl PlanSession {
 
         // Write initial state.yml
         let state = build_initial_state(
-            &self.feature_id,
             &self.feature_slug,
             &worktree_path,
             &branch_name,
@@ -283,19 +277,14 @@ impl PlanSession {
         })
     }
 
-    /// Returns the combined directory name `<id>-<slug>`.
-    pub fn feature_dir_name(&self) -> String {
-        format!("{}-{}", self.feature_id, self.feature_slug)
+    /// Returns the directory name for this feature (the slug itself).
+    pub fn feature_dir_name(&self) -> &str {
+        &self.feature_slug
     }
 
     /// Returns the feature slug.
     pub fn feature_slug(&self) -> &str {
         &self.feature_slug
-    }
-
-    /// Returns the feature ID.
-    pub fn feature_id(&self) -> &str {
-        &self.feature_id
     }
 }
 
@@ -303,7 +292,6 @@ impl std::fmt::Debug for PlanSession {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("PlanSession")
             .field("feature_slug", &self.feature_slug)
-            .field("feature_id", &self.feature_id)
             .field("project_root", &self.project_root)
             .field("connected", &self.connected)
             .finish_non_exhaustive()
@@ -378,8 +366,8 @@ fn detect_default_branch(project_root: &Path, configured: &str) -> String {
 ///
 /// Creates a `FeatureState` with all phases set to `Pending`, a
 /// `Planned` overall status, and zeroed cost/duration statistics.
+/// The feature slug is used as the unique identifier.
 pub(crate) fn build_initial_state(
-    feature_id: &str,
     feature_slug: &str,
     worktree_path: &Path,
     branch: &str,
@@ -404,7 +392,6 @@ pub(crate) fn build_initial_state(
 
     FeatureState {
         feature: FeatureInfo {
-            id: feature_id.to_string(),
             slug: feature_slug.to_string(),
             created_at: now,
             updated_at: now,
@@ -428,17 +415,10 @@ mod tests {
 
     #[test]
     fn test_should_build_initial_state_with_correct_structure() {
-        let worktree = PathBuf::from(".trees/0001-add-auth");
-        let state = build_initial_state(
-            "0001",
-            "add-auth",
-            &worktree,
-            "feature/0001-add-auth",
-            "main",
-        );
+        let worktree = PathBuf::from(".trees/add-auth");
+        let state = build_initial_state("add-auth", &worktree, "feature/add-auth", "main");
 
         // Feature info
-        assert_eq!(state.feature.id, "0001");
         assert_eq!(state.feature.slug, "add-auth");
         assert!(state.feature.created_at <= chrono::Utc::now());
         assert!(state.feature.updated_at <= chrono::Utc::now());
@@ -448,11 +428,8 @@ mod tests {
         assert_eq!(state.current_phase, 0);
 
         // Git info
-        assert_eq!(
-            state.git.worktree_path,
-            PathBuf::from(".trees/0001-add-auth")
-        );
-        assert_eq!(state.git.branch, "feature/0001-add-auth");
+        assert_eq!(state.git.worktree_path, PathBuf::from(".trees/add-auth"));
+        assert_eq!(state.git.branch, "feature/add-auth");
         assert_eq!(state.git.base_branch, "main");
 
         // Phases: should have exactly 5, all pending
@@ -485,18 +462,11 @@ mod tests {
 
     #[test]
     fn test_should_build_initial_state_serializable_to_yaml() {
-        let worktree = PathBuf::from(".trees/0002-new-feature");
-        let state = build_initial_state(
-            "0002",
-            "new-feature",
-            &worktree,
-            "feature/0002-new-feature",
-            "main",
-        );
+        let worktree = PathBuf::from(".trees/new-feature");
+        let state = build_initial_state("new-feature", &worktree, "feature/new-feature", "main");
 
         let yaml = serde_yaml::to_string(&state).unwrap();
         assert!(yaml.contains("planned"));
-        assert!(yaml.contains("0002"));
         assert!(yaml.contains("new-feature"));
         assert!(yaml.contains("setup"));
         assert!(yaml.contains("verify"));

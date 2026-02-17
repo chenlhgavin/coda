@@ -319,8 +319,8 @@ impl Engine {
             }
         }
 
-        // Sort by feature ID
-        features.sort_by(|a, b| a.feature.id.cmp(&b.feature.id));
+        // Sort by feature slug
+        features.sort_by(|a, b| a.feature.slug.cmp(&b.feature.slug));
         Ok(features)
     }
 

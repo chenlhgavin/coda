@@ -689,11 +689,10 @@ impl Runner {
 
     /// Loads the design spec from the feature's specs directory.
     fn load_design_spec(&self) -> Result<String, CoreError> {
-        let feature_dir_name = format!("{}-{}", self.state.feature.id, self.state.feature.slug);
         let spec_path = self
             .project_root
             .join(".coda")
-            .join(&feature_dir_name)
+            .join(&self.state.feature.slug)
             .join("specs/design.md");
 
         std::fs::read_to_string(&spec_path).map_err(|e| {
@@ -706,11 +705,10 @@ impl Runner {
 
     /// Loads the verification spec from the feature's specs directory.
     fn load_verification_spec(&self) -> Result<String, CoreError> {
-        let feature_dir_name = format!("{}-{}", self.state.feature.id, self.state.feature.slug);
         let spec_path = self
             .project_root
             .join(".coda")
-            .join(&feature_dir_name)
+            .join(&self.state.feature.slug)
             .join("specs/verification.md");
 
         std::fs::read_to_string(&spec_path).map_err(|e| {

@@ -1,8 +1,6 @@
 # CODA Project Configuration
 version: 1
 
-next_feature_id: 1
-
 agent:
   model: "claude-opus-4-6"
   permission_mode: "auto"

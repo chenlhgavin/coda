@@ -20,15 +20,14 @@ use serde::{Deserialize, Serialize};
 ///
 /// let yaml = r#"
 /// feature:
-///   id: "0001"
 ///   slug: "add-auth"
 ///   created_at: "2026-02-10T10:30:00Z"
 ///   updated_at: "2026-02-10T10:30:00Z"
 /// status: planned
 /// current_phase: 0
 /// git:
-///   worktree_path: ".trees/0001-add-auth"
-///   branch: "feature/0001-add-auth"
+///   worktree_path: ".trees/add-auth"
+///   branch: "feature/add-auth"
 ///   base_branch: "main"
 /// phases: []
 /// total:
@@ -113,12 +112,12 @@ impl FeatureState {
 }
 
 /// Basic metadata identifying a feature.
+///
+/// The `slug` serves as the unique identifier for the feature
+/// across directory names, branch names, and state files.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FeatureInfo {
-    /// Feature identifier (e.g., `"0001"`).
-    pub id: String,
-
-    /// URL-safe feature slug (e.g., `"add-user-auth"`).
+    /// URL-safe feature slug used as unique identifier (e.g., `"add-user-auth"`).
     pub slug: String,
 
     /// When this feature was created.
@@ -313,7 +312,6 @@ mod tests {
         let now = chrono::Utc::now();
         let state = FeatureState {
             feature: FeatureInfo {
-                id: "0001".to_string(),
                 slug: "add-user-auth".to_string(),
                 created_at: now,
                 updated_at: now,
@@ -321,8 +319,8 @@ mod tests {
             status: FeatureStatus::InProgress,
             current_phase: 2,
             git: GitInfo {
-                worktree_path: PathBuf::from(".trees/0001-add-user-auth"),
-                branch: "feature/0001-add-user-auth".to_string(),
+                worktree_path: PathBuf::from(".trees/add-user-auth"),
+                branch: "feature/add-user-auth".to_string(),
                 base_branch: "main".to_string(),
             },
             phases: vec![
@@ -388,11 +386,10 @@ mod tests {
         let yaml = serde_yaml::to_string(&state).unwrap();
         let deserialized: FeatureState = serde_yaml::from_str(&yaml).unwrap();
 
-        assert_eq!(deserialized.feature.id, "0001");
         assert_eq!(deserialized.feature.slug, "add-user-auth");
         assert_eq!(deserialized.status, FeatureStatus::InProgress);
         assert_eq!(deserialized.current_phase, 2);
-        assert_eq!(deserialized.git.branch, "feature/0001-add-user-auth");
+        assert_eq!(deserialized.git.branch, "feature/add-user-auth");
         assert_eq!(deserialized.git.base_branch, "main");
         assert_eq!(deserialized.phases.len(), 3);
         assert_eq!(deserialized.phases[0].status, PhaseStatus::Completed);
@@ -420,7 +417,6 @@ mod tests {
         let now = chrono::Utc::now();
         let state = FeatureState {
             feature: FeatureInfo {
-                id: "0001".to_string(),
                 slug: "test".to_string(),
                 created_at: now,
                 updated_at: now,
@@ -428,8 +424,8 @@ mod tests {
             status: FeatureStatus::Planned,
             current_phase: 0,
             git: GitInfo {
-                worktree_path: PathBuf::from(".trees/0001-test"),
-                branch: "feature/0001-test".to_string(),
+                worktree_path: PathBuf::from(".trees/test"),
+                branch: "feature/test".to_string(),
                 base_branch: "main".to_string(),
             },
             phases: (0..5)
@@ -456,7 +452,6 @@ mod tests {
         let now = chrono::Utc::now();
         let state = FeatureState {
             feature: FeatureInfo {
-                id: "0001".to_string(),
                 slug: "test".to_string(),
                 created_at: now,
                 updated_at: now,
@@ -464,8 +459,8 @@ mod tests {
             status: FeatureStatus::Planned,
             current_phase: 0,
             git: GitInfo {
-                worktree_path: PathBuf::from(".trees/0001-test"),
-                branch: "feature/0001-test".to_string(),
+                worktree_path: PathBuf::from(".trees/test"),
+                branch: "feature/test".to_string(),
                 base_branch: "main".to_string(),
             },
             phases: vec![], // wrong: should be 5
@@ -481,7 +476,6 @@ mod tests {
         let now = chrono::Utc::now();
         let state = FeatureState {
             feature: FeatureInfo {
-                id: "0001".to_string(),
                 slug: "test".to_string(),
                 created_at: now,
                 updated_at: now,
@@ -490,7 +484,7 @@ mod tests {
             current_phase: 0,
             git: GitInfo {
                 worktree_path: PathBuf::from("../../etc/shadow"),
-                branch: "feature/0001-test".to_string(),
+                branch: "feature/test".to_string(),
                 base_branch: "main".to_string(),
             },
             phases: (0..5)
@@ -518,7 +512,6 @@ mod tests {
         let now = chrono::Utc::now();
         let state = FeatureState {
             feature: FeatureInfo {
-                id: "0001".to_string(),
                 slug: "test".to_string(),
                 created_at: now,
                 updated_at: now,
@@ -526,8 +519,8 @@ mod tests {
             status: FeatureStatus::Planned,
             current_phase: 0,
             git: GitInfo {
-                worktree_path: PathBuf::from(".trees/0001-test"),
-                branch: "feature/0001-test".to_string(),
+                worktree_path: PathBuf::from(".trees/test"),
+                branch: "feature/test".to_string(),
                 base_branch: "main".to_string(),
             },
             phases: vec![],
