@@ -199,14 +199,20 @@ impl PlanUi {
                         });
                         self.scroll_to_bottom();
 
-                        // Show spinner while the agent formalizes the design
+                        // Show spinner while the agent formalizes design + verification
                         let result = self.approve_with_spinner(session).await;
 
                         match result {
-                            Ok(Some(design)) => {
+                            Ok(Some((design, verification))) => {
                                 self.messages.push(ChatMessage {
                                     role: AGENT_ROLE.to_string(),
                                     content: design,
+                                });
+                                self.messages.push(ChatMessage {
+                                    role: AGENT_ROLE.to_string(),
+                                    content: format!(
+                                        "---\n\n**Verification Plan:**\n\n{verification}"
+                                    ),
                                 });
                                 self.scroll_to_bottom();
                                 self.phase = PlanPhase::Approved;
@@ -347,13 +353,19 @@ impl PlanUi {
 
     /// Runs `session.approve()` while displaying an animated spinner.
     ///
-    /// Returns `Ok(Some(design))` on success, `Ok(None)` if the user
-    /// cancels with Ctrl+C, or `Err` on failure.
-    async fn approve_with_spinner(&mut self, session: &mut PlanSession) -> Result<Option<String>> {
+    /// Returns `Ok(Some((design, verification)))` on success, `Ok(None)`
+    /// if the user cancels with Ctrl+C, or `Err` on failure.
+    async fn approve_with_spinner(
+        &mut self,
+        session: &mut PlanSession,
+    ) -> Result<Option<(String, String)>> {
         // Add thinking indicator
         self.messages.push(ChatMessage {
             role: AGENT_ROLE.to_string(),
-            content: format!("{} Formalizing design...", SPINNER_FRAMES[0]),
+            content: format!(
+                "{} Approving design & generating verification plan...",
+                SPINNER_FRAMES[0]
+            ),
         });
         let thinking_idx = self.messages.len() - 1;
         self.scroll_to_bottom();
@@ -366,7 +378,7 @@ impl PlanUi {
 
         let result = loop {
             self.messages[thinking_idx].content = format!(
-                "{} Formalizing design...",
+                "{} Approving design & generating verification plan...",
                 SPINNER_FRAMES[spinner_tick % SPINNER_FRAMES.len()]
             );
             spinner_tick += 1;
@@ -392,7 +404,7 @@ impl PlanUi {
         self.messages.pop();
 
         match result {
-            Ok(design) => Ok(Some(design)),
+            Ok((design, verification)) => Ok(Some((design, verification))),
             Err(e) => Err(e.into()),
         }
     }

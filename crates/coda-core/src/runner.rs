@@ -71,7 +71,6 @@ pub struct Runner {
     client: ClaudeClient,
     pm: PromptManager,
     config: CodaConfig,
-    project_root: PathBuf,
     state: FeatureState,
     state_path: PathBuf,
     worktree_path: PathBuf,
@@ -132,7 +131,6 @@ impl Runner {
             client,
             pm: pm.clone(),
             config: config.clone(),
-            project_root,
             state,
             state_path,
             worktree_path,
@@ -687,10 +685,10 @@ impl Runner {
         Ok(())
     }
 
-    /// Loads the design spec from the feature's specs directory.
+    /// Loads the design spec from the worktree's `.coda/<slug>/specs/` directory.
     fn load_design_spec(&self) -> Result<String, CoreError> {
         let spec_path = self
-            .project_root
+            .worktree_path
             .join(".coda")
             .join(&self.state.feature.slug)
             .join("specs/design.md");
@@ -703,10 +701,10 @@ impl Runner {
         })
     }
 
-    /// Loads the verification spec from the feature's specs directory.
+    /// Loads the verification spec from the worktree's `.coda/<slug>/specs/` directory.
     fn load_verification_spec(&self) -> Result<String, CoreError> {
         let spec_path = self
-            .project_root
+            .worktree_path
             .join(".coda")
             .join(&self.state.feature.slug)
             .join("specs/verification.md");
@@ -890,31 +888,65 @@ fn run_command(cmd: &str, args: &[&str], cwd: &Path) -> Result<String, CoreError
 
 /// Finds the `.coda/<id>-<slug>` directory for a feature by its slug.
 ///
-/// Scans `.coda/` for a subdirectory whose name ends with the given slug.
+/// Finds the feature's `.coda/<slug>/` directory inside its worktree.
+///
+/// Scans `.trees/` for a worktree matching the slug, then returns
+/// the path `<worktree>/.coda/<slug>/` which contains `state.yml`
+/// and the specs.
 ///
 /// # Errors
 ///
-/// Returns `CoreError::ConfigError` if `.coda/` does not exist, or
+/// Returns `CoreError::ConfigError` if `.trees/` does not exist, or
 /// `CoreError::StateError` if no matching feature directory is found.
 fn find_feature_dir(project_root: &Path, feature_slug: &str) -> Result<PathBuf, CoreError> {
-    let coda_dir = project_root.join(".coda");
-    if !coda_dir.is_dir() {
+    let trees_dir = project_root.join(".trees");
+    if !trees_dir.is_dir() {
         return Err(CoreError::ConfigError(format!(
-            "No .coda/ directory found at {}. Run `coda init` first.",
-            coda_dir.display()
+            "No .trees/ directory found at {}. Run `coda init` first.",
+            trees_dir.display()
         )));
     }
 
-    let entries = std::fs::read_dir(&coda_dir).map_err(CoreError::IoError)?;
+    // Look for a worktree whose name matches the slug
+    let worktree_path = trees_dir.join(feature_slug);
+    let feature_dir = worktree_path.join(".coda").join(feature_slug);
+
+    if feature_dir.is_dir() && feature_dir.join("state.yml").is_file() {
+        return Ok(feature_dir);
+    }
+
+    // Fall back: scan all worktrees for a matching slug directory
+    let entries = std::fs::read_dir(&trees_dir).map_err(CoreError::IoError)?;
     let mut available_features = Vec::new();
 
     for entry in entries.flatten() {
+        if !entry.file_type().is_ok_and(|ft| ft.is_dir()) {
+            continue;
+        }
         let name = entry.file_name();
         let name_str = name.to_string_lossy();
-        if entry.file_type().is_ok_and(|ft| ft.is_dir()) {
-            if name_str.ends_with(feature_slug) {
-                return Ok(entry.path());
+
+        let candidate = entry.path().join(".coda").join(feature_slug);
+        if candidate.is_dir() && candidate.join("state.yml").is_file() {
+            return Ok(candidate);
+        }
+
+        // Collect available features for hint message
+        let coda_dir = entry.path().join(".coda");
+        if coda_dir.is_dir()
+            && let Ok(coda_entries) = std::fs::read_dir(&coda_dir)
+        {
+            for ce in coda_entries.flatten() {
+                if ce.file_type().is_ok_and(|ft| ft.is_dir())
+                    && ce.path().join("state.yml").is_file()
+                {
+                    available_features.push(ce.file_name().to_string_lossy().to_string());
+                }
             }
+        }
+
+        // Also count the worktree name itself if it has no inner coda dir
+        if available_features.is_empty() {
             available_features.push(name_str.to_string());
         }
     }
@@ -926,8 +958,7 @@ fn find_feature_dir(project_root: &Path, feature_slug: &str) -> Result<PathBuf, 
     };
 
     Err(CoreError::StateError(format!(
-        "No feature directory found for slug '{feature_slug}' in {}. {hint}\nRun `coda plan {feature_slug}` first.",
-        coda_dir.display()
+        "No feature directory found for slug '{feature_slug}'. {hint}\nRun `coda plan {feature_slug}` first.",
     )))
 }
 

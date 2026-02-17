@@ -22,16 +22,16 @@ use crate::state::{
 /// Output produced by finalizing a planning session.
 #[derive(Debug)]
 pub struct PlanOutput {
-    /// Path to the generated design spec (`.coda/<feature>/specs/design.md`).
+    /// Path to the generated design spec (`<worktree>/.coda/<slug>/specs/design.md`).
     pub design_spec: PathBuf,
 
-    /// Path to the generated verification plan (`.coda/<feature>/specs/verification.md`).
+    /// Path to the generated verification plan (`<worktree>/.coda/<slug>/specs/verification.md`).
     pub verification: PathBuf,
 
-    /// Path to the feature state file (`.coda/<feature>/state.yml`).
+    /// Path to the feature state file (`<worktree>/.coda/<slug>/state.yml`).
     pub state: PathBuf,
 
-    /// Path to the git worktree (`.trees/<feature>/`).
+    /// Path to the git worktree (`.trees/<slug>/`).
     pub worktree: PathBuf,
 }
 
@@ -56,6 +56,8 @@ pub struct PlanSession {
     connected: bool,
     /// The formalized design spec produced by [`approve`](Self::approve).
     approved_design: Option<String>,
+    /// The verification plan produced by [`approve`](Self::approve).
+    approved_verification: Option<String>,
 }
 
 impl PlanSession {
@@ -96,6 +98,7 @@ impl PlanSession {
             config: config.clone(),
             connected: false,
             approved_design: None,
+            approved_verification: None,
         })
     }
 
@@ -154,16 +157,20 @@ impl PlanSession {
         Ok(response)
     }
 
-    /// Formalizes the approved design by asking the agent to produce
-    /// a structured design specification document.
+    /// Formalizes the approved design and generates a verification plan.
     ///
-    /// Stores the result in `approved_design` so that [`finalize`](Self::finalize)
-    /// can write it directly without re-generating.
+    /// First asks the agent to produce a structured design specification
+    /// document, then generates a verification plan based on the design.
+    /// Both are stored so [`finalize`](Self::finalize) can write them
+    /// directly without re-generating.
+    ///
+    /// Returns `(design, verification)` so the UI can display both.
     ///
     /// # Errors
     ///
     /// Returns `CoreError` if template rendering or agent communication fails.
-    pub async fn approve(&mut self) -> Result<String, CoreError> {
+    pub async fn approve(&mut self) -> Result<(String, String), CoreError> {
+        // Step 1: Generate formal design spec
         let approve_prompt = self.pm.render(
             "plan/approve",
             minijinja::context!(
@@ -174,7 +181,23 @@ impl PlanSession {
         let design = self.send(&approve_prompt).await?;
         self.approved_design = Some(design.clone());
         info!("Design approved and formalized");
-        Ok(design)
+
+        // Step 2: Generate verification plan
+        let checks_str = self.config.checks.join("\n");
+        let verification_prompt = self.pm.render(
+            "plan/verification",
+            minijinja::context!(
+                design_spec => &design,
+                checks => &checks_str,
+                feature_slug => &self.feature_slug,
+            ),
+        )?;
+
+        let verification = self.send(&verification_prompt).await?;
+        self.approved_verification = Some(verification.clone());
+        info!("Verification plan generated");
+
+        Ok((design, verification))
     }
 
     /// Returns `true` if the design has been approved via [`approve`](Self::approve).
@@ -182,61 +205,38 @@ impl PlanSession {
         self.approved_design.is_some()
     }
 
-    /// Finalizes the planning session by generating specs and creating a worktree.
+    /// Finalizes the planning session by creating a worktree and writing specs.
     ///
     /// This method:
-    /// 1. Creates the `.coda/<feature>/specs/` directory
-    /// 2. Asks the agent to generate a design spec
-    /// 3. Asks the agent to generate a verification plan
-    /// 4. Creates a git worktree from the main branch
-    /// 5. Writes the initial `state.yml`
+    /// 1. Creates a git worktree from the base branch
+    /// 2. Writes the approved design spec into the worktree
+    /// 3. Writes the approved verification plan into the worktree
+    /// 4. Writes the initial `state.yml` into the worktree
+    ///
+    /// All feature artifacts are written under `<worktree>/.coda/<slug>/`
+    /// so they travel with the feature branch and merge cleanly into main.
     ///
     /// # Errors
     ///
-    /// Returns `CoreError` if directory creation, agent queries, git
-    /// operations, or file writes fail.
+    /// Returns `CoreError` if git operations, directory creation, or
+    /// file writes fail.
     pub async fn finalize(&mut self) -> Result<PlanOutput, CoreError> {
-        let feature_dir_name = self.feature_dir_name().to_string();
-        let coda_feature_dir = self.project_root.join(".coda").join(&feature_dir_name);
-        let specs_dir = coda_feature_dir.join("specs");
-        let worktree_path = self.project_root.join(".trees").join(&feature_dir_name);
+        let slug = self.feature_slug.clone();
+        let worktree_path = self.project_root.join(".trees").join(&slug);
 
-        // Guard: design must be approved before finalizing
+        // Guard: design and verification must be approved before finalizing
         let design_content = self.approved_design.take().ok_or_else(|| {
             CoreError::PlanError(
                 "Cannot finalize: design has not been approved. Use /approve first.".to_string(),
             )
         })?;
+        let verification_content = self.approved_verification.take().ok_or_else(|| {
+            CoreError::PlanError("Cannot finalize: verification plan is missing.".to_string())
+        })?;
 
-        // Create directories
-        std::fs::create_dir_all(&specs_dir).map_err(CoreError::IoError)?;
-
-        // Write the approved design spec directly (no re-generation needed)
-        info!("Writing approved design specification...");
-        let design_spec_path = specs_dir.join("design.md");
-        std::fs::write(&design_spec_path, &design_content).map_err(CoreError::IoError)?;
-        debug!(path = %design_spec_path.display(), "Wrote design spec");
-
-        // Generate verification plan via agent
-        info!("Generating verification plan...");
-        let checks_str = self.config.checks.join("\n");
-        let verification_prompt = self.pm.render(
-            "plan/verification",
-            minijinja::context!(
-                design_spec => &design_content,
-                checks => &checks_str,
-                feature_slug => &self.feature_slug,
-            ),
-        )?;
-        let verification_content = self.send(&verification_prompt).await?;
-
-        let verification_path = specs_dir.join("verification.md");
-        std::fs::write(&verification_path, &verification_content).map_err(CoreError::IoError)?;
-        debug!(path = %verification_path.display(), "Wrote verification plan");
-
-        // Create git worktree
+        // 1. Create git worktree first
         let base_branch = detect_default_branch(&self.project_root, &self.config.git.base_branch);
-        let branch_name = format!("{}/{}", self.config.git.branch_prefix, feature_dir_name);
+        let branch_name = format!("{}/{}", self.config.git.branch_prefix, slug);
         create_worktree(
             &self.project_root,
             &worktree_path,
@@ -249,7 +249,22 @@ impl PlanSession {
             "Created git worktree"
         );
 
-        // Write initial state.yml
+        // 2. Write artifacts into worktree/.coda/<slug>/
+        let coda_feature_dir = worktree_path.join(".coda").join(&slug);
+        let specs_dir = coda_feature_dir.join("specs");
+        std::fs::create_dir_all(&specs_dir).map_err(CoreError::IoError)?;
+
+        // Write design spec
+        let design_spec_path = specs_dir.join("design.md");
+        std::fs::write(&design_spec_path, &design_content).map_err(CoreError::IoError)?;
+        debug!(path = %design_spec_path.display(), "Wrote design spec");
+
+        // Write verification plan
+        let verification_path = specs_dir.join("verification.md");
+        std::fs::write(&verification_path, &verification_content).map_err(CoreError::IoError)?;
+        debug!(path = %verification_path.display(), "Wrote verification plan");
+
+        // 3. Write initial state.yml
         let state = build_initial_state(
             &self.feature_slug,
             &worktree_path,
