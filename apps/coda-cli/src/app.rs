@@ -7,7 +7,7 @@
 use std::time::Instant;
 
 use anyhow::Result;
-use coda_core::Engine;
+use coda_core::{Engine, RunEvent};
 use tracing::error;
 
 use crate::ui::PlanUi;
@@ -253,8 +253,8 @@ impl App {
 
     /// Handles the `coda run <feature_slug>` command.
     ///
-    /// Executes all remaining phases and displays phase-by-phase progress
-    /// with timing information and a final summary.
+    /// Executes all remaining phases and displays real-time phase-by-phase
+    /// progress with timing information and a final summary.
     ///
     /// # Errors
     ///
@@ -269,39 +269,59 @@ impl App {
         println!("  Phases: setup → implement → test → review → verify → PR");
         println!();
 
-        match self.engine.run(feature_slug).await {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<RunEvent>();
+
+        // Spawn a lightweight task to display progress events in real-time
+        let display_handle = tokio::spawn(async move {
+            while let Some(event) = rx.recv().await {
+                match event {
+                    RunEvent::PhaseStarting { name, index, total } => {
+                        println!("  [▸] {name:<12} Running...  ({}/{})", index + 1, total);
+                    }
+                    RunEvent::PhaseCompleted {
+                        name,
+                        duration,
+                        turns,
+                        cost_usd,
+                        ..
+                    } => {
+                        println!(
+                            "  [✓] {name:<12} {duration:>8}  {turns:>3} turns  ${cost_usd:.4}",
+                            duration = format_duration(duration),
+                        );
+                    }
+                    RunEvent::PhaseFailed { name, error, .. } => {
+                        println!("  [✗] {name:<12} Failed");
+                        println!("      Error: {error}");
+                    }
+                    RunEvent::CreatingPr => {
+                        println!("  [▸] create-pr    Running...");
+                    }
+                    RunEvent::PrCreated { url } => {
+                        if let Some(url) = url {
+                            println!("  [✓] create-pr    PR: {url}");
+                        } else {
+                            println!("  [✓] create-pr    Done");
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        });
+
+        // Run the engine in the current task (sender is dropped when done)
+        let run_result = self.engine.run_with_progress(feature_slug, tx).await;
+
+        // Wait for all progress events to be displayed
+        let _ = display_handle.await;
+
+        match run_result {
             Ok(results) => {
                 let total_elapsed = run_start.elapsed();
-
-                println!();
-                println!("  ═══════════════════════════════════════");
-                println!("  Run completed successfully!");
-                println!("  ─────────────────────────────────────");
-                println!();
-
                 let mut total_turns = 0u32;
                 let mut total_cost = 0.0f64;
 
                 for result in &results {
-                    let (status_icon, status_style) = match &result.status {
-                        coda_core::TaskStatus::Completed => ("✓", ""),
-                        coda_core::TaskStatus::Failed { error } => ("✗", error.as_str()),
-                        _ => ("?", "unknown status"),
-                    };
-
-                    let phase_name = format_task_name(&result.task);
-                    let duration = format_duration(result.duration);
-
-                    println!(
-                        "  [{status_icon}] {phase_name:<12} {duration:>8}  {turns:>3} turns  ${cost:.4}",
-                        turns = result.turns,
-                        cost = result.cost_usd
-                    );
-
-                    if !status_style.is_empty() {
-                        println!("      Error: {status_style}");
-                    }
-
                     total_turns += result.turns;
                     total_cost += result.cost_usd;
                 }
@@ -321,8 +341,8 @@ impl App {
                 let elapsed = run_start.elapsed();
                 error!("Run failed after {}: {e}", format_duration(elapsed));
                 println!();
-                println!("  [✗] Run failed after {}", format_duration(elapsed));
-                println!("      Error: {e}");
+                println!("  Run failed after {}", format_duration(elapsed));
+                println!("  ═══════════════════════════════════════");
                 println!();
                 Err(e.into())
             }
@@ -344,21 +364,6 @@ fn format_duration(d: std::time::Duration) -> String {
         format!("{mins}m {secs}s")
     } else {
         format!("{total_secs}s")
-    }
-}
-
-/// Formats a `Task` variant into a short phase display name.
-fn format_task_name(task: &coda_core::Task) -> &'static str {
-    match task {
-        coda_core::Task::Init => "init",
-        coda_core::Task::Plan { .. } => "plan",
-        coda_core::Task::Setup { .. } => "setup",
-        coda_core::Task::Implement { .. } => "implement",
-        coda_core::Task::Test { .. } => "test",
-        coda_core::Task::Review { .. } => "review",
-        coda_core::Task::Verify { .. } => "verify",
-        coda_core::Task::CreatePr { .. } => "create-pr",
-        _ => "unknown",
     }
 }
 

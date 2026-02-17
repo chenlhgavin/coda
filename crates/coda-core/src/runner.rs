@@ -5,12 +5,13 @@
 //! state persistence for crash recovery.
 
 use std::path::{Path, PathBuf};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use claude_agent_sdk_rs::{ClaudeClient, ContentBlock, Message, ResultMessage};
 use coda_pm::PromptManager;
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
+use tokio::sync::mpsc::UnboundedSender;
 use tracing::{debug, error, info, warn};
 
 use crate::CoreError;
@@ -21,6 +22,53 @@ use crate::task::{Task, TaskResult, TaskStatus};
 
 /// Phase names in execution order.
 const PHASE_NAMES: [&str; 5] = ["setup", "implement", "test", "review", "verify"];
+
+/// Real-time progress events emitted during a feature run.
+///
+/// Subscribe to these events via [`Runner::set_progress_sender`] to display
+/// live progress in the CLI or UI layer.
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub enum RunEvent {
+    /// A phase is about to start executing.
+    PhaseStarting {
+        /// Phase name (e.g., `"setup"`, `"implement"`).
+        name: String,
+        /// Zero-based phase index.
+        index: usize,
+        /// Total number of phases.
+        total: usize,
+    },
+    /// A phase completed successfully.
+    PhaseCompleted {
+        /// Phase name.
+        name: String,
+        /// Zero-based phase index.
+        index: usize,
+        /// Wall-clock duration of the phase.
+        duration: Duration,
+        /// Number of agent conversation turns used.
+        turns: u32,
+        /// Cost in USD.
+        cost_usd: f64,
+    },
+    /// A phase failed.
+    PhaseFailed {
+        /// Phase name.
+        name: String,
+        /// Zero-based phase index.
+        index: usize,
+        /// Error description.
+        error: String,
+    },
+    /// Creating pull request after all phases.
+    CreatingPr,
+    /// PR creation completed.
+    PrCreated {
+        /// PR URL, if successfully extracted from agent response.
+        url: Option<String>,
+    },
+}
 
 /// Progress tracking for a multi-phase feature development run.
 ///
@@ -77,6 +125,7 @@ pub struct Runner {
     connected: bool,
     review_summary: ReviewSummary,
     verification_summary: VerificationSummary,
+    progress_tx: Option<UnboundedSender<RunEvent>>,
 }
 
 impl Runner {
@@ -137,7 +186,16 @@ impl Runner {
             connected: false,
             review_summary: ReviewSummary::default(),
             verification_summary: VerificationSummary::default(),
+            progress_tx: None,
         })
+    }
+
+    /// Sets a progress event sender for real-time status reporting.
+    ///
+    /// When set, the runner emits [`RunEvent`]s at phase transitions so
+    /// the caller can display live progress without polling.
+    pub fn set_progress_sender(&mut self, tx: UnboundedSender<RunEvent>) {
+        self.progress_tx = Some(tx);
     }
 
     /// Executes all remaining phases from the current checkpoint.
@@ -162,9 +220,15 @@ impl Runner {
 
         let mut results = Vec::new();
         let start_phase = self.state.current_phase as usize;
+        let total_phases = PHASE_NAMES.len();
 
         for (phase_idx, &phase_name) in PHASE_NAMES.iter().enumerate().skip(start_phase) {
             info!(phase = phase_name, index = phase_idx, "Starting phase");
+            self.emit_event(RunEvent::PhaseStarting {
+                name: phase_name.to_string(),
+                index: phase_idx,
+                total: total_phases,
+            });
 
             let result = match phase_name {
                 "setup" => self.run_setup().await,
@@ -185,6 +249,13 @@ impl Runner {
                         cost_usd = task_result.cost_usd,
                         "Phase completed"
                     );
+                    self.emit_event(RunEvent::PhaseCompleted {
+                        name: phase_name.to_string(),
+                        index: phase_idx,
+                        duration: task_result.duration,
+                        turns: task_result.turns,
+                        cost_usd: task_result.cost_usd,
+                    });
                     results.push(task_result);
 
                     // Advance to next phase
@@ -195,6 +266,11 @@ impl Runner {
                 }
                 Err(e) => {
                     error!(phase = phase_name, error = %e, "Phase failed");
+                    self.emit_event(RunEvent::PhaseFailed {
+                        name: phase_name.to_string(),
+                        index: phase_idx,
+                        error: e.to_string(),
+                    });
                     self.state.phases[phase_idx].status = PhaseStatus::Failed;
                     self.state.status = FeatureStatus::Failed;
                     self.save_state()?;
@@ -203,9 +279,18 @@ impl Runner {
             }
         }
 
+        // Commit .coda/ state updates before creating PR
+        self.commit_coda_state()?;
+
         // All phases complete — create PR
         info!("All phases complete, creating PR...");
+        self.emit_event(RunEvent::CreatingPr);
         let pr_result = self.create_pr().await?;
+
+        // Extract PR URL before pushing result
+        let pr_url = self.state.pr.as_ref().map(|pr| pr.url.clone());
+        self.emit_event(RunEvent::PrCreated { url: pr_url });
+
         results.push(pr_result);
 
         // Mark feature as completed
@@ -616,6 +701,41 @@ impl Runner {
     }
 
     // ── Helper Methods ──────────────────────────────────────────────
+
+    /// Emits a progress event to the subscriber, if one is registered.
+    ///
+    /// Silently ignores send failures (e.g., if the receiver was dropped).
+    fn emit_event(&self, event: RunEvent) {
+        if let Some(tx) = &self.progress_tx {
+            let _ = tx.send(event);
+        }
+    }
+
+    /// Commits any pending `.coda/` changes in the worktree.
+    ///
+    /// Stages the `.coda/` directory and creates a commit if there are
+    /// staged changes. This ensures execution state (state.yml, specs)
+    /// is tracked in git alongside the feature code.
+    ///
+    /// Silently succeeds if there are no changes to commit.
+    fn commit_coda_state(&self) -> Result<(), CoreError> {
+        // Stage .coda/ directory
+        run_command("git", &["add", ".coda/"], &self.worktree_path)?;
+
+        // Check if there are staged changes
+        let has_changes =
+            run_command("git", &["diff", "--cached", "--quiet"], &self.worktree_path).is_err();
+
+        if has_changes {
+            let msg = format!("chore({}): update execution state", self.state.feature.slug);
+            run_command("git", &["commit", "-m", &msg], &self.worktree_path)?;
+            info!("Committed .coda/ state updates");
+        } else {
+            debug!("No .coda/ changes to commit");
+        }
+
+        Ok(())
+    }
 
     /// Sends a prompt and collects the full response text + ResultMessage.
     async fn send_and_collect(

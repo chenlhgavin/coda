@@ -30,5 +30,5 @@ pub use planner::{PlanOutput, PlanSession};
 pub use profile::{AgentProfile, build_safety_hooks};
 pub use project::find_project_root;
 pub use reviewer::ReviewResult;
-pub use runner::{CommitInfo, ReviewSummary, RunProgress, Runner, VerificationSummary};
+pub use runner::{CommitInfo, ReviewSummary, RunEvent, RunProgress, Runner, VerificationSummary};
 pub use task::{Task, TaskResult, TaskStatus};

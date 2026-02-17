@@ -12,10 +12,13 @@ use coda_pm::PromptManager;
 use serde::Serialize;
 use tracing::{debug, info};
 
+use tokio::sync::mpsc::UnboundedSender;
+
 use crate::CoreError;
 use crate::config::CodaConfig;
 use crate::planner::PlanSession;
 use crate::profile::AgentProfile;
+use crate::runner::RunEvent;
 use crate::task::TaskResult;
 
 /// Directories to skip when building the repository tree.
@@ -431,6 +434,31 @@ impl Engine {
             &self.pm,
             &self.config,
         )?;
+        runner.execute().await
+    }
+
+    /// Executes a feature run with real-time progress reporting.
+    ///
+    /// Behaves identically to [`run`](Self::run) but emits [`RunEvent`]s
+    /// through the provided channel so the caller can display live progress.
+    ///
+    /// # Errors
+    ///
+    /// Returns `CoreError` if the runner cannot be created or any phase
+    /// fails after all retries.
+    pub async fn run_with_progress(
+        &self,
+        feature_slug: &str,
+        progress_tx: UnboundedSender<RunEvent>,
+    ) -> Result<Vec<TaskResult>, CoreError> {
+        info!(feature_slug, "Starting feature run (with progress)");
+        let mut runner = crate::runner::Runner::new(
+            feature_slug,
+            self.project_root.clone(),
+            &self.pm,
+            &self.config,
+        )?;
+        runner.set_progress_sender(progress_tx);
         runner.execute().await
     }
 }

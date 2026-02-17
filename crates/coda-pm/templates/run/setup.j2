@@ -37,5 +37,13 @@ Based on the design spec, create the initial directory structure and scaffold fi
 
 ## Output
 
-Create all files and make sure the project compiles. Commit with message:
-`feat({{ feature_slug }}): scaffold directory structure`
+Create all files and make sure the project compiles.
+
+**Important**: The `.coda/{{ feature_slug }}/` directory contains the design spec, verification plan, and execution state for this feature. It must be tracked in git.
+
+Commit **both** the scaffold files and the `.coda/` directory:
+
+```bash
+git add -A
+git commit -m "feat({{ feature_slug }}): scaffold directory structure"
+```

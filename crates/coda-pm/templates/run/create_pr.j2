@@ -35,9 +35,13 @@ The following commits were made during development:
 
 ## Task
 
-### 1. Push the branch
+### 1. Commit final state and push the branch
+
+The `.coda/{{ state.feature.slug }}/` directory contains the execution state and specs. Ensure any pending changes are committed before pushing:
 
 ```bash
+git add .coda/
+git diff --cached --quiet || git commit -m "chore({{ state.feature.slug }}): update execution state"
 git push -u origin {{ state.git.branch }}
 ```
 
