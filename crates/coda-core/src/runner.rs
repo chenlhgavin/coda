@@ -114,6 +114,20 @@ pub struct VerificationSummary {
     pub checks_total: u32,
 }
 
+/// Incremental metrics from a single agent interaction.
+///
+/// Computed by [`Runner::compute_incremental_metrics`] as the delta
+/// between the current and previous cumulative SDK values.
+#[derive(Debug, Clone, Copy, Default)]
+struct IncrementalMetrics {
+    /// Incremental cost in USD for this interaction.
+    cost_usd: f64,
+    /// Incremental input tokens consumed.
+    input_tokens: u64,
+    /// Incremental output tokens generated.
+    output_tokens: u64,
+}
+
 /// Collected output from a single agent interaction.
 ///
 /// Separates assistant text from tool execution output so callers can
@@ -156,6 +170,10 @@ pub struct Runner {
     progress_tx: Option<UnboundedSender<RunEvent>>,
     /// Running cumulative cost from the SDK, used to compute per-phase incremental costs.
     cumulative_cost_usd: f64,
+    /// Running cumulative input tokens from the SDK.
+    cumulative_input_tokens: u64,
+    /// Running cumulative output tokens from the SDK.
+    cumulative_output_tokens: u64,
 }
 
 impl Runner {
@@ -219,6 +237,8 @@ impl Runner {
             verification_summary: VerificationSummary::default(),
             progress_tx: None,
             cumulative_cost_usd: 0.0,
+            cumulative_input_tokens: 0,
+            cumulative_output_tokens: 0,
         })
     }
 
@@ -254,8 +274,35 @@ impl Runner {
         self.save_state()?;
 
         let mut results = Vec::new();
-        let start_phase = self.state.current_phase as usize;
         let total_phases = self.state.phases.len();
+
+        // Determine start phase from actual phase statuses, not the
+        // `current_phase` counter which can be stale after a crash between
+        // `mark_phase_completed` and the counter increment.
+        let start_phase = self
+            .state
+            .phases
+            .iter()
+            .position(|p| p.status != PhaseStatus::Completed)
+            .unwrap_or(total_phases);
+
+        // Sync the counter to match the computed start phase
+        if start_phase < total_phases {
+            self.state.current_phase = start_phase as u32;
+        }
+
+        if start_phase > 0 {
+            info!(
+                start_phase = start_phase,
+                total = total_phases,
+                "Resuming from phase {} (skipping {} completed)",
+                self.state
+                    .phases
+                    .get(start_phase)
+                    .map_or("create-pr", |p| p.name.as_str()),
+                start_phase,
+            );
+        }
 
         // Emit initial phase list so the UI can display the full pipeline
         let phase_names: Vec<String> = self.state.phases.iter().map(|p| p.name.clone()).collect();
@@ -302,10 +349,8 @@ impl Runner {
                     });
                     results.push(task_result);
 
-                    // Advance to next phase
-                    if phase_idx + 1 < total_phases {
-                        self.state.current_phase = (phase_idx + 1) as u32;
-                    }
+                    // Advance current_phase as a secondary checkpoint
+                    self.state.current_phase = ((phase_idx + 1).min(total_phases)) as u32;
                     self.save_state()?;
                 }
                 Err(e) => {
@@ -408,9 +453,11 @@ impl Runner {
             "Dev phase response received"
         );
 
-        let phase_cost = self.compute_incremental_cost(&resp.result);
+        let metrics = self.compute_incremental_metrics(&resp.result);
         self.mark_phase_completed(phase_idx, &resp.result);
-        self.state.phases[phase_idx].cost_usd = phase_cost;
+        self.state.phases[phase_idx].cost_usd = metrics.cost_usd;
+        self.state.phases[phase_idx].cost.input_tokens = metrics.input_tokens;
+        self.state.phases[phase_idx].cost.output_tokens = metrics.output_tokens;
 
         Ok(TaskResult {
             task: Task::DevPhase {
@@ -419,7 +466,7 @@ impl Runner {
             },
             status: TaskStatus::Completed,
             turns: resp.result.as_ref().map_or(1, |r| r.num_turns),
-            cost_usd: phase_cost,
+            cost_usd: metrics.cost_usd,
             duration: std::time::Duration::from_millis(
                 resp.result.as_ref().map_or(0, |r| r.duration_ms),
             ),
@@ -455,6 +502,8 @@ impl Runner {
         let start = Instant::now();
         let mut total_turns = 0u32;
         let mut total_cost = 0.0f64;
+        let mut total_input_tokens = 0u64;
+        let mut total_output_tokens = 0u64;
 
         for round in 0..max_rounds {
             info!(round = round + 1, max = max_rounds, "Review round");
@@ -470,7 +519,10 @@ impl Runner {
 
             let resp = self.send_and_collect(&review_prompt).await?;
             total_turns += resp.result.as_ref().map_or(1, |r| r.num_turns);
-            total_cost += self.compute_incremental_cost(&resp.result);
+            let m = self.compute_incremental_metrics(&resp.result);
+            total_cost += m.cost_usd;
+            total_input_tokens += m.input_tokens;
+            total_output_tokens += m.output_tokens;
 
             self.review_summary.rounds += 1;
 
@@ -486,21 +538,29 @@ impl Runner {
 
             info!(issues = issue_count, "Found issues, asking agent to fix");
 
-            // Ask agent to fix the issues
+            // Ask agent to fix the issues with design spec context
+            let issues_list = issues
+                .iter()
+                .enumerate()
+                .map(|(i, issue)| format!("{}. {}", i + 1, issue))
+                .collect::<Vec<_>>()
+                .join("\n");
             let fix_prompt = format!(
-                "The code review found {} critical/major issues. Please fix them:\n\n{}",
-                issue_count,
-                issues
-                    .iter()
-                    .enumerate()
-                    .map(|(i, issue)| format!("{}. {}", i + 1, issue))
-                    .collect::<Vec<_>>()
-                    .join("\n")
+                "The code review found {issue_count} critical/major issues that must be fixed.\n\n\
+                 ## Issues\n\n{issues_list}\n\n\
+                 ## Instructions\n\n\
+                 1. Fix each issue listed above\n\
+                 2. Run the configured checks to ensure nothing is broken\n\
+                 3. Commit the fixes with a descriptive message\n\n\
+                 Refer to the design specification provided earlier for the intended behavior.",
             );
 
             let fix_resp = self.send_and_collect(&fix_prompt).await?;
             total_turns += fix_resp.result.as_ref().map_or(1, |r| r.num_turns);
-            total_cost += self.compute_incremental_cost(&fix_resp.result);
+            let fm = self.compute_incremental_metrics(&fix_resp.result);
+            total_cost += fm.cost_usd;
+            total_input_tokens += fm.input_tokens;
+            total_output_tokens += fm.output_tokens;
 
             self.review_summary.issues_resolved += issue_count;
         }
@@ -509,6 +569,8 @@ impl Runner {
         // Update phase metrics manually since we accumulated across rounds
         self.state.phases[phase_idx].turns = total_turns;
         self.state.phases[phase_idx].cost_usd = total_cost;
+        self.state.phases[phase_idx].cost.input_tokens = total_input_tokens;
+        self.state.phases[phase_idx].cost.output_tokens = total_output_tokens;
         self.state.phases[phase_idx].duration_secs = start.elapsed().as_secs();
         self.state.phases[phase_idx].details = serde_json::json!({
             "rounds": self.review_summary.rounds,
@@ -542,6 +604,8 @@ impl Runner {
         let start = Instant::now();
         let mut total_turns = 0u32;
         let mut total_cost = 0.0f64;
+        let mut total_input_tokens = 0u64;
+        let mut total_output_tokens = 0u64;
 
         for attempt in 0..=max_attempts {
             info!(
@@ -560,7 +624,10 @@ impl Runner {
 
             let resp = self.send_and_collect(&verify_prompt).await?;
             total_turns += resp.result.as_ref().map_or(1, |r| r.num_turns);
-            total_cost += self.compute_incremental_cost(&resp.result);
+            let m = self.compute_incremental_metrics(&resp.result);
+            total_cost += m.cost_usd;
+            total_input_tokens += m.input_tokens;
+            total_output_tokens += m.output_tokens;
 
             // Parse verification result
             let (passed, failed_details) = parse_verification_result(&resp.text);
@@ -582,19 +649,32 @@ impl Runner {
                 "Verification failed, asking agent to fix"
             );
 
+            let failures = failed_details.join("\n");
+            let checks_str = checks.join("`, `");
             let fix_prompt = format!(
-                "Verification failed. Please fix these issues and re-run the checks:\n\n{}",
-                failed_details.join("\n")
+                "Verification failed. The following checks did not pass:\n\n\
+                 ## Failed Checks\n\n{failures}\n\n\
+                 ## Instructions\n\n\
+                 1. Analyze each failure and identify the root cause\n\
+                 2. Fix the code to address each failure\n\
+                 3. Re-run all checks: `{checks_str}`\n\
+                 4. Ensure ALL checks pass before reporting back\n\n\
+                 Refer to the design specification and verification plan provided earlier.",
             );
 
             let fix_resp = self.send_and_collect(&fix_prompt).await?;
             total_turns += fix_resp.result.as_ref().map_or(1, |r| r.num_turns);
-            total_cost += self.compute_incremental_cost(&fix_resp.result);
+            let fm = self.compute_incremental_metrics(&fix_resp.result);
+            total_cost += fm.cost_usd;
+            total_input_tokens += fm.input_tokens;
+            total_output_tokens += fm.output_tokens;
         }
 
         self.mark_phase_completed(phase_idx, &None);
         self.state.phases[phase_idx].turns = total_turns;
         self.state.phases[phase_idx].cost_usd = total_cost;
+        self.state.phases[phase_idx].cost.input_tokens = total_input_tokens;
+        self.state.phases[phase_idx].cost.output_tokens = total_output_tokens;
         self.state.phases[phase_idx].duration_secs = start.elapsed().as_secs();
         self.state.phases[phase_idx].details = serde_json::json!({
             "attempts": self.verification_summary.checks_total,
@@ -629,6 +709,13 @@ impl Runner {
         let checks = &self.config.checks;
         let start = Instant::now();
 
+        let all_checks_passed = self.verification_summary.checks_passed
+            == self.verification_summary.checks_total
+            && self.verification_summary.checks_total > 0;
+        let is_draft = !all_checks_passed;
+        let model = &self.config.agent.model;
+        let coda_version = env!("CARGO_PKG_VERSION");
+
         let pr_prompt = self.pm.render(
             "run/create_pr",
             minijinja::context!(
@@ -638,11 +725,15 @@ impl Runner {
                 checks => checks,
                 review_summary => &self.review_summary,
                 verification_summary => &self.verification_summary,
+                all_checks_passed => all_checks_passed,
+                is_draft => is_draft,
+                model => model,
+                coda_version => coda_version,
             ),
         )?;
 
         let resp = self.send_and_collect(&pr_prompt).await?;
-        let pr_cost = self.compute_incremental_cost(&resp.result);
+        let pr_metrics = self.compute_incremental_metrics(&resp.result);
 
         // Try to extract PR URL from all collected text (assistant text + tool output)
         let all_text = resp.all_text();
@@ -675,7 +766,7 @@ impl Runner {
             },
             status,
             turns: resp.result.as_ref().map_or(1, |r| r.num_turns),
-            cost_usd: pr_cost,
+            cost_usd: pr_metrics.cost_usd,
             duration: start.elapsed(),
             artifacts: vec![],
         })
@@ -787,8 +878,9 @@ impl Runner {
 
     /// Marks a phase as completed and records timing from the `ResultMessage`.
     ///
-    /// **Note:** `cost_usd` is NOT set here — callers set it explicitly via
-    /// `compute_incremental_cost` to avoid storing cumulative SDK costs.
+    /// **Note:** `cost_usd` and token counts are NOT set here — callers set
+    /// them explicitly via `compute_incremental_metrics` to avoid storing
+    /// cumulative SDK values.
     fn mark_phase_completed(&mut self, phase_idx: usize, result_msg: &Option<ResultMessage>) {
         self.state.phases[phase_idx].status = PhaseStatus::Completed;
         self.state.phases[phase_idx].completed_at = Some(chrono::Utc::now());
@@ -937,19 +1029,42 @@ impl Runner {
         self.state.total.cost.output_tokens = total_output_tokens;
     }
 
-    /// Computes the incremental cost of an agent interaction.
+    /// Computes the incremental cost and token usage of an agent interaction.
     ///
-    /// The SDK's `ResultMessage.total_cost_usd` is cumulative for the entire
-    /// session. This method returns the delta since the last call, and updates
-    /// the running cumulative tracker so the next call computes correctly.
-    fn compute_incremental_cost(&mut self, result: &Option<ResultMessage>) -> f64 {
-        let new_cumulative = result
+    /// The SDK's `ResultMessage.total_cost_usd` and `usage` are cumulative for
+    /// the entire session. This method returns the delta since the last call,
+    /// and updates the running cumulative trackers.
+    fn compute_incremental_metrics(
+        &mut self,
+        result: &Option<ResultMessage>,
+    ) -> IncrementalMetrics {
+        let new_cost = result
             .as_ref()
             .and_then(|r| r.total_cost_usd)
             .unwrap_or(self.cumulative_cost_usd);
-        let incremental = (new_cumulative - self.cumulative_cost_usd).max(0.0);
-        self.cumulative_cost_usd = new_cumulative;
-        incremental
+        let cost_delta = (new_cost - self.cumulative_cost_usd).max(0.0);
+        self.cumulative_cost_usd = new_cost;
+
+        let (new_input, new_output) = result
+            .as_ref()
+            .and_then(|r| r.usage.as_ref())
+            .map(|u| {
+                let input = u.get("input_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
+                let output = u.get("output_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
+                (input, output)
+            })
+            .unwrap_or((self.cumulative_input_tokens, self.cumulative_output_tokens));
+
+        let input_delta = new_input.saturating_sub(self.cumulative_input_tokens);
+        let output_delta = new_output.saturating_sub(self.cumulative_output_tokens);
+        self.cumulative_input_tokens = new_input;
+        self.cumulative_output_tokens = new_output;
+
+        IncrementalMetrics {
+            cost_usd: cost_delta,
+            input_tokens: input_delta,
+            output_tokens: output_delta,
+        }
     }
 
     /// Checks whether a PR exists for the given branch using `gh pr list`.
