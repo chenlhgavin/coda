@@ -252,14 +252,21 @@ impl App {
 
     /// Handles the `coda clean` command.
     ///
-    /// Scans all worktrees, checks their PR status, and removes worktrees
-    /// whose PR has been merged or closed. Supports `--dry-run` to preview
-    /// and `--yes` to skip confirmation.
+    /// When `--logs` is set, removes all feature log directories under
+    /// `.coda/<slug>/logs/` and returns early without touching worktrees.
+    ///
+    /// Otherwise, scans all worktrees, checks their PR status, and removes
+    /// worktrees whose PR has been merged or closed. Supports `--dry-run`
+    /// to preview and `--yes` to skip confirmation.
     ///
     /// # Errors
     ///
     /// Returns an error if the clean operation fails.
-    pub fn clean(&self, dry_run: bool, yes: bool) -> Result<()> {
+    pub fn clean(&self, dry_run: bool, yes: bool, logs: bool) -> Result<()> {
+        if logs {
+            return self.clean_logs();
+        }
+
         println!();
         println!("  Scanning worktrees for merged/closed PRs...");
         println!();
@@ -318,6 +325,30 @@ impl App {
 
         println!();
         println!("  Cleaned {} worktree(s).", removed.len());
+        println!();
+        Ok(())
+    }
+
+    /// Handles the `coda clean --logs` command.
+    ///
+    /// Removes all feature log directories and prints the results.
+    fn clean_logs(&self) -> Result<()> {
+        println!();
+        println!("  Cleaning feature log directories...");
+        println!();
+
+        let cleaned = self.engine.clean_logs()?;
+
+        if cleaned.is_empty() {
+            println!("  No feature logs to clean.");
+        } else {
+            for slug in &cleaned {
+                println!("  [✓] Removed logs for {slug}");
+            }
+            println!();
+            println!("  Cleaned logs for {} feature(s).", cleaned.len());
+        }
+
         println!();
         Ok(())
     }

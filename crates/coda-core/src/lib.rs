@@ -30,7 +30,7 @@ pub mod state;
 pub mod task;
 
 pub use config::CodaConfig;
-pub use engine::{CleanedWorktree, Engine, validate_feature_slug};
+pub use engine::{CleanedWorktree, Engine, remove_feature_logs, validate_feature_slug};
 pub use error::CoreError;
 pub use gh::{DefaultGhOps, GhOps, PrStatus};
 pub use git::{DefaultGitOps, GitOps};

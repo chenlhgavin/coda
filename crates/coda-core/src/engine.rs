@@ -419,6 +419,9 @@ impl Engine {
 
     /// Removes worktrees and branches for the given candidates.
     ///
+    /// For each candidate, removes the git worktree, deletes the local branch,
+    /// and cleans up the corresponding log directory at `.coda/<slug>/logs/`.
+    ///
     /// Designed to be called after [`scan_cleanable_worktrees`](Self::scan_cleanable_worktrees)
     /// and user confirmation.
     ///
@@ -444,10 +447,53 @@ impl Engine {
                 warn!(branch = %c.branch, error = %e, "Failed to delete local branch (may already be deleted)");
             }
 
+            // Clean up log directory in the main repo (best-effort)
+            let _ = remove_feature_logs(&self.project_root, &c.slug);
+
             removed.push(c.clone());
         }
 
         Ok(removed)
+    }
+
+    /// Removes log directories for all features under `.coda/*/logs/`.
+    ///
+    /// Scans the `.coda/` directory for feature subdirectories that contain
+    /// a `logs/` child, deletes each one, and returns the list of feature
+    /// slugs whose logs were successfully cleaned.
+    ///
+    /// # Errors
+    ///
+    /// Returns `CoreError::ConfigError` if `.coda/` cannot be read.
+    pub fn clean_logs(&self) -> Result<Vec<String>, CoreError> {
+        let coda_dir = self.project_root.join(".coda");
+        if !coda_dir.is_dir() {
+            return Ok(Vec::new());
+        }
+
+        let entries = fs::read_dir(&coda_dir).map_err(|e| {
+            CoreError::ConfigError(format!(
+                "Cannot read .coda/ directory at {}: {e}",
+                coda_dir.display()
+            ))
+        })?;
+
+        let mut cleaned = Vec::new();
+        for entry in entries.filter_map(Result::ok) {
+            if !entry.file_type().is_ok_and(|ft| ft.is_dir()) {
+                continue;
+            }
+            let slug = entry.file_name();
+            let slug_str = slug.to_string_lossy();
+            let logs_dir = entry.path().join("logs");
+            if logs_dir.is_dir() && remove_feature_logs(&self.project_root, &slug_str) {
+                cleaned.push(slug_str.into_owned());
+            }
+        }
+
+        cleaned.sort();
+        info!(count = cleaned.len(), "Cleaned all feature logs");
+        Ok(cleaned)
     }
 
     /// Checks a single feature's PR status. Returns a [`CleanedWorktree`]
@@ -577,6 +623,41 @@ pub fn validate_feature_slug(slug: &str) -> Result<(), CoreError> {
         )));
     }
     Ok(())
+}
+
+/// Removes the log directory for a feature at `.coda/<slug>/logs/`.
+///
+/// Returns `true` if the directory was successfully removed or did not
+/// exist. Returns `false` if deletion failed (a warning is logged).
+///
+/// # Examples
+///
+/// ```no_run
+/// # use std::path::Path;
+/// // After cleaning a worktree, remove its logs:
+/// let removed = coda_core::remove_feature_logs(Path::new("/repo"), "my-feature");
+/// ```
+pub fn remove_feature_logs(project_root: &Path, slug: &str) -> bool {
+    let logs_dir = project_root.join(".coda").join(slug).join("logs");
+    match fs::remove_dir_all(&logs_dir) {
+        Ok(()) => {
+            info!(slug, path = %logs_dir.display(), "Removed feature log directory");
+            true
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            debug!(slug, path = %logs_dir.display(), "No log directory to clean");
+            true
+        }
+        Err(e) => {
+            warn!(
+                slug,
+                path = %logs_dir.display(),
+                error = %e,
+                "Failed to remove feature log directory"
+            );
+            false
+        }
+    }
 }
 
 /// Builds a simple directory tree listing of the repository.
@@ -1004,5 +1085,75 @@ mod tests {
     fn test_should_reject_slug_too_long() {
         let long_slug = "a".repeat(65);
         assert!(validate_feature_slug(&long_slug).is_err());
+    }
+
+    #[test]
+    fn test_should_remove_existing_log_directory() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path();
+        let logs_dir = root.join(".coda/my-feature/logs");
+        fs::create_dir_all(&logs_dir).expect("mkdir");
+        fs::write(logs_dir.join("run-20260101T000000.log"), "log data").expect("write");
+
+        assert!(remove_feature_logs(root, "my-feature"));
+
+        assert!(!logs_dir.exists());
+        // The parent .coda/my-feature/ should still exist
+        assert!(root.join(".coda/my-feature").exists());
+    }
+
+    #[test]
+    fn test_should_ignore_missing_log_directory() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path();
+        // No .coda directory at all — should not panic and should return true
+        assert!(remove_feature_logs(root, "nonexistent"));
+    }
+
+    #[tokio::test]
+    async fn test_should_clean_logs_for_multiple_features() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path();
+
+        // Create log directories for two features
+        let logs_a = root.join(".coda/feature-a/logs");
+        let logs_b = root.join(".coda/feature-b/logs");
+        fs::create_dir_all(&logs_a).expect("mkdir");
+        fs::create_dir_all(&logs_b).expect("mkdir");
+        fs::write(logs_a.join("run.log"), "data").expect("write");
+        fs::write(logs_b.join("run.log"), "data").expect("write");
+
+        // Feature without logs should be skipped
+        fs::create_dir_all(root.join(".coda/feature-c")).expect("mkdir");
+
+        let engine = make_engine(root).await;
+        let cleaned = engine.clean_logs().expect("clean_logs");
+
+        assert_eq!(cleaned, vec!["feature-a", "feature-b"]);
+        assert!(!logs_a.exists());
+        assert!(!logs_b.exists());
+        // Parent dirs remain
+        assert!(root.join(".coda/feature-a").exists());
+        assert!(root.join(".coda/feature-b").exists());
+    }
+
+    #[tokio::test]
+    async fn test_should_return_empty_when_no_coda_dir() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let engine = make_engine(tmp.path()).await;
+
+        let cleaned = engine.clean_logs().expect("clean_logs");
+        assert!(cleaned.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_should_return_empty_when_no_features_have_logs() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path();
+        fs::create_dir_all(root.join(".coda/some-feature")).expect("mkdir");
+
+        let engine = make_engine(root).await;
+        let cleaned = engine.clean_logs().expect("clean_logs");
+        assert!(cleaned.is_empty());
     }
 }
