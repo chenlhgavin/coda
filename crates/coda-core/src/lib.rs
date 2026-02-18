@@ -15,6 +15,7 @@
 pub mod config;
 mod engine;
 mod error;
+pub mod parser;
 pub mod planner;
 pub mod profile;
 pub mod project;

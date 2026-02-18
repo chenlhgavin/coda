@@ -17,6 +17,9 @@ use tracing::{debug, error, info, warn};
 
 use crate::CoreError;
 use crate::config::CodaConfig;
+use crate::parser::{
+    extract_pr_number, extract_pr_url, parse_review_issues, parse_verification_result,
+};
 use crate::profile::AgentProfile;
 use crate::state::{FeatureState, FeatureStatus, PhaseKind, PhaseStatus};
 use crate::task::{Task, TaskResult, TaskStatus};
@@ -116,8 +119,8 @@ pub struct VerificationSummary {
 
 /// Incremental metrics from a single agent interaction.
 ///
-/// Computed by [`Runner::compute_incremental_metrics`] as the delta
-/// between the current and previous cumulative SDK values.
+/// Computed by [`MetricsTracker::record`] as the delta between the
+/// current and previous cumulative SDK values.
 #[derive(Debug, Clone, Copy, Default)]
 struct IncrementalMetrics {
     /// Incremental cost in USD for this interaction.
@@ -126,6 +129,126 @@ struct IncrementalMetrics {
     input_tokens: u64,
     /// Incremental output tokens generated.
     output_tokens: u64,
+}
+
+/// Tracks cumulative SDK metrics and computes per-interaction deltas.
+///
+/// The Claude Agent SDK reports cumulative totals for cost and token usage
+/// across the entire session. This tracker maintains the running totals and
+/// returns the incremental delta for each interaction.
+#[derive(Debug, Default)]
+struct MetricsTracker {
+    /// Running cumulative cost from the SDK.
+    cumulative_cost_usd: f64,
+    /// Running cumulative input tokens from the SDK.
+    cumulative_input_tokens: u64,
+    /// Running cumulative output tokens from the SDK.
+    cumulative_output_tokens: u64,
+}
+
+impl MetricsTracker {
+    /// Records a new SDK result and returns the incremental delta.
+    fn record(&mut self, result: &Option<ResultMessage>) -> IncrementalMetrics {
+        let new_cost = result
+            .as_ref()
+            .and_then(|r| r.total_cost_usd)
+            .unwrap_or(self.cumulative_cost_usd);
+        let cost_delta = (new_cost - self.cumulative_cost_usd).max(0.0);
+        self.cumulative_cost_usd = new_cost;
+
+        let (new_input, new_output) = result
+            .as_ref()
+            .and_then(|r| r.usage.as_ref())
+            .map(|u| {
+                let input = u.get("input_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
+                let output = u.get("output_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
+                (input, output)
+            })
+            .unwrap_or((self.cumulative_input_tokens, self.cumulative_output_tokens));
+
+        let input_delta = new_input.saturating_sub(self.cumulative_input_tokens);
+        let output_delta = new_output.saturating_sub(self.cumulative_output_tokens);
+        self.cumulative_input_tokens = new_input;
+        self.cumulative_output_tokens = new_output;
+
+        IncrementalMetrics {
+            cost_usd: cost_delta,
+            input_tokens: input_delta,
+            output_tokens: output_delta,
+        }
+    }
+}
+
+/// Complete outcome of a phase execution.
+///
+/// Contains all metrics needed to finalize a phase record. Eliminates the
+/// "partial initialization" pattern where callers would set status/timing
+/// in one call and cost/tokens in separate assignments.
+#[derive(Debug)]
+struct PhaseOutcome {
+    /// Number of agent conversation turns used.
+    turns: u32,
+    /// Total cost in USD for this phase.
+    cost_usd: f64,
+    /// Input tokens consumed.
+    input_tokens: u64,
+    /// Output tokens generated.
+    output_tokens: u64,
+    /// Wall-clock duration of the phase.
+    duration: Duration,
+    /// Phase-specific details (flexible schema).
+    details: serde_json::Value,
+}
+
+/// Accumulates metrics across multiple agent interactions within a single phase.
+///
+/// Used by multi-round phases (review, verify) where each round involves
+/// one or more agent calls and the totals must be aggregated.
+#[derive(Debug)]
+struct PhaseMetricsAccumulator {
+    /// Start time of the phase.
+    start: Instant,
+    /// Accumulated conversation turns.
+    turns: u32,
+    /// Accumulated cost in USD.
+    cost_usd: f64,
+    /// Accumulated input tokens.
+    input_tokens: u64,
+    /// Accumulated output tokens.
+    output_tokens: u64,
+}
+
+impl PhaseMetricsAccumulator {
+    /// Creates a new accumulator, recording the start time.
+    fn new() -> Self {
+        Self {
+            start: Instant::now(),
+            turns: 0,
+            cost_usd: 0.0,
+            input_tokens: 0,
+            output_tokens: 0,
+        }
+    }
+
+    /// Records metrics from a single agent interaction.
+    fn record(&mut self, resp: &AgentResponse, metrics: IncrementalMetrics) {
+        self.turns += resp.result.as_ref().map_or(1, |r| r.num_turns);
+        self.cost_usd += metrics.cost_usd;
+        self.input_tokens += metrics.input_tokens;
+        self.output_tokens += metrics.output_tokens;
+    }
+
+    /// Converts accumulated metrics into a [`PhaseOutcome`].
+    fn into_outcome(self, details: serde_json::Value) -> PhaseOutcome {
+        PhaseOutcome {
+            turns: self.turns,
+            cost_usd: self.cost_usd,
+            input_tokens: self.input_tokens,
+            output_tokens: self.output_tokens,
+            duration: self.start.elapsed(),
+            details,
+        }
+    }
 }
 
 /// Collected output from a single agent interaction.
@@ -168,12 +291,8 @@ pub struct Runner {
     review_summary: ReviewSummary,
     verification_summary: VerificationSummary,
     progress_tx: Option<UnboundedSender<RunEvent>>,
-    /// Running cumulative cost from the SDK, used to compute per-phase incremental costs.
-    cumulative_cost_usd: f64,
-    /// Running cumulative input tokens from the SDK.
-    cumulative_input_tokens: u64,
-    /// Running cumulative output tokens from the SDK.
-    cumulative_output_tokens: u64,
+    /// Tracks cumulative SDK metrics for incremental delta computation.
+    metrics: MetricsTracker,
 }
 
 impl Runner {
@@ -218,7 +337,7 @@ impl Runner {
         let options = AgentProfile::Coder.to_options(
             &system_prompt,
             worktree_path.clone(),
-            100, // generous turn limit for full run
+            config.agent.max_turns,
             config.agent.max_budget_usd,
             &config.agent.model,
         );
@@ -236,9 +355,7 @@ impl Runner {
             review_summary: ReviewSummary::default(),
             verification_summary: VerificationSummary::default(),
             progress_tx: None,
-            cumulative_cost_usd: 0.0,
-            cumulative_input_tokens: 0,
-            cumulative_output_tokens: 0,
+            metrics: MetricsTracker::default(),
         })
     }
 
@@ -380,10 +497,17 @@ impl Runner {
         let pr_url = self.state.pr.as_ref().map(|pr| pr.url.clone());
         self.emit_event(RunEvent::PrCreated { url: pr_url });
 
+        let pr_succeeded = matches!(pr_result.status, TaskStatus::Completed);
         results.push(pr_result);
 
-        // Mark feature as completed
-        self.state.status = FeatureStatus::Completed;
+        // Mark feature status based on PR outcome
+        if pr_succeeded {
+            self.state.status = FeatureStatus::Completed;
+        } else {
+            // Code phases completed but PR creation failed.
+            // Keep InProgress so a re-run only retries PR creation.
+            warn!("Feature development complete but PR creation failed");
+        }
         self.update_totals();
         self.save_state()?;
 
@@ -404,7 +528,9 @@ impl Runner {
         let was_running = self.state.phases[phase_idx].status == PhaseStatus::Running;
         self.mark_phase_running(phase_idx);
 
-        let design_spec = self.load_design_spec()?;
+        let mut acc = PhaseMetricsAccumulator::new();
+
+        let design_spec = self.load_spec("design.md")?;
         let checks = &self.config.checks;
         let feature_slug = self.state.feature.slug.clone();
         let phase_name = self.state.phases[phase_idx].name.clone();
@@ -453,25 +579,24 @@ impl Runner {
             "Dev phase response received"
         );
 
-        let metrics = self.compute_incremental_metrics(&resp.result);
-        self.mark_phase_completed(phase_idx, &resp.result);
-        self.state.phases[phase_idx].cost_usd = metrics.cost_usd;
-        self.state.phases[phase_idx].cost.input_tokens = metrics.input_tokens;
-        self.state.phases[phase_idx].cost.output_tokens = metrics.output_tokens;
+        let incremental = self.metrics.record(&resp.result);
+        acc.record(&resp, incremental);
 
-        Ok(TaskResult {
+        let outcome = acc.into_outcome(serde_json::json!({}));
+        let task_result = TaskResult {
             task: Task::DevPhase {
                 name: phase_name,
                 feature_slug: self.state.feature.slug.clone(),
             },
             status: TaskStatus::Completed,
-            turns: resp.result.as_ref().map_or(1, |r| r.num_turns),
-            cost_usd: metrics.cost_usd,
-            duration: std::time::Duration::from_millis(
-                resp.result.as_ref().map_or(0, |r| r.duration_ms),
-            ),
+            turns: outcome.turns,
+            cost_usd: outcome.cost_usd,
+            duration: outcome.duration,
             artifacts: vec![],
-        })
+        };
+        self.complete_phase(phase_idx, outcome);
+
+        Ok(task_result)
     }
 
     /// Executes the review phase with fix loop.
@@ -484,26 +609,31 @@ impl Runner {
 
         if !self.config.review.enabled {
             info!("Code review disabled, skipping");
-            self.mark_phase_completed(phase_idx, &None);
-            return Ok(TaskResult {
+            let outcome = PhaseOutcome {
+                turns: 0,
+                cost_usd: 0.0,
+                input_tokens: 0,
+                output_tokens: 0,
+                duration: Duration::ZERO,
+                details: serde_json::json!({}),
+            };
+            let task_result = TaskResult {
                 task: Task::Review {
                     feature_slug: self.state.feature.slug.clone(),
                 },
                 status: TaskStatus::Completed,
                 turns: 0,
                 cost_usd: 0.0,
-                duration: std::time::Duration::ZERO,
+                duration: Duration::ZERO,
                 artifacts: vec![],
-            });
+            };
+            self.complete_phase(phase_idx, outcome);
+            return Ok(task_result);
         }
 
-        let design_spec = self.load_design_spec()?;
+        let design_spec = self.load_spec("design.md")?;
         let max_rounds = self.config.review.max_review_rounds;
-        let start = Instant::now();
-        let mut total_turns = 0u32;
-        let mut total_cost = 0.0f64;
-        let mut total_input_tokens = 0u64;
-        let mut total_output_tokens = 0u64;
+        let mut acc = PhaseMetricsAccumulator::new();
 
         for round in 0..max_rounds {
             info!(round = round + 1, max = max_rounds, "Review round");
@@ -518,11 +648,8 @@ impl Runner {
             )?;
 
             let resp = self.send_and_collect(&review_prompt).await?;
-            total_turns += resp.result.as_ref().map_or(1, |r| r.num_turns);
-            let m = self.compute_incremental_metrics(&resp.result);
-            total_cost += m.cost_usd;
-            total_input_tokens += m.input_tokens;
-            total_output_tokens += m.output_tokens;
+            let m = self.metrics.record(&resp.result);
+            acc.record(&resp, m);
 
             self.review_summary.rounds += 1;
 
@@ -556,39 +683,30 @@ impl Runner {
             );
 
             let fix_resp = self.send_and_collect(&fix_prompt).await?;
-            total_turns += fix_resp.result.as_ref().map_or(1, |r| r.num_turns);
-            let fm = self.compute_incremental_metrics(&fix_resp.result);
-            total_cost += fm.cost_usd;
-            total_input_tokens += fm.input_tokens;
-            total_output_tokens += fm.output_tokens;
+            let fm = self.metrics.record(&fix_resp.result);
+            acc.record(&fix_resp, fm);
 
             self.review_summary.issues_resolved += issue_count;
         }
 
-        self.mark_phase_completed(phase_idx, &None);
-        // Update phase metrics manually since we accumulated across rounds
-        self.state.phases[phase_idx].turns = total_turns;
-        self.state.phases[phase_idx].cost_usd = total_cost;
-        self.state.phases[phase_idx].cost.input_tokens = total_input_tokens;
-        self.state.phases[phase_idx].cost.output_tokens = total_output_tokens;
-        self.state.phases[phase_idx].duration_secs = start.elapsed().as_secs();
-        self.state.phases[phase_idx].details = serde_json::json!({
+        let outcome = acc.into_outcome(serde_json::json!({
             "rounds": self.review_summary.rounds,
             "issues_found": self.review_summary.issues_found,
             "issues_resolved": self.review_summary.issues_resolved,
-        });
-        self.save_state()?;
-
-        Ok(TaskResult {
+        }));
+        let task_result = TaskResult {
             task: Task::Review {
                 feature_slug: self.state.feature.slug.clone(),
             },
             status: TaskStatus::Completed,
-            turns: total_turns,
-            cost_usd: total_cost,
-            duration: start.elapsed(),
+            turns: outcome.turns,
+            cost_usd: outcome.cost_usd,
+            duration: outcome.duration,
             artifacts: vec![],
-        })
+        };
+        self.complete_phase(phase_idx, outcome);
+
+        Ok(task_result)
     }
 
     /// Executes the verify phase with fix loop.
@@ -598,14 +716,10 @@ impl Runner {
     async fn run_verify(&mut self, phase_idx: usize) -> Result<TaskResult, CoreError> {
         self.mark_phase_running(phase_idx);
 
-        let verification_spec = self.load_verification_spec()?;
+        let verification_spec = self.load_spec("verification.md")?;
         let checks = self.config.checks.clone();
         let max_attempts = self.config.agent.max_retries;
-        let start = Instant::now();
-        let mut total_turns = 0u32;
-        let mut total_cost = 0.0f64;
-        let mut total_input_tokens = 0u64;
-        let mut total_output_tokens = 0u64;
+        let mut acc = PhaseMetricsAccumulator::new();
 
         for attempt in 0..=max_attempts {
             info!(
@@ -623,11 +737,8 @@ impl Runner {
             )?;
 
             let resp = self.send_and_collect(&verify_prompt).await?;
-            total_turns += resp.result.as_ref().map_or(1, |r| r.num_turns);
-            let m = self.compute_incremental_metrics(&resp.result);
-            total_cost += m.cost_usd;
-            total_input_tokens += m.input_tokens;
-            total_output_tokens += m.output_tokens;
+            let m = self.metrics.record(&resp.result);
+            acc.record(&resp, m);
 
             // Parse verification result
             let (passed, failed_details) = parse_verification_result(&resp.text);
@@ -663,36 +774,28 @@ impl Runner {
             );
 
             let fix_resp = self.send_and_collect(&fix_prompt).await?;
-            total_turns += fix_resp.result.as_ref().map_or(1, |r| r.num_turns);
-            let fm = self.compute_incremental_metrics(&fix_resp.result);
-            total_cost += fm.cost_usd;
-            total_input_tokens += fm.input_tokens;
-            total_output_tokens += fm.output_tokens;
+            let fm = self.metrics.record(&fix_resp.result);
+            acc.record(&fix_resp, fm);
         }
 
-        self.mark_phase_completed(phase_idx, &None);
-        self.state.phases[phase_idx].turns = total_turns;
-        self.state.phases[phase_idx].cost_usd = total_cost;
-        self.state.phases[phase_idx].cost.input_tokens = total_input_tokens;
-        self.state.phases[phase_idx].cost.output_tokens = total_output_tokens;
-        self.state.phases[phase_idx].duration_secs = start.elapsed().as_secs();
-        self.state.phases[phase_idx].details = serde_json::json!({
+        let outcome = acc.into_outcome(serde_json::json!({
             "attempts": self.verification_summary.checks_total,
             "checks_passed": self.verification_summary.checks_passed,
             "checks_total": self.verification_summary.checks_total,
-        });
-        self.save_state()?;
-
-        Ok(TaskResult {
+        }));
+        let task_result = TaskResult {
             task: Task::Verify {
                 feature_slug: self.state.feature.slug.clone(),
             },
             status: TaskStatus::Completed,
-            turns: total_turns,
-            cost_usd: total_cost,
-            duration: start.elapsed(),
+            turns: outcome.turns,
+            cost_usd: outcome.cost_usd,
+            duration: outcome.duration,
             artifacts: vec![],
-        })
+        };
+        self.complete_phase(phase_idx, outcome);
+
+        Ok(task_result)
     }
 
     /// Creates a pull request after all phases complete.
@@ -704,7 +807,7 @@ impl Runner {
     ///
     /// Returns `TaskStatus::Failed` if no PR could be found after all attempts.
     async fn create_pr(&mut self) -> Result<TaskResult, CoreError> {
-        let design_spec = self.load_design_spec()?;
+        let design_spec = self.load_spec("design.md")?;
         let commits = self.get_commits()?;
         let checks = &self.config.checks;
         let start = Instant::now();
@@ -733,7 +836,7 @@ impl Runner {
         )?;
 
         let resp = self.send_and_collect(&pr_prompt).await?;
-        let pr_metrics = self.compute_incremental_metrics(&resp.result);
+        let pr_metrics = self.metrics.record(&resp.result);
 
         // Try to extract PR URL from all collected text (assistant text + tool output)
         let all_text = resp.all_text();
@@ -876,21 +979,25 @@ impl Runner {
         }
     }
 
-    /// Marks a phase as completed and records timing from the `ResultMessage`.
+    /// Finalizes a phase with the complete outcome.
     ///
-    /// **Note:** `cost_usd` and token counts are NOT set here — callers set
-    /// them explicitly via `compute_incremental_metrics` to avoid storing
-    /// cumulative SDK values.
-    fn mark_phase_completed(&mut self, phase_idx: usize, result_msg: &Option<ResultMessage>) {
-        self.state.phases[phase_idx].status = PhaseStatus::Completed;
-        self.state.phases[phase_idx].completed_at = Some(chrono::Utc::now());
-
-        if let Some(r) = result_msg {
-            self.state.phases[phase_idx].turns = r.num_turns;
-            self.state.phases[phase_idx].duration_secs = r.duration_ms / 1000;
-        }
-
+    /// Sets all phase-record fields atomically from the [`PhaseOutcome`],
+    /// ensuring no caller can forget to set cost or token counts.
+    fn complete_phase(&mut self, phase_idx: usize, outcome: PhaseOutcome) {
+        let phase = &mut self.state.phases[phase_idx];
+        phase.status = PhaseStatus::Completed;
+        phase.completed_at = Some(chrono::Utc::now());
+        phase.turns = outcome.turns;
+        phase.cost_usd = outcome.cost_usd;
+        phase.cost.input_tokens = outcome.input_tokens;
+        phase.cost.output_tokens = outcome.output_tokens;
+        phase.duration_secs = outcome.duration.as_secs();
+        phase.details = outcome.details;
         self.state.feature.updated_at = chrono::Utc::now();
+
+        if let Err(e) = self.save_state() {
+            warn!(error = %e, "Failed to save state after completing phase");
+        }
     }
 
     /// Persists the current state to `state.yml`.
@@ -901,35 +1008,21 @@ impl Runner {
         Ok(())
     }
 
-    /// Loads the design spec from the worktree's `.coda/<slug>/specs/` directory.
-    fn load_design_spec(&self) -> Result<String, CoreError> {
+    /// Loads a spec file from the worktree's `.coda/<slug>/specs/` directory.
+    ///
+    /// # Errors
+    ///
+    /// Returns `CoreError::StateError` if the spec file cannot be read.
+    fn load_spec(&self, filename: &str) -> Result<String, CoreError> {
         let spec_path = self
             .worktree_path
             .join(".coda")
             .join(&self.state.feature.slug)
-            .join("specs/design.md");
+            .join("specs")
+            .join(filename);
 
         std::fs::read_to_string(&spec_path).map_err(|e| {
-            CoreError::StateError(format!(
-                "Cannot read design spec at {}: {e}",
-                spec_path.display()
-            ))
-        })
-    }
-
-    /// Loads the verification spec from the worktree's `.coda/<slug>/specs/` directory.
-    fn load_verification_spec(&self) -> Result<String, CoreError> {
-        let spec_path = self
-            .worktree_path
-            .join(".coda")
-            .join(&self.state.feature.slug)
-            .join("specs/verification.md");
-
-        std::fs::read_to_string(&spec_path).map_err(|e| {
-            CoreError::StateError(format!(
-                "Cannot read verification spec at {}: {e}",
-                spec_path.display()
-            ))
+            CoreError::StateError(format!("Cannot read spec at {}: {e}", spec_path.display()))
         })
     }
 
@@ -1027,44 +1120,6 @@ impl Runner {
         self.state.total.duration_secs = total_duration;
         self.state.total.cost.input_tokens = total_input_tokens;
         self.state.total.cost.output_tokens = total_output_tokens;
-    }
-
-    /// Computes the incremental cost and token usage of an agent interaction.
-    ///
-    /// The SDK's `ResultMessage.total_cost_usd` and `usage` are cumulative for
-    /// the entire session. This method returns the delta since the last call,
-    /// and updates the running cumulative trackers.
-    fn compute_incremental_metrics(
-        &mut self,
-        result: &Option<ResultMessage>,
-    ) -> IncrementalMetrics {
-        let new_cost = result
-            .as_ref()
-            .and_then(|r| r.total_cost_usd)
-            .unwrap_or(self.cumulative_cost_usd);
-        let cost_delta = (new_cost - self.cumulative_cost_usd).max(0.0);
-        self.cumulative_cost_usd = new_cost;
-
-        let (new_input, new_output) = result
-            .as_ref()
-            .and_then(|r| r.usage.as_ref())
-            .map(|u| {
-                let input = u.get("input_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
-                let output = u.get("output_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
-                (input, output)
-            })
-            .unwrap_or((self.cumulative_input_tokens, self.cumulative_output_tokens));
-
-        let input_delta = new_input.saturating_sub(self.cumulative_input_tokens);
-        let output_delta = new_output.saturating_sub(self.cumulative_output_tokens);
-        self.cumulative_input_tokens = new_input;
-        self.cumulative_output_tokens = new_output;
-
-        IncrementalMetrics {
-            cost_usd: cost_delta,
-            input_tokens: input_delta,
-            output_tokens: output_delta,
-        }
     }
 
     /// Checks whether a PR exists for the given branch using `gh pr list`.
@@ -1241,387 +1296,146 @@ fn find_feature_dir(project_root: &Path, feature_slug: &str) -> Result<PathBuf, 
     )))
 }
 
-/// Parses review issues from the agent's YAML response.
-///
-/// Returns a list of issue description strings for critical/major issues.
-fn parse_review_issues(response: &str) -> Vec<String> {
-    // Try to find YAML block in response
-    let yaml_content = extract_yaml_block(response);
-
-    if let Some(yaml) = yaml_content
-        && let Ok(parsed) = serde_yaml::from_str::<serde_json::Value>(&yaml)
-        && let Some(issues) = parsed.get("issues").and_then(|v| v.as_array())
-    {
-        return issues
-            .iter()
-            .filter_map(|issue| {
-                let severity = issue.get("severity")?.as_str()?;
-                if severity == "critical" || severity == "major" {
-                    let desc = issue
-                        .get("description")
-                        .and_then(|d| d.as_str())
-                        .unwrap_or("Unknown issue");
-                    let file = issue
-                        .get("file")
-                        .and_then(|f| f.as_str())
-                        .unwrap_or("unknown");
-                    let suggestion = issue
-                        .get("suggestion")
-                        .and_then(|s| s.as_str())
-                        .unwrap_or("");
-                    Some(format!(
-                        "[{severity}] {file}: {desc}. Suggestion: {suggestion}"
-                    ))
-                } else {
-                    None
-                }
-            })
-            .collect();
-    }
-
-    Vec::new()
-}
-
-/// Parses verification results from the agent's YAML response.
-///
-/// Returns `(passed_count, failed_details)`.
-fn parse_verification_result(response: &str) -> (u32, Vec<String>) {
-    let yaml_content = extract_yaml_block(response);
-
-    if let Some(yaml) = yaml_content
-        && let Ok(parsed) = serde_yaml::from_str::<serde_json::Value>(&yaml)
-    {
-        let result = parsed
-            .get("result")
-            .and_then(|v| v.as_str())
-            .unwrap_or("unknown");
-
-        if result == "passed" {
-            let total = parsed
-                .get("total_count")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0) as u32;
-            return (total, Vec::new());
-        }
-
-        let mut failed = Vec::new();
-        if let Some(checks) = parsed.get("checks").and_then(|v| v.as_array()) {
-            let passed = checks
-                .iter()
-                .filter(|c| c.get("status").and_then(|s| s.as_str()) == Some("passed"))
-                .count() as u32;
-
-            for check in checks {
-                if check.get("status").and_then(|s| s.as_str()) == Some("failed") {
-                    let name = check
-                        .get("name")
-                        .and_then(|n| n.as_str())
-                        .unwrap_or("unknown");
-                    let details = check
-                        .get("details")
-                        .and_then(|d| d.as_str())
-                        .unwrap_or("no details");
-                    failed.push(format!("{name}: {details}"));
-                }
-            }
-
-            return (passed, failed);
-        }
-    }
-
-    // If we can't parse, treat as a failure to avoid false positives.
-    // The verification loop will ask the agent to fix / re-run, or exhaust retries.
-    (
-        0,
-        vec![
-            "Unable to parse verification result from agent response. Manual review required."
-                .to_string(),
-        ],
-    )
-}
-
-/// Extracts a YAML code block from a response string.
-fn extract_yaml_block(text: &str) -> Option<String> {
-    // Look for ```yaml ... ``` block
-    if let Some(start) = text.find("```yaml") {
-        let content_start = start + "```yaml".len();
-        if let Some(end) = text[content_start..].find("```") {
-            return Some(text[content_start..content_start + end].trim().to_string());
-        }
-    }
-
-    // Look for ```\n...\n``` block (unmarked code block)
-    if let Some(start) = text.find("```\n") {
-        let content_start = start + "```\n".len();
-        if let Some(end) = text[content_start..].find("```") {
-            let content = text[content_start..content_start + end].trim();
-            // Check if it looks like YAML
-            if content.starts_with("issues:") || content.starts_with("result:") {
-                return Some(content.to_string());
-            }
-        }
-    }
-
-    // Try parsing the whole response as YAML
-    if text.contains("issues:") || text.contains("result:") {
-        return Some(text.to_string());
-    }
-
-    None
-}
-
-/// Extracts a PR URL from the agent's response text.
-fn extract_pr_url(text: &str) -> Option<String> {
-    // Look for a GitHub PR URL anywhere in the text
-    for line in text.lines() {
-        if let Some(start) = line.find("https://github.com/") {
-            let url_part = &line[start..];
-            // Find end of URL (whitespace, quote, paren, or end of line)
-            let end = url_part
-                .find(|c: char| c.is_whitespace() || c == '"' || c == '\'' || c == ')')
-                .unwrap_or(url_part.len());
-            let url = &url_part[..end];
-            if url.contains("/pull/") {
-                return Some(url.to_string());
-            }
-        }
-    }
-    None
-}
-
-/// Extracts PR number from a GitHub PR URL.
-fn extract_pr_number(url: &str) -> Option<u32> {
-    url.rsplit('/').next()?.parse().ok()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn test_should_parse_review_issues_from_yaml() {
-        let response = r#"
-Here are the review findings:
+    fn test_should_compute_incremental_metrics_from_result() {
+        let mut tracker = MetricsTracker::default();
 
-```yaml
-issues:
-  - severity: "critical"
-    file: "src/main.rs"
-    line: 42
-    description: "Use of unwrap in production code"
-    suggestion: "Replace with ? operator"
-  - severity: "minor"
-    file: "src/lib.rs"
-    line: 10
-    description: "Missing doc comment"
-    suggestion: "Add /// documentation"
-```
-"#;
+        // First interaction
+        let result1 = ResultMessage {
+            subtype: "success".to_string(),
+            duration_ms: 1000,
+            duration_api_ms: 800,
+            is_error: false,
+            num_turns: 3,
+            session_id: "test".to_string(),
+            total_cost_usd: Some(0.50),
+            usage: Some(serde_json::json!({
+                "input_tokens": 1000,
+                "output_tokens": 500,
+            })),
+            result: None,
+            structured_output: None,
+        };
 
-        let issues = parse_review_issues(response);
-        assert_eq!(issues.len(), 1); // Only critical, not minor
-        assert!(issues[0].contains("unwrap"));
+        let m1 = tracker.record(&Some(result1));
+        assert!((m1.cost_usd - 0.50).abs() < f64::EPSILON);
+        assert_eq!(m1.input_tokens, 1000);
+        assert_eq!(m1.output_tokens, 500);
+
+        // Second interaction (cumulative values)
+        let result2 = ResultMessage {
+            subtype: "success".to_string(),
+            duration_ms: 2000,
+            duration_api_ms: 1600,
+            is_error: false,
+            num_turns: 2,
+            session_id: "test".to_string(),
+            total_cost_usd: Some(0.80),
+            usage: Some(serde_json::json!({
+                "input_tokens": 2500,
+                "output_tokens": 1200,
+            })),
+            result: None,
+            structured_output: None,
+        };
+
+        let m2 = tracker.record(&Some(result2));
+        assert!((m2.cost_usd - 0.30).abs() < f64::EPSILON);
+        assert_eq!(m2.input_tokens, 1500);
+        assert_eq!(m2.output_tokens, 700);
     }
 
     #[test]
-    fn test_should_return_empty_for_no_issues() {
-        let response = r#"
-```yaml
-issues: []
-```
-"#;
-
-        let issues = parse_review_issues(response);
-        assert!(issues.is_empty());
+    fn test_should_handle_none_result_gracefully() {
+        let mut tracker = MetricsTracker::default();
+        let m = tracker.record(&None);
+        assert!((m.cost_usd - 0.0).abs() < f64::EPSILON);
+        assert_eq!(m.input_tokens, 0);
+        assert_eq!(m.output_tokens, 0);
     }
 
     #[test]
-    fn test_should_parse_review_major_issues() {
-        let response = r#"
-```yaml
-issues:
-  - severity: "major"
-    file: "src/db.rs"
-    line: 100
-    description: "SQL injection vulnerability"
-    suggestion: "Use parameterized queries"
-  - severity: "major"
-    file: "src/api.rs"
-    line: 55
-    description: "Missing authentication check"
-    suggestion: "Add auth middleware"
-```
-"#;
+    fn test_should_accumulate_metrics_across_rounds() {
+        let mut acc = PhaseMetricsAccumulator::new();
 
-        let issues = parse_review_issues(response);
-        assert_eq!(issues.len(), 2);
-        assert!(issues[0].contains("SQL injection"));
-        assert!(issues[1].contains("authentication"));
+        let resp1 = AgentResponse {
+            text: "Review response".to_string(),
+            tool_output: String::new(),
+            result: Some(ResultMessage {
+                subtype: "success".to_string(),
+                duration_ms: 1000,
+                duration_api_ms: 800,
+                is_error: false,
+                num_turns: 3,
+                session_id: "test".to_string(),
+                total_cost_usd: None,
+                usage: None,
+                result: None,
+                structured_output: None,
+            }),
+        };
+
+        let m1 = IncrementalMetrics {
+            cost_usd: 0.10,
+            input_tokens: 500,
+            output_tokens: 200,
+        };
+        acc.record(&resp1, m1);
+
+        let resp2 = AgentResponse {
+            text: "Fix response".to_string(),
+            tool_output: String::new(),
+            result: Some(ResultMessage {
+                subtype: "success".to_string(),
+                duration_ms: 2000,
+                duration_api_ms: 1600,
+                is_error: false,
+                num_turns: 5,
+                session_id: "test".to_string(),
+                total_cost_usd: None,
+                usage: None,
+                result: None,
+                structured_output: None,
+            }),
+        };
+
+        let m2 = IncrementalMetrics {
+            cost_usd: 0.15,
+            input_tokens: 800,
+            output_tokens: 300,
+        };
+        acc.record(&resp2, m2);
+
+        assert_eq!(acc.turns, 8); // 3 + 5
+        assert!((acc.cost_usd - 0.25).abs() < f64::EPSILON);
+        assert_eq!(acc.input_tokens, 1300);
+        assert_eq!(acc.output_tokens, 500);
+
+        let outcome = acc.into_outcome(serde_json::json!({"test": true}));
+        assert_eq!(outcome.turns, 8);
+        assert!((outcome.cost_usd - 0.25).abs() < f64::EPSILON);
     }
 
     #[test]
-    fn test_should_parse_verification_passed() {
-        let response = r#"
-```yaml
-result: "passed"
-total_count: 5
-checks:
-  - name: "cargo build"
-    status: "passed"
-```
-"#;
+    fn test_should_collect_agent_response_all_text() {
+        let resp = AgentResponse {
+            text: "assistant text".to_string(),
+            tool_output: "tool output".to_string(),
+            result: None,
+        };
+        let all = resp.all_text();
+        assert!(all.contains("assistant text"));
+        assert!(all.contains("tool output"));
 
-        let (passed, failed) = parse_verification_result(response);
-        assert_eq!(passed, 5);
-        assert!(failed.is_empty());
-    }
-
-    #[test]
-    fn test_should_parse_verification_failed() {
-        let response = r#"
-```yaml
-result: "failed"
-checks:
-  - name: "cargo build"
-    status: "passed"
-  - name: "cargo test"
-    status: "failed"
-    details: "2 tests failed"
-failed_count: 1
-total_count: 2
-```
-"#;
-
-        let (passed, failed) = parse_verification_result(response);
-        assert_eq!(passed, 1);
-        assert_eq!(failed.len(), 1);
-        assert!(failed[0].contains("cargo test"));
-    }
-
-    #[test]
-    fn test_should_extract_pr_url() {
-        let text = "PR created: https://github.com/org/repo/pull/42\nDone!";
-        assert_eq!(
-            extract_pr_url(text),
-            Some("https://github.com/org/repo/pull/42".to_string())
-        );
-    }
-
-    #[test]
-    fn test_should_extract_pr_number() {
-        assert_eq!(
-            extract_pr_number("https://github.com/org/repo/pull/42"),
-            Some(42)
-        );
-    }
-
-    #[test]
-    fn test_should_find_yaml_block() {
-        let text = "Some text\n```yaml\nissues: []\n```\nMore text";
-        let yaml = extract_yaml_block(text);
-        assert_eq!(yaml, Some("issues: []".to_string()));
-    }
-
-    #[test]
-    fn test_should_return_none_for_no_yaml_block() {
-        let text = "This is plain text with no code blocks at all.";
-        let yaml = extract_yaml_block(text);
-        assert!(yaml.is_none());
-    }
-
-    #[test]
-    fn test_should_extract_first_yaml_block_from_multiple() {
-        let text = r#"
-First block:
-```yaml
-issues:
-  - severity: "critical"
-    description: "First issue"
-```
-
-Second block:
-```yaml
-result: "passed"
-```
-"#;
-
-        let yaml = extract_yaml_block(text);
-        assert!(yaml.is_some());
-        let content = yaml.unwrap();
-        // Should extract the first ```yaml block
-        assert!(content.contains("issues:"));
-    }
-
-    #[test]
-    fn test_should_extract_yaml_from_unmarked_code_block() {
-        let text = "Here are results:\n```\nissues:\n  - severity: critical\n```\nEnd.";
-        let yaml = extract_yaml_block(text);
-        assert!(yaml.is_some());
-        assert!(yaml.unwrap().contains("issues:"));
-    }
-
-    #[test]
-    fn test_should_fallback_to_full_text_when_contains_yaml_markers() {
-        let text = "result: passed\ntotal_count: 3";
-        let yaml = extract_yaml_block(text);
-        assert!(yaml.is_some());
-        assert_eq!(yaml.unwrap(), text);
-    }
-
-    #[test]
-    fn test_should_extract_pr_number_from_valid_url() {
-        assert_eq!(
-            extract_pr_number("https://github.com/org/repo/pull/123"),
-            Some(123)
-        );
-        assert_eq!(
-            extract_pr_number("https://github.com/my-org/my-repo/pull/1"),
-            Some(1)
-        );
-    }
-
-    #[test]
-    fn test_should_return_none_for_non_numeric_pr_number() {
-        assert_eq!(extract_pr_number("https://github.com/org/repo/pull/"), None);
-        assert_eq!(
-            extract_pr_number("https://github.com/org/repo/pull/abc"),
-            None
-        );
-    }
-
-    #[test]
-    fn test_should_return_none_when_no_pr_url_found() {
-        let text = "No PR URL here, just some text.";
-        assert!(extract_pr_url(text).is_none());
-    }
-
-    #[test]
-    fn test_should_extract_pr_url_from_markdown_link() {
-        let text = "Created [PR #42](https://github.com/org/repo/pull/42) for review.";
-        let url = extract_pr_url(text);
-        assert_eq!(url, Some("https://github.com/org/repo/pull/42".to_string()));
-    }
-
-    #[test]
-    fn test_should_not_extract_non_pr_github_url() {
-        let text = "See https://github.com/org/repo/issues/10 for details.";
-        assert!(extract_pr_url(text).is_none());
-    }
-
-    #[test]
-    fn test_should_parse_review_with_no_yaml_structure() {
-        let text = "The code looks good! No issues found.";
-        let issues = parse_review_issues(text);
-        assert!(issues.is_empty());
-    }
-
-    #[test]
-    fn test_should_treat_unparsable_verification_as_failure() {
-        let text = "All tests passed successfully!";
-        let (passed, failed) = parse_verification_result(text);
-        // Unparsable responses must not be treated as "all passed"
-        assert_eq!(passed, 0);
-        assert_eq!(failed.len(), 1);
-        assert!(failed[0].contains("Unable to parse"));
+        let resp_no_tool = AgentResponse {
+            text: "only text".to_string(),
+            tool_output: String::new(),
+            result: None,
+        };
+        assert_eq!(resp_no_tool.all_text(), "only text");
     }
 }

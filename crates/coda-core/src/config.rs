@@ -56,6 +56,9 @@ pub struct AgentConfig {
 
     /// Maximum retry attempts for a single phase on failure.
     pub max_retries: u32,
+
+    /// Maximum agent conversation turns per phase.
+    pub max_turns: u32,
 }
 
 /// Configuration for prompt template directories.
@@ -119,6 +122,7 @@ impl Default for AgentConfig {
             model: "claude-opus-4-6".to_string(),
             max_budget_usd: 20.0,
             max_retries: 3,
+            max_turns: 100,
         }
     }
 }
