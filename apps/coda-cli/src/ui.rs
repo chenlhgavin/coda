@@ -148,9 +148,13 @@ impl PlanUi {
                 // Global keybindings (not delegated to line editor)
                 match key.code {
                     KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        session.disconnect().await;
                         return Ok(None);
                     }
-                    KeyCode::Esc => return Ok(None),
+                    KeyCode::Esc => {
+                        session.disconnect().await;
+                        return Ok(None);
+                    }
                     KeyCode::PageUp => {
                         self.scroll_offset = self.scroll_offset.saturating_add(10);
                         continue;
@@ -179,6 +183,7 @@ impl PlanUi {
 
                     // Handle special commands
                     if input == "/quit" {
+                        session.disconnect().await;
                         return Ok(None);
                     }
 
@@ -199,8 +204,13 @@ impl PlanUi {
                         });
                         self.scroll_to_bottom();
 
-                        // Show spinner while the agent formalizes design + verification
-                        let result = self.approve_with_spinner(session).await;
+                        let result = self
+                            .run_with_spinner(
+                                session.approve(),
+                                PlanPhase::Approving,
+                                "Approving design & generating verification plan...",
+                            )
+                            .await;
 
                         match result {
                             Ok(Some((design, verification))) => {
@@ -218,7 +228,7 @@ impl PlanUi {
                                 self.phase = PlanPhase::Approved;
                             }
                             Ok(None) => {
-                                // User cancelled with Ctrl+C
+                                session.disconnect().await;
                                 return Ok(None);
                             }
                             Err(e) => {
@@ -259,7 +269,9 @@ impl PlanUi {
                     self.scroll_to_bottom();
 
                     // Send to agent with animated spinner
-                    let result = self.send_with_spinner(session, &input).await;
+                    let result = self
+                        .run_with_spinner(session.send(&input), PlanPhase::Thinking, "Thinking...")
+                        .await;
 
                     match result {
                         Ok(Some(response)) => {
@@ -271,7 +283,7 @@ impl PlanUi {
                             self.phase = PlanPhase::Discussing;
                         }
                         Ok(None) => {
-                            // User cancelled with Ctrl+C during thinking
+                            session.disconnect().await;
                             return Ok(None);
                         }
                         Err(e) => {
@@ -292,100 +304,41 @@ impl PlanUi {
         }
     }
 
-    /// Sends a message to the agent while displaying an animated spinner.
+    /// Runs a future while displaying an animated spinner in the chat.
     ///
-    /// Returns `Ok(Some(response))` on success, `Ok(None)` if the user
+    /// Returns `Ok(Some(value))` on success, `Ok(None)` if the user
     /// cancels with Ctrl+C, or `Err` on failure.
-    async fn send_with_spinner(
+    async fn run_with_spinner<F, T>(
         &mut self,
-        session: &mut PlanSession,
-        input: &str,
-    ) -> Result<Option<String>> {
-        // Add thinking indicator to chat
+        future: F,
+        phase: PlanPhase,
+        label: &str,
+    ) -> Result<Option<T>>
+    where
+        F: std::future::Future<Output = Result<T, coda_core::CoreError>>,
+    {
         self.messages.push(ChatMessage {
             role: AGENT_ROLE.to_string(),
-            content: format!("{} Thinking...", SPINNER_FRAMES[0]),
+            content: format!("{} {label}", SPINNER_FRAMES[0]),
         });
         let thinking_idx = self.messages.len() - 1;
         self.scroll_to_bottom();
-        self.phase = PlanPhase::Thinking;
+        self.phase = phase;
 
-        // Pin the send future so we can poll it inside select!
-        let send_future = session.send(input);
-        tokio::pin!(send_future);
+        tokio::pin!(future);
 
         let mut spinner_tick: usize = 0;
 
         let result = loop {
-            // Update spinner animation
             self.messages[thinking_idx].content = format!(
-                "{} Thinking...",
+                "{} {label}",
                 SPINNER_FRAMES[spinner_tick % SPINNER_FRAMES.len()]
             );
             spinner_tick += 1;
             self.draw()?;
 
             tokio::select! {
-                result = &mut send_future => break result,
-                () = tokio::time::sleep(std::time::Duration::from_millis(100)) => {
-                    // Check for Ctrl+C to cancel
-                    if event::poll(std::time::Duration::from_millis(0))?
-                        && let Event::Key(key) = event::read()?
-                        && key.kind == KeyEventKind::Press
-                        && key.code == KeyCode::Char('c')
-                        && key.modifiers.contains(KeyModifiers::CONTROL)
-                    {
-                        self.messages.pop();
-                        return Ok(None);
-                    }
-                }
-            }
-        };
-
-        // Remove the thinking indicator
-        self.messages.pop();
-
-        match result {
-            Ok(response) => Ok(Some(response)),
-            Err(e) => Err(e.into()),
-        }
-    }
-
-    /// Runs `session.approve()` while displaying an animated spinner.
-    ///
-    /// Returns `Ok(Some((design, verification)))` on success, `Ok(None)`
-    /// if the user cancels with Ctrl+C, or `Err` on failure.
-    async fn approve_with_spinner(
-        &mut self,
-        session: &mut PlanSession,
-    ) -> Result<Option<(String, String)>> {
-        // Add thinking indicator
-        self.messages.push(ChatMessage {
-            role: AGENT_ROLE.to_string(),
-            content: format!(
-                "{} Approving design & generating verification plan...",
-                SPINNER_FRAMES[0]
-            ),
-        });
-        let thinking_idx = self.messages.len() - 1;
-        self.scroll_to_bottom();
-        self.phase = PlanPhase::Approving;
-
-        let approve_future = session.approve();
-        tokio::pin!(approve_future);
-
-        let mut spinner_tick: usize = 0;
-
-        let result = loop {
-            self.messages[thinking_idx].content = format!(
-                "{} Approving design & generating verification plan...",
-                SPINNER_FRAMES[spinner_tick % SPINNER_FRAMES.len()]
-            );
-            spinner_tick += 1;
-            self.draw()?;
-
-            tokio::select! {
-                result = &mut approve_future => break result,
+                result = &mut future => break result,
                 () = tokio::time::sleep(std::time::Duration::from_millis(100)) => {
                     if event::poll(std::time::Duration::from_millis(0))?
                         && let Event::Key(key) = event::read()?
@@ -400,11 +353,10 @@ impl PlanUi {
             }
         };
 
-        // Remove thinking indicator
         self.messages.pop();
 
         match result {
-            Ok((design, verification)) => Ok(Some((design, verification))),
+            Ok(value) => Ok(Some(value)),
             Err(e) => Err(e.into()),
         }
     }
@@ -700,6 +652,16 @@ fn build_input_visual_lines(input: &str, width: u16) -> Vec<Line<'static>> {
     }
 
     lines
+}
+
+impl std::fmt::Debug for PlanUi {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PlanUi")
+            .field("messages", &self.messages.len())
+            .field("feature_slug", &self.feature_slug)
+            .field("phase", &self.phase)
+            .finish_non_exhaustive()
+    }
 }
 
 impl Drop for PlanUi {

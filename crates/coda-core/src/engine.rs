@@ -286,15 +286,29 @@ impl Engine {
 
     /// Starts an interactive planning session for a feature.
     ///
-    /// Creates a `PlanSession` wrapping a `ClaudeClient` with the Planner
+    /// Validates the slug format and checks for duplicate features before
+    /// creating a `PlanSession` wrapping a `ClaudeClient` with the Planner
     /// profile for multi-turn conversation. The session must be explicitly
     /// connected and finalized by the caller (typically the CLI layer).
     ///
     /// # Errors
     ///
-    /// Returns `CoreError` if the session cannot be created (e.g., template
-    /// rendering fails).
+    /// Returns `CoreError::PlanError` if the slug is invalid or a feature
+    /// with the same slug already exists. Returns other `CoreError` variants
+    /// if the session cannot be created.
     pub fn plan(&self, feature_slug: &str) -> Result<PlanSession, CoreError> {
+        validate_feature_slug(feature_slug)?;
+
+        let worktree_path = self.project_root.join(".trees").join(feature_slug);
+        if worktree_path.exists() {
+            return Err(CoreError::PlanError(format!(
+                "Feature '{feature_slug}' already exists at {}. \
+                 Use `coda status {feature_slug}` to check its state, \
+                 or choose a different slug.",
+                worktree_path.display(),
+            )));
+        }
+
         info!(feature_slug, "Starting planning session");
         PlanSession::new(
             feature_slug.to_string(),
@@ -436,12 +450,25 @@ impl Engine {
 
     /// Checks a single feature's PR status. Returns a [`CleanedWorktree`]
     /// candidate if the PR is merged or closed, `None` otherwise.
+    ///
+    /// As a defensive check, skips features whose worktree directory no
+    /// longer exists under `.trees/` (e.g. ghost entries from merged branches).
     fn check_feature_pr_status(
         &self,
         feature: &crate::state::FeatureState,
     ) -> Result<Option<CleanedWorktree>, CoreError> {
         let slug = &feature.feature.slug;
         let branch = &feature.git.branch;
+
+        let worktree_dir = self.project_root.join(".trees").join(slug);
+        if !worktree_dir.is_dir() {
+            debug!(
+                slug,
+                path = %worktree_dir.display(),
+                "Worktree directory does not exist, skipping ghost feature"
+            );
+            return Ok(None);
+        }
 
         let pr_status = if let Some(ref pr) = feature.pr {
             self.gh.pr_view_state(pr.number)?
@@ -502,6 +529,53 @@ impl std::fmt::Debug for Engine {
 // ---------------------------------------------------------------------------
 // Helper functions
 // ---------------------------------------------------------------------------
+
+/// Maximum length for a feature slug (keeps branch names and paths manageable).
+const SLUG_MAX_LEN: usize = 64;
+
+/// Validates that a feature slug is URL-safe and suitable for use in
+/// branch names and filesystem paths.
+///
+/// Accepted format: lowercase ASCII alphanumeric characters and hyphens,
+/// starting and ending with an alphanumeric character (e.g., `"add-user-auth"`).
+///
+/// # Errors
+///
+/// Returns `CoreError::PlanError` with a human-readable explanation when
+/// validation fails.
+pub fn validate_feature_slug(slug: &str) -> Result<(), CoreError> {
+    if slug.is_empty() {
+        return Err(CoreError::PlanError(
+            "Feature slug cannot be empty.".to_string(),
+        ));
+    }
+    if slug.len() > SLUG_MAX_LEN {
+        return Err(CoreError::PlanError(format!(
+            "Feature slug is too long ({} chars, max {SLUG_MAX_LEN}).",
+            slug.len(),
+        )));
+    }
+    if !slug
+        .chars()
+        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+    {
+        return Err(CoreError::PlanError(format!(
+            "Feature slug '{slug}' contains invalid characters. \
+             Only lowercase letters, digits, and hyphens are allowed.",
+        )));
+    }
+    if slug.starts_with('-') || slug.ends_with('-') {
+        return Err(CoreError::PlanError(format!(
+            "Feature slug '{slug}' must not start or end with a hyphen.",
+        )));
+    }
+    if slug.contains("--") {
+        return Err(CoreError::PlanError(format!(
+            "Feature slug '{slug}' must not contain consecutive hyphens.",
+        )));
+    }
+    Ok(())
+}
 
 /// Builds a simple directory tree listing of the repository.
 ///
@@ -888,5 +962,45 @@ mod tests {
         let messages: Vec<Message> = vec![];
         let text = extract_text_from_messages(&messages);
         assert!(text.is_empty());
+    }
+
+    #[test]
+    fn test_should_accept_valid_slugs() {
+        assert!(validate_feature_slug("add-auth").is_ok());
+        assert!(validate_feature_slug("feature123").is_ok());
+        assert!(validate_feature_slug("a").is_ok());
+        assert!(validate_feature_slug("a-b-c").is_ok());
+    }
+
+    #[test]
+    fn test_should_reject_empty_slug() {
+        let err = validate_feature_slug("").unwrap_err().to_string();
+        assert!(err.contains("empty"));
+    }
+
+    #[test]
+    fn test_should_reject_slug_with_invalid_chars() {
+        assert!(validate_feature_slug("Add-Auth").is_err());
+        assert!(validate_feature_slug("add auth").is_err());
+        assert!(validate_feature_slug("add/auth").is_err());
+        assert!(validate_feature_slug("add_auth").is_err());
+        assert!(validate_feature_slug("add.auth").is_err());
+    }
+
+    #[test]
+    fn test_should_reject_slug_with_leading_trailing_hyphen() {
+        assert!(validate_feature_slug("-add").is_err());
+        assert!(validate_feature_slug("add-").is_err());
+    }
+
+    #[test]
+    fn test_should_reject_slug_with_consecutive_hyphens() {
+        assert!(validate_feature_slug("add--auth").is_err());
+    }
+
+    #[test]
+    fn test_should_reject_slug_too_long() {
+        let long_slug = "a".repeat(65);
+        assert!(validate_feature_slug(&long_slug).is_err());
     }
 }

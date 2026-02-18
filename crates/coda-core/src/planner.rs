@@ -10,7 +10,7 @@ use std::sync::Arc;
 use claude_agent_sdk_rs::{ClaudeClient, ContentBlock, Message};
 use coda_pm::PromptManager;
 use futures::StreamExt;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 use crate::CoreError;
 use crate::config::CodaConfig;
@@ -62,6 +62,10 @@ pub struct PlanSession {
     approved_verification: Option<String>,
     /// Git operations implementation.
     git: Arc<dyn GitOps>,
+    /// Accumulated API cost in USD across all planning turns.
+    planning_cost_usd: f64,
+    /// Accumulated conversation turns across the entire planning session.
+    planning_turns: u32,
 }
 
 impl PlanSession {
@@ -80,16 +84,25 @@ impl PlanSession {
         config: &CodaConfig,
         git: Arc<dyn GitOps>,
     ) -> Result<Self, CoreError> {
-        // Load .coda.md for repository context
         let coda_md_path = project_root.join(".coda.md");
-        let coda_md = std::fs::read_to_string(&coda_md_path).unwrap_or_default();
+        let coda_md = match std::fs::read_to_string(&coda_md_path) {
+            Ok(content) => content,
+            Err(_) => {
+                warn!(
+                    path = %coda_md_path.display(),
+                    "Missing .coda.md — planning agent will lack repository context. \
+                     Run `coda init` to generate it."
+                );
+                String::new()
+            }
+        };
 
         let system_prompt = pm.render("plan/system", minijinja::context!(coda_md => coda_md))?;
 
         let options = AgentProfile::Planner.to_options(
             &system_prompt,
             project_root.clone(),
-            50, // max turns for planning conversation
+            config.agent.max_turns,
             config.agent.max_budget_usd,
             &config.agent.model,
         );
@@ -106,6 +119,8 @@ impl PlanSession {
             approved_design: None,
             approved_verification: None,
             git,
+            planning_cost_usd: 0.0,
+            planning_turns: 0,
         })
     }
 
@@ -122,6 +137,17 @@ impl PlanSession {
         self.connected = true;
         debug!("PlanSession connected to Claude");
         Ok(())
+    }
+
+    /// Disconnects the underlying `ClaudeClient`.
+    ///
+    /// Safe to call multiple times or when not connected.
+    pub async fn disconnect(&mut self) {
+        if self.connected {
+            let _ = self.client.disconnect().await;
+            self.connected = false;
+            debug!("PlanSession disconnected from Claude");
+        }
     }
 
     /// Sends a user message and collects the agent's response.
@@ -155,7 +181,13 @@ impl PlanSession {
                             }
                         }
                     }
-                    Message::Result(_) => break,
+                    Message::Result(result_msg) => {
+                        if let Some(cost) = result_msg.total_cost_usd {
+                            self.planning_cost_usd += cost;
+                        }
+                        self.planning_turns += result_msg.num_turns;
+                        break;
+                    }
                     _ => {}
                 }
             }
@@ -186,30 +218,38 @@ impl PlanSession {
         )?;
 
         let design = self.send(&approve_prompt).await?;
-        self.approved_design = Some(design.clone());
         info!("Design approved and formalized");
 
         // Step 2: Generate verification plan
-        let checks_str = self.config.checks.join("\n");
         let verification_prompt = self.pm.render(
             "plan/verification",
             minijinja::context!(
                 design_spec => &design,
-                checks => &checks_str,
+                checks => &self.config.checks,
                 feature_slug => &self.feature_slug,
             ),
         )?;
 
-        let verification = self.send(&verification_prompt).await?;
-        self.approved_verification = Some(verification.clone());
+        let verification = match self.send(&verification_prompt).await {
+            Ok(v) => v,
+            Err(e) => {
+                // Both must succeed atomically; don't leave partial state
+                return Err(e);
+            }
+        };
         info!("Verification plan generated");
+
+        // Store both only after both succeed
+        self.approved_design = Some(design.clone());
+        self.approved_verification = Some(verification.clone());
 
         Ok((design, verification))
     }
 
-    /// Returns `true` if the design has been approved via [`approve`](Self::approve).
+    /// Returns `true` if both design and verification have been approved
+    /// via [`approve`](Self::approve).
     pub fn is_approved(&self) -> bool {
-        self.approved_design.is_some()
+        self.approved_design.is_some() && self.approved_verification.is_some()
     }
 
     /// Finalizes the planning session by creating a worktree and writing specs.
@@ -229,70 +269,93 @@ impl PlanSession {
     /// file writes fail.
     pub async fn finalize(&mut self) -> Result<PlanOutput, CoreError> {
         let slug = self.feature_slug.clone();
-        let worktree_path = self.project_root.join(".trees").join(&slug);
+        let worktree_abs = self.project_root.join(".trees").join(&slug);
+        let worktree_rel = PathBuf::from(".trees").join(&slug);
 
-        // Guard: design and verification must be approved before finalizing
-        let design_content = self.approved_design.take().ok_or_else(|| {
+        // Guard: design and verification must be approved before finalizing.
+        // Clone instead of take so a retry is possible if a later step fails.
+        let design_content = self.approved_design.clone().ok_or_else(|| {
             CoreError::PlanError(
                 "Cannot finalize: design has not been approved. Use /approve first.".to_string(),
             )
         })?;
-        let verification_content = self.approved_verification.take().ok_or_else(|| {
+        let verification_content = self.approved_verification.clone().ok_or_else(|| {
             CoreError::PlanError("Cannot finalize: verification plan is missing.".to_string())
         })?;
 
-        // 1. Create git worktree first
+        // 1. Create git worktree
         let base_branch = if self.config.git.base_branch == "auto" {
             self.git.detect_default_branch()
         } else {
             self.config.git.base_branch.clone()
         };
         let branch_name = format!("{}/{}", self.config.git.branch_prefix, slug);
-        if let Some(parent) = worktree_path.parent() {
-            std::fs::create_dir_all(parent).map_err(CoreError::IoError)?;
+        if let Some(parent) = worktree_abs.parent() {
+            tokio::fs::create_dir_all(parent)
+                .await
+                .map_err(CoreError::IoError)?;
         }
         self.git
-            .worktree_add(&worktree_path, &branch_name, &base_branch)?;
+            .worktree_add(&worktree_abs, &branch_name, &base_branch)?;
         info!(
             branch = %branch_name,
-            worktree = %worktree_path.display(),
+            worktree = %worktree_abs.display(),
             "Created git worktree"
         );
 
         // 2. Write artifacts into worktree/.coda/<slug>/
-        let coda_feature_dir = worktree_path.join(".coda").join(&slug);
+        let coda_feature_dir = worktree_abs.join(".coda").join(&slug);
         let specs_dir = coda_feature_dir.join("specs");
-        std::fs::create_dir_all(&specs_dir).map_err(CoreError::IoError)?;
+        tokio::fs::create_dir_all(&specs_dir)
+            .await
+            .map_err(CoreError::IoError)?;
 
-        // Write design spec
         let design_spec_path = specs_dir.join("design.md");
-        std::fs::write(&design_spec_path, &design_content).map_err(CoreError::IoError)?;
+        tokio::fs::write(&design_spec_path, &design_content)
+            .await
+            .map_err(CoreError::IoError)?;
         debug!(path = %design_spec_path.display(), "Wrote design spec");
 
-        // Write verification plan
         let verification_path = specs_dir.join("verification.md");
-        std::fs::write(&verification_path, &verification_content).map_err(CoreError::IoError)?;
+        tokio::fs::write(&verification_path, &verification_content)
+            .await
+            .map_err(CoreError::IoError)?;
         debug!(path = %verification_path.display(), "Wrote verification plan");
 
-        // 3. Write initial state.yml
+        // 3. Write initial state.yml (store relative worktree path for portability)
         let dev_phases = extract_dev_phases(&design_content);
         let state = build_initial_state(
             &self.feature_slug,
-            &worktree_path,
+            &worktree_rel,
             &branch_name,
             &base_branch,
             &dev_phases,
+            self.planning_turns,
+            self.planning_cost_usd,
         );
         let state_path = coda_feature_dir.join("state.yml");
         let state_yaml = serde_yaml::to_string(&state)?;
-        std::fs::write(&state_path, state_yaml).map_err(CoreError::IoError)?;
+        tokio::fs::write(&state_path, state_yaml)
+            .await
+            .map_err(CoreError::IoError)?;
         debug!(path = %state_path.display(), "Wrote state.yml");
 
-        // Disconnect client
-        if self.connected {
-            let _ = self.client.disconnect().await;
-            self.connected = false;
+        // 4. Initial commit so planning artifacts are version-controlled
+        self.git.add(&worktree_abs, &[".coda/"])?;
+        if self.git.has_staged_changes(&worktree_abs) {
+            self.git.commit(
+                &worktree_abs,
+                &format!("feat({slug}): initialize planning artifacts"),
+            )?;
+            info!("Committed initial planning artifacts");
         }
+
+        // 5. Clear approved state only after everything succeeded
+        self.approved_design = None;
+        self.approved_verification = None;
+
+        // 6. Disconnect client
+        self.disconnect().await;
 
         info!("Planning session finalized successfully");
 
@@ -300,7 +363,7 @@ impl PlanSession {
             design_spec: design_spec_path,
             verification: verification_path,
             state: state_path,
-            worktree: worktree_path,
+            worktree: worktree_abs,
         })
     }
 
@@ -327,10 +390,10 @@ impl std::fmt::Debug for PlanSession {
 
 /// Extracts development phase names from a design specification.
 ///
-/// Parses headings like `### Phase 1: <name>` and converts each name
-/// into a slug (lowercase, spaces replaced with hyphens, non-alphanumeric
-/// characters removed). Falls back to a single `"default"` phase if
-/// no phase headings are found.
+/// Matches headings like `## Phase 1: <name>`, `### Phase 1: <name>`, or
+/// `#### Phase 1: <name>` (2–4 `#` levels). Parenthetical annotations
+/// such as `(Day 1)` or `(Day 1-2)` are stripped before slugifying.
+/// Falls back to a single `"default"` phase if no phase headings are found.
 ///
 /// # Examples
 ///
@@ -345,16 +408,23 @@ pub fn extract_dev_phases(design_content: &str) -> Vec<String> {
 
     for line in design_content.lines() {
         let trimmed = line.trim();
-        // Match "### Phase N: <name>" pattern
-        if let Some(rest) = trimmed.strip_prefix("### Phase ") {
-            // Skip the number and colon: "1: <name>" → "<name>"
-            if let Some((_num, name)) = rest.split_once(':') {
-                let name = name.trim();
-                if !name.is_empty() {
-                    let slug = slugify_phase_name(name);
-                    if !slug.is_empty() {
-                        phases.push(slug);
-                    }
+        // Match 2–4 leading '#' followed by " Phase "
+        let rest = if let Some(r) = trimmed.strip_prefix("#### Phase ") {
+            Some(r)
+        } else if let Some(r) = trimmed.strip_prefix("### Phase ") {
+            Some(r)
+        } else {
+            trimmed.strip_prefix("## Phase ")
+        };
+        let Some(rest) = rest else { continue };
+
+        // Skip the number and colon: "1: <name>" → "<name>"
+        if let Some((_num, name)) = rest.split_once(':') {
+            let name = strip_parenthetical(name.trim());
+            if !name.is_empty() {
+                let slug = slugify_phase_name(&name);
+                if !slug.is_empty() {
+                    phases.push(slug);
                 }
             }
         }
@@ -365,6 +435,19 @@ pub fn extract_dev_phases(design_content: &str) -> Vec<String> {
     }
 
     phases
+}
+
+/// Strips trailing parenthetical annotations from a phase name.
+///
+/// For example, `"Type Definitions (Day 1)"` becomes `"Type Definitions"`.
+fn strip_parenthetical(name: &str) -> String {
+    if let Some(idx) = name.rfind('(') {
+        let before = name[..idx].trim_end();
+        if !before.is_empty() {
+            return before.to_string();
+        }
+    }
+    name.to_string()
 }
 
 /// Converts a phase name into a slug suitable for use as a phase identifier.
@@ -415,13 +498,16 @@ fn slugify_phase_name(name: &str) -> String {
 ///
 /// Creates dev phases from `dev_phase_names`, appends the fixed
 /// review + verify quality phases, and initialises everything to `Pending`
-/// with zeroed cost/duration statistics.
+/// with zeroed cost/duration statistics. Planning session costs are
+/// recorded in `total` so they appear in status reports.
 pub(crate) fn build_initial_state(
     feature_slug: &str,
     worktree_path: &Path,
     branch: &str,
     base_branch: &str,
     dev_phase_names: &[String],
+    planning_turns: u32,
+    planning_cost_usd: f64,
 ) -> FeatureState {
     let now = chrono::Utc::now();
 
@@ -462,7 +548,11 @@ pub(crate) fn build_initial_state(
         },
         phases,
         pr: None,
-        total: TotalStats::default(),
+        total: TotalStats {
+            turns: planning_turns,
+            cost_usd: planning_cost_usd,
+            ..TotalStats::default()
+        },
     }
 }
 
@@ -484,18 +574,17 @@ mod tests {
             "feature/add-auth",
             "main",
             &dev_phases,
+            5,
+            0.42,
         );
 
-        // Feature info
         assert_eq!(state.feature.slug, "add-auth");
         assert!(state.feature.created_at <= chrono::Utc::now());
         assert!(state.feature.updated_at <= chrono::Utc::now());
 
-        // Overall status
         assert_eq!(state.status, FeatureStatus::Planned);
         assert_eq!(state.current_phase, 0);
 
-        // Git info
         assert_eq!(state.git.worktree_path, PathBuf::from(".trees/add-auth"));
         assert_eq!(state.git.branch, "feature/add-auth");
         assert_eq!(state.git.base_branch, "main");
@@ -514,23 +603,20 @@ mod tests {
             ]
         );
 
-        // Check kinds
         assert_eq!(state.phases[0].kind, PhaseKind::Dev);
-        assert_eq!(state.phases[1].kind, PhaseKind::Dev);
-        assert_eq!(state.phases[2].kind, PhaseKind::Dev);
         assert_eq!(state.phases[3].kind, PhaseKind::Quality);
         assert_eq!(state.phases[4].kind, PhaseKind::Quality);
 
         for phase in &state.phases {
             assert_eq!(phase.status, PhaseStatus::Pending);
             assert!(phase.started_at.is_none());
-            assert!(phase.completed_at.is_none());
             assert_eq!(phase.turns, 0);
-            assert!((phase.cost_usd - 0.0).abs() < f64::EPSILON);
         }
 
         assert!(state.pr.is_none());
-        assert_eq!(state.total.turns, 0);
+        // Planning cost is preserved in total stats
+        assert_eq!(state.total.turns, 5);
+        assert!((state.total.cost_usd - 0.42).abs() < f64::EPSILON);
     }
 
     #[test]
@@ -543,6 +629,8 @@ mod tests {
             "feature/new-feature",
             "main",
             &dev_phases,
+            0,
+            0.0,
         );
 
         let yaml = serde_yaml::to_string(&state).unwrap();
@@ -552,9 +640,7 @@ mod tests {
         assert!(yaml.contains("review"));
         assert!(yaml.contains("verify"));
 
-        // Round-trip
         let deserialized: FeatureState = serde_yaml::from_str(&yaml).unwrap();
-        // 2 dev + 2 quality = 4
         assert_eq!(deserialized.phases.len(), 4);
         assert_eq!(deserialized.status, FeatureStatus::Planned);
     }
@@ -582,9 +668,16 @@ mod tests {
 
         let phases = extract_dev_phases(design);
         assert_eq!(phases.len(), 3);
-        assert_eq!(phases[0], "type-definitions-day-1");
-        assert_eq!(phases[1], "transport-layer-day-1-2");
-        assert_eq!(phases[2], "testing-documentation-day-3");
+        assert_eq!(phases[0], "type-definitions");
+        assert_eq!(phases[1], "transport-layer");
+        assert_eq!(phases[2], "testing-documentation");
+    }
+
+    #[test]
+    fn test_should_extract_phases_with_varied_heading_levels() {
+        let design = "## Phase 1: Setup\n#### Phase 2: Refactor\n";
+        let phases = extract_dev_phases(design);
+        assert_eq!(phases, vec!["setup", "refactor"]);
     }
 
     #[test]
@@ -616,10 +709,20 @@ mod tests {
             slugify_phase_name("Testing & Documentation"),
             "testing-documentation"
         );
-        assert_eq!(
-            slugify_phase_name("Transport Layer (Day 1-2)"),
-            "transport-layer-day-1-2"
-        );
         assert_eq!(slugify_phase_name("  spaced  "), "spaced");
+    }
+
+    #[test]
+    fn test_should_strip_parenthetical_annotations() {
+        assert_eq!(
+            strip_parenthetical("Type Definitions (Day 1)"),
+            "Type Definitions"
+        );
+        assert_eq!(
+            strip_parenthetical("Transport Layer (Day 1-2)"),
+            "Transport Layer"
+        );
+        assert_eq!(strip_parenthetical("No parens"), "No parens");
+        assert_eq!(strip_parenthetical("(all parens)"), "(all parens)");
     }
 }

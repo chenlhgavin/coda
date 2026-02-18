@@ -29,7 +29,11 @@ impl FeatureScanner {
 
     /// Lists all features by scanning worktrees in `.trees/`.
     ///
-    /// Each worktree is expected to contain `.coda/<slug>/state.yml`.
+    /// Each worktree directory `<slug>` owns exactly one feature at
+    /// `.coda/<slug>/state.yml`. Other `.coda/` subdirectories inherited
+    /// from the base branch (e.g. merged features) are ignored to prevent
+    /// ghost features from appearing.
+    ///
     /// Invalid state files are silently skipped. Results are sorted by slug.
     ///
     /// # Errors
@@ -49,34 +53,25 @@ impl FeatureScanner {
                 continue;
             }
 
-            let coda_dir = worktree_entry.path().join(".coda");
-            if !coda_dir.is_dir() {
+            let slug = worktree_entry.file_name();
+            let state_path = worktree_entry
+                .path()
+                .join(".coda")
+                .join(&slug)
+                .join("state.yml");
+
+            if !state_path.is_file() {
                 continue;
             }
 
-            for feature_entry in fs::read_dir(&coda_dir)?.flatten() {
-                if !feature_entry.file_type().is_ok_and(|ft| ft.is_dir()) {
-                    continue;
-                }
-
-                let state_path = feature_entry.path().join("state.yml");
-                if !state_path.is_file() {
-                    continue;
-                }
-
-                let content = fs::read_to_string(&state_path).map_err(|e| {
-                    CoreError::StateError(format!("Cannot read {}: {e}", state_path.display()))
-                })?;
-
-                match serde_yaml::from_str::<FeatureState>(&content) {
-                    Ok(state) => features.push(state),
-                    Err(e) => {
-                        debug!(
-                            path = %state_path.display(),
-                            error = %e,
-                            "Skipping invalid state.yml"
-                        );
-                    }
+            match Self::read_state(&state_path) {
+                Ok(state) => features.push(state),
+                Err(e) => {
+                    debug!(
+                        path = %state_path.display(),
+                        error = %e,
+                        "Skipping invalid state.yml"
+                    );
                 }
             }
         }
@@ -87,8 +82,9 @@ impl FeatureScanner {
 
     /// Returns the state for a specific feature identified by its slug.
     ///
-    /// Tries a direct lookup at `.trees/<slug>/.coda/<slug>/state.yml` first,
-    /// then falls back to scanning all worktrees.
+    /// Looks up `.trees/<slug>/.coda/<slug>/state.yml` directly. Each
+    /// worktree owns exactly the feature whose slug matches its directory
+    /// name, so cross-worktree fallback is intentionally omitted.
     ///
     /// # Errors
     ///
@@ -101,38 +97,22 @@ impl FeatureScanner {
             ));
         }
 
-        // Direct lookup
-        let direct_state = self
+        let state_path = self
             .trees_dir
             .join(feature_slug)
             .join(".coda")
             .join(feature_slug)
             .join("state.yml");
 
-        if direct_state.is_file() {
-            return Self::read_state(&direct_state);
+        if state_path.is_file() {
+            return Self::read_state(&state_path);
         }
 
-        // Fallback: scan all worktrees
-        let mut available = Vec::new();
-
-        for worktree_entry in fs::read_dir(&self.trees_dir)?.flatten() {
-            if !worktree_entry.file_type().is_ok_and(|ft| ft.is_dir()) {
-                continue;
-            }
-
-            let candidate = worktree_entry
-                .path()
-                .join(".coda")
-                .join(feature_slug)
-                .join("state.yml");
-
-            if candidate.is_file() {
-                return Self::read_state(&candidate);
-            }
-
-            available.push(worktree_entry.file_name().to_string_lossy().to_string());
-        }
+        let available: Vec<String> = fs::read_dir(&self.trees_dir)?
+            .flatten()
+            .filter(|e| e.file_type().is_ok_and(|ft| ft.is_dir()))
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .collect();
 
         let hint = if available.is_empty() {
             "No features have been planned yet.".to_string()
@@ -293,5 +273,47 @@ mod tests {
         let features = scanner.list().expect("list");
         assert_eq!(features.len(), 1);
         assert_eq!(features[0].feature.slug, "good");
+    }
+
+    #[test]
+    fn test_should_ignore_ghost_features_inherited_from_base_branch() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+
+        // Worktree "new-feat" owns its own state
+        write_state(tmp.path(), "new-feat", &make_state("new-feat"));
+
+        // Simulate a ghost: "old-merged" state inherited from main inside "new-feat" worktree
+        let ghost_dir = tmp.path().join(".trees/new-feat/.coda/old-merged");
+        fs::create_dir_all(&ghost_dir).expect("create ghost dir");
+        let ghost_yaml = serde_yaml::to_string(&make_state("old-merged")).expect("serialize ghost");
+        fs::write(ghost_dir.join("state.yml"), ghost_yaml).expect("write ghost state");
+
+        let scanner = FeatureScanner::new(tmp.path());
+        let features = scanner.list().expect("list");
+
+        assert_eq!(features.len(), 1, "ghost feature must not appear");
+        assert_eq!(features[0].feature.slug, "new-feat");
+    }
+
+    #[test]
+    fn test_should_not_find_ghost_feature_via_get() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+
+        write_state(tmp.path(), "active", &make_state("active"));
+
+        // Ghost state under "active" worktree but for a different slug
+        let ghost_dir = tmp.path().join(".trees/active/.coda/ghost");
+        fs::create_dir_all(&ghost_dir).expect("create ghost dir");
+        let ghost_yaml = serde_yaml::to_string(&make_state("ghost")).expect("serialize ghost");
+        fs::write(ghost_dir.join("state.yml"), ghost_yaml).expect("write ghost state");
+
+        let scanner = FeatureScanner::new(tmp.path());
+
+        let err = scanner.get("ghost").unwrap_err().to_string();
+        assert!(err.contains("ghost"), "error should mention the slug");
+        assert!(
+            err.contains("active"),
+            "hint should list available worktrees"
+        );
     }
 }
