@@ -342,9 +342,18 @@ impl App {
 
     /// Runs with interactive TUI display.
     async fn run_tui(&self, feature_slug: &str) -> Result<()> {
+        // Pre-load phase names from state.yml so the first TUI frame
+        // already shows the full pipeline (avoids empty-pipeline flash
+        // while the engine connects to Claude).
+        let initial_phases = self
+            .engine
+            .feature_status(feature_slug)
+            .map(|state| state.phases.iter().map(|p| p.name.clone()).collect())
+            .unwrap_or_default();
+
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<RunEvent>();
 
-        let mut ui = crate::run_ui::RunUi::new(feature_slug)?;
+        let mut ui = crate::run_ui::RunUi::new(feature_slug, initial_phases)?;
 
         let slug = feature_slug.to_string();
 

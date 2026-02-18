@@ -99,11 +99,25 @@ enum PrDisplayStatus {
 impl RunUi {
     /// Creates a new run UI, entering the alternate screen and raw mode.
     ///
+    /// `initial_phases` pre-populates the phase pipeline so the first
+    /// frame already shows all phase names (avoids an empty-pipeline
+    /// flash while the engine connects to Claude).
+    ///
     /// # Errors
     ///
     /// Returns an error if terminal setup fails.
-    pub fn new(feature_slug: &str) -> Result<Self> {
+    pub fn new(feature_slug: &str, initial_phases: Vec<String>) -> Result<Self> {
         enable_raw_mode()?;
+
+        let phases = initial_phases
+            .into_iter()
+            .map(|name| PhaseDisplay {
+                name,
+                status: PhaseDisplayStatus::Pending,
+                started_at: None,
+                detail: String::new(),
+            })
+            .collect();
 
         let init = || -> Result<Self> {
             let mut stdout = io::stdout();
@@ -113,7 +127,7 @@ impl RunUi {
             Ok(Self {
                 terminal,
                 feature_slug: feature_slug.to_string(),
-                phases: Vec::new(),
+                phases,
                 active_phase: None,
                 start_time: Instant::now(),
                 total_turns: 0,
