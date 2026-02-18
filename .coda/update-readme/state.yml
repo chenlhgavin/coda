@@ -1,0 +1,76 @@
+feature:
+  slug: update-readme
+  created_at: 2026-02-18T12:57:25.389206Z
+  updated_at: 2026-02-18T13:24:11.022541Z
+status: completed
+current_phase: 4
+git:
+  worktree_path: .trees/update-readme
+  branch: feature/update-readme
+  base_branch: main
+phases:
+- name: write-the-readme
+  kind: dev
+  status: completed
+  started_at: 2026-02-18T13:11:24.511673Z
+  completed_at: 2026-02-18T13:14:00.328719Z
+  turns: 20
+  cost_usd: 0.5776387500000002
+  cost:
+    input_tokens: 11
+    output_tokens: 4930
+  duration_secs: 155
+  details: {}
+- name: verify-accuracy
+  kind: dev
+  status: completed
+  started_at: 2026-02-18T13:14:00.329964Z
+  completed_at: 2026-02-18T13:16:47.244951Z
+  turns: 23
+  cost_usd: 1.0802790000000004
+  cost:
+    input_tokens: 363
+    output_tokens: 2560
+  duration_secs: 166
+  details: {}
+- name: review
+  kind: quality
+  status: completed
+  started_at: 2026-02-18T13:16:47.245953Z
+  completed_at: 2026-02-18T13:17:19.311949Z
+  turns: 7
+  cost_usd: 0.35259799999999997
+  cost:
+    input_tokens: 0
+    output_tokens: 0
+  duration_secs: 32
+  details:
+    issues_found: 0
+    issues_resolved: 0
+    rounds: 1
+- name: verify
+  kind: quality
+  status: completed
+  started_at: 2026-02-18T13:17:19.313153Z
+  completed_at: 2026-02-18T13:24:11.022539Z
+  turns: 49
+  cost_usd: 3.244637749999999
+  cost:
+    input_tokens: 22
+    output_tokens: 11653
+  duration_secs: 411
+  details:
+    attempts: 27
+    checks_passed: 27
+    checks_total: 27
+pr:
+  url: https://github.com/lehuagavin/coda/pull/4
+  number: 4
+  title: 'feat(update-readme): feature implementation'
+total:
+  turns: 99
+  cost_usd: 5.2551535
+  cost:
+    input_tokens: 396
+    output_tokens: 19143
+  duration_secs: 764
