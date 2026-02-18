@@ -38,6 +38,10 @@ pub enum Commands {
     Run {
         /// URL-safe feature slug (e.g., "add-user-auth").
         feature_slug: String,
+
+        /// Disable TUI and use plain text output (for CI/pipelines).
+        #[arg(long)]
+        no_tui: bool,
     },
 
     /// List all planned features.
@@ -69,7 +73,10 @@ impl Cli {
         match self.command {
             Commands::Init => app.init().await,
             Commands::Plan { feature_slug } => app.plan(&feature_slug).await,
-            Commands::Run { feature_slug } => app.run(&feature_slug).await,
+            Commands::Run {
+                feature_slug,
+                no_tui,
+            } => app.run(&feature_slug, no_tui).await,
             Commands::List => app.list(),
             Commands::Status { feature_slug } => app.status(&feature_slug),
             Commands::Clean { dry_run, yes } => app.clean(dry_run, yes),

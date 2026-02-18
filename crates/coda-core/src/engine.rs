@@ -319,13 +319,15 @@ impl Engine {
         )
     }
 
-    /// Lists all features by scanning worktrees in `.trees/`.
+    /// Lists all features: active worktrees from `.trees/` and merged
+    /// features from `.coda/`.
     ///
     /// Delegates to [`FeatureScanner::list`].
     ///
     /// # Errors
     ///
-    /// Returns `CoreError::ConfigError` if `.trees/` does not exist.
+    /// Returns `CoreError::ConfigError` if neither `.trees/` nor `.coda/`
+    /// contains any features and `.trees/` does not exist.
     pub fn list_features(&self) -> Result<Vec<crate::state::FeatureState>, CoreError> {
         self.scanner.list()
     }

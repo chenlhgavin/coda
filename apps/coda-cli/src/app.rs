@@ -111,18 +111,26 @@ impl App {
 
     /// Handles the `coda list` command.
     ///
-    /// Lists all planned features with their status, branch, and cost summary.
+    /// Lists all features (active and merged) with their status, branch,
+    /// and cost summary. Active features are shown first, followed by
+    /// merged features separated by a divider.
     ///
     /// # Errors
     ///
     /// Returns an error if the feature list cannot be read.
     pub fn list(&self) -> Result<()> {
+        use coda_core::state::FeatureStatus;
+
         let features = self.engine.list_features()?;
 
         if features.is_empty() {
             println!("No features found. Run `coda plan <feature-slug>` to create one.");
             return Ok(());
         }
+
+        let (active, merged): (Vec<_>, Vec<_>) = features
+            .iter()
+            .partition(|f| f.status != FeatureStatus::Merged);
 
         println!();
         println!(
@@ -131,21 +139,29 @@ impl App {
         );
         println!("  {}", "─".repeat(90));
 
-        for f in &features {
-            let status_icon = feature_status_icon(f.status);
+        for f in &active {
+            print_feature_row(f);
+        }
 
-            println!(
-                "  {:<28} {status_icon} {:<12} {:<28} {:>8} {:>8}",
-                truncate_str(&f.feature.slug, 28),
-                f.status,
-                truncate_str(&f.git.branch, 28),
-                f.total.turns,
-                format!("${:.4}", f.total.cost_usd),
-            );
+        if !active.is_empty() && !merged.is_empty() {
+            println!("  {}", "─".repeat(90));
+        }
+
+        for f in &merged {
+            print_feature_row(f);
         }
 
         println!();
-        println!("  {} feature(s) total", features.len());
+        let active_count = active.len();
+        let merged_count = merged.len();
+        let total = active_count + merged_count;
+        match (active_count, merged_count) {
+            (0, _) => println!("  {merged_count} merged — {total} feature(s) total"),
+            (_, 0) => println!("  {active_count} active — {total} feature(s) total"),
+            _ => println!(
+                "  {active_count} active, {merged_count} merged — {total} feature(s) total"
+            ),
+        }
         println!();
 
         Ok(())
@@ -309,12 +325,113 @@ impl App {
     /// Handles the `coda run <feature_slug>` command.
     ///
     /// Executes all remaining phases and displays real-time phase-by-phase
-    /// progress with timing information and a final summary.
+    /// progress. When `no_tui` is false (default), uses an interactive
+    /// ratatui TUI with spinner animation and live timers. When `no_tui`
+    /// is true, falls back to plain text output suitable for CI/pipelines.
     ///
     /// # Errors
     ///
     /// Returns an error if the run fails.
-    pub async fn run(&self, feature_slug: &str) -> Result<()> {
+    pub async fn run(&self, feature_slug: &str, no_tui: bool) -> Result<()> {
+        if no_tui {
+            return self.run_plain(feature_slug).await;
+        }
+
+        self.run_tui(feature_slug).await
+    }
+
+    /// Runs with interactive TUI display.
+    async fn run_tui(&self, feature_slug: &str) -> Result<()> {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<RunEvent>();
+
+        let mut ui = crate::run_ui::RunUi::new(feature_slug)?;
+
+        let slug = feature_slug.to_string();
+
+        // We cannot move `engine` into a spawned task (it's borrowed),
+        // so we run the engine concurrently via `tokio::select!`.
+        let engine_future = self.engine.run(&slug, Some(tx));
+
+        tokio::pin!(engine_future);
+
+        let mut engine_result: Option<Result<Vec<coda_core::TaskResult>, coda_core::CoreError>> =
+            None;
+
+        // Run UI and engine concurrently: UI drives the event loop,
+        // engine sends events through the channel.
+        let ui_result = {
+            let mut ui_future = std::pin::pin!(ui.run(rx));
+            loop {
+                tokio::select! {
+                    // Bias engine branch so its result is always captured
+                    // before the UI branch can break the loop.
+                    biased;
+
+                    result = &mut engine_future, if engine_result.is_none() => {
+                        engine_result = Some(result);
+                        // Engine done — channel sender dropped, UI will see Disconnected
+                        // and finish on its own. Continue the loop to let UI drain.
+                    }
+                    ui_res = &mut ui_future => {
+                        break ui_res;
+                    }
+                }
+            }
+        };
+
+        // If engine completed but select! picked the UI branch first (both
+        // were ready simultaneously), await the engine future now — it will
+        // return immediately since it already completed.
+        if engine_result.is_none() {
+            engine_result = Some(engine_future.await);
+        }
+
+        // Drop UI to restore terminal before printing final output
+        drop(ui);
+
+        // Print final summary to normal stdout
+        match (engine_result, ui_result) {
+            (Some(Ok(_results)), Ok(summary)) => {
+                println!();
+                println!("  CODA Run: {feature_slug}");
+                println!("  ═══════════════════════════════════════");
+                println!(
+                    "  Total: {} elapsed, {} turns, ${:.4} USD",
+                    format_duration(summary.elapsed),
+                    summary.total_turns,
+                    summary.total_cost,
+                );
+                if let Some(url) = &summary.pr_url {
+                    println!("  PR: {url}");
+                }
+                println!("  ═══════════════════════════════════════");
+                println!();
+                Ok(())
+            }
+            (Some(Err(e)), _) => {
+                error!("Run failed: {e}");
+                println!();
+                println!("  CODA Run: {feature_slug} — FAILED");
+                println!("  ═══════════════════════════════════════");
+                println!("  Error: {e}");
+                println!("  ═══════════════════════════════════════");
+                println!();
+                Err(e.into())
+            }
+            (_, Err(e)) => {
+                // UI error (e.g. user cancelled)
+                error!("UI error: {e}");
+                Err(e)
+            }
+            (None, _) => {
+                // Should never happen: engine_future is awaited above as fallback
+                Err(anyhow::anyhow!("Engine did not complete"))
+            }
+        }
+    }
+
+    /// Runs with plain text output (for CI/pipelines).
+    async fn run_plain(&self, feature_slug: &str) -> Result<()> {
         let run_start = Instant::now();
 
         println!();
@@ -356,6 +473,34 @@ impl App {
                     RunEvent::PhaseFailed { name, error, .. } => {
                         println!("  [✗] {name:<24} Failed");
                         println!("      Error: {error}");
+                    }
+                    RunEvent::ReviewRound {
+                        round,
+                        max_rounds,
+                        issues_found,
+                    } => {
+                        if issues_found == 0 {
+                            println!("      Review round {round}/{max_rounds}: passed");
+                        } else {
+                            println!(
+                                "      Review round {round}/{max_rounds}: {issues_found} issue(s), fixing..."
+                            );
+                        }
+                    }
+                    RunEvent::VerifyAttempt {
+                        attempt,
+                        max_attempts,
+                        passed,
+                    } => {
+                        if passed {
+                            println!(
+                                "      Verify attempt {attempt}/{max_attempts}: all checks passed"
+                            );
+                        } else {
+                            println!(
+                                "      Verify attempt {attempt}/{max_attempts}: failures found, fixing..."
+                            );
+                        }
                     }
                     RunEvent::CreatingPr => {
                         println!("  [▸] create-pr              Running...");
@@ -414,12 +559,26 @@ impl App {
     }
 }
 
+fn print_feature_row(f: &coda_core::state::FeatureState) {
+    let status_icon = feature_status_icon(f.status);
+
+    println!(
+        "  {:<28} {status_icon} {:<12} {:<28} {:>8} {:>8}",
+        truncate_str(&f.feature.slug, 28),
+        f.status,
+        truncate_str(&f.git.branch, 28),
+        f.total.turns,
+        format!("${:.4}", f.total.cost_usd),
+    );
+}
+
 fn feature_status_icon(s: coda_core::state::FeatureStatus) -> &'static str {
     match s {
         coda_core::state::FeatureStatus::Planned => "○",
         coda_core::state::FeatureStatus::InProgress => "◐",
         coda_core::state::FeatureStatus::Completed => "●",
         coda_core::state::FeatureStatus::Failed => "✗",
+        coda_core::state::FeatureStatus::Merged => "✔",
         _ => "?",
     }
 }

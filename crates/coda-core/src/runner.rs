@@ -72,12 +72,35 @@ pub enum RunEvent {
         /// Error description.
         error: String,
     },
+    /// A review round has completed.
+    ReviewRound {
+        /// Current round number (1-based).
+        round: u32,
+        /// Maximum allowed rounds.
+        max_rounds: u32,
+        /// Number of issues found in this round.
+        issues_found: u32,
+    },
+    /// A verification attempt has completed.
+    VerifyAttempt {
+        /// Current attempt number (1-based).
+        attempt: u32,
+        /// Maximum allowed attempts.
+        max_attempts: u32,
+        /// Whether all checks passed in this attempt.
+        passed: bool,
+    },
     /// Creating pull request after all phases.
     CreatingPr,
     /// PR creation completed.
     PrCreated {
         /// PR URL, if successfully extracted from agent response.
         url: Option<String>,
+    },
+    /// The entire run has finished (success or failure).
+    RunFinished {
+        /// Whether the run completed successfully.
+        success: bool,
     },
 }
 
@@ -720,6 +743,10 @@ impl Runner {
         let branch = &self.state.git.branch.clone();
         self.git.push(&self.worktree_path, branch)?;
 
+        self.emit_event(RunEvent::RunFinished {
+            success: pr_succeeded,
+        });
+
         // Disconnect
         if self.connected {
             let _ = self.client.disconnect().await;
@@ -867,6 +894,12 @@ impl Runner {
             let issue_count = issues.len() as u32;
             self.review_summary.issues_found += issue_count;
 
+            self.emit_event(RunEvent::ReviewRound {
+                round: round + 1,
+                max_rounds,
+                issues_found: issue_count,
+            });
+
             if issues.is_empty() {
                 info!("No critical/major issues found, review passed");
                 break;
@@ -960,7 +993,14 @@ impl Runner {
             self.verification_summary.checks_total = passed + failed_details.len() as u32;
             self.verification_summary.checks_passed = passed;
 
-            if failed_details.is_empty() {
+            let all_passed = failed_details.is_empty();
+            self.emit_event(RunEvent::VerifyAttempt {
+                attempt: attempt + 1,
+                max_attempts: max_attempts + 1,
+                passed: all_passed,
+            });
+
+            if all_passed {
                 info!("All verification checks passed");
                 break;
             }

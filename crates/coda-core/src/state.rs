@@ -248,6 +248,8 @@ pub enum FeatureStatus {
     Completed,
     /// Feature execution failed.
     Failed,
+    /// Feature's PR has been merged and worktree cleaned up.
+    Merged,
 }
 
 /// Status of an individual execution phase.
@@ -272,6 +274,7 @@ impl std::fmt::Display for FeatureStatus {
             Self::InProgress => write!(f, "in progress"),
             Self::Completed => write!(f, "completed"),
             Self::Failed => write!(f, "failed"),
+            Self::Merged => write!(f, "merged"),
         }
     }
 }
