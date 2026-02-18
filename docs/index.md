@@ -4,6 +4,12 @@
 
 See [`.coda.md`](../.coda.md) for a comprehensive overview of the repository structure, tech stack, and conventions.
 
+## Architecture
+
+| Document | Description |
+|----------|-------------|
+| [`arch.md`](arch.md) | 系统架构文档 — 整体架构图、目录结构、核心抽象、每个 CLI 命令的详细流程图、数据流、设计决策 |
+
 ## Per-Crate API Reference
 
 Each library crate maintains an `API.md` file at its root that documents the crate's public interface: re-exported types, traits, structs, enums, and free functions with one-line descriptions.
