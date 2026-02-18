@@ -188,7 +188,10 @@ pub fn extract_pr_url(text: &str) -> Option<String> {
                 .find(|c: char| c.is_whitespace() || c == '"' || c == '\'' || c == ')')
                 .unwrap_or(url_part.len());
             let url = &url_part[..end];
-            if url.contains("/pull/") {
+            // Must contain /pull/ AND end with a numeric PR number.
+            // Rejects /pull/new/<branch> (GitHub's "create PR" page URL
+            // that appears in `git push` output).
+            if url.contains("/pull/") && extract_pr_number(url).is_some_and(|n| n > 0) {
                 return Some(url.to_string());
             }
         }
@@ -417,6 +420,14 @@ total_count: 2
     #[test]
     fn test_should_not_extract_non_pr_github_url() {
         let text = "See https://github.com/org/repo/issues/10 for details.";
+        assert!(extract_pr_url(text).is_none());
+    }
+
+    #[test]
+    fn test_should_reject_git_push_create_pr_page_url() {
+        // `git push` output includes a "Create a pull request" link that
+        // points to /pull/new/<branch>, NOT an actual PR.
+        let text = "remote: Create a pull request for 'feature/update-doc' on GitHub by visiting:\nremote:   https://github.com/lehuagavin/coda/pull/new/feature/update-doc";
         assert!(extract_pr_url(text).is_none());
     }
 
