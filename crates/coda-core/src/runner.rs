@@ -685,7 +685,10 @@ impl Runner {
             }
         }
 
-        // Commit .coda/ state updates before creating PR
+        // Compute totals before creating PR so the PR body has accurate stats
+        // (excludes create_pr phase itself, which is a meta-operation)
+        self.update_totals();
+        self.save_state()?;
         self.commit_coda_state()?;
 
         // All phases complete — create PR
@@ -710,6 +713,12 @@ impl Runner {
         }
         self.update_totals();
         self.save_state()?;
+
+        // Commit and push final state (PR info, status, log) so the PR
+        // branch includes all execution metadata.
+        self.commit_coda_state()?;
+        let branch = &self.state.git.branch.clone();
+        self.git.push(&self.worktree_path, branch)?;
 
         // Disconnect
         if self.connected {
