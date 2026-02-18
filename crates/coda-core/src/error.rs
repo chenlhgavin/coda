@@ -6,10 +6,16 @@
 use thiserror::Error;
 
 /// Error type for coda-core operations.
+///
+/// Variants are grouped by subsystem: agent, git/gh external CLI, planning
+/// workflow, state management, I/O, serialization, and configuration.
 #[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum CoreError {
     /// An error from the Claude Agent SDK or agent execution.
+    ///
+    /// Covers both SDK-level failures (connection, streaming) and
+    /// logical agent errors (empty responses, unexpected phases).
     #[error("Agent error: {0}")]
     AgentError(String),
 
@@ -29,15 +35,11 @@ pub enum CoreError {
     #[error("State error: {0}")]
     StateError(String),
 
-    /// An error from the Claude Agent SDK.
-    #[error("Agent SDK error: {0}")]
-    AgentSdkError(String),
-
     /// A planning workflow error (e.g. finalizing without approval).
     #[error("Plan error: {0}")]
     PlanError(String),
 
-    /// A git operation error.
+    /// A git/gh external CLI operation error.
     #[error("Git error: {0}")]
     GitError(String),
 

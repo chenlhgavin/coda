@@ -5,7 +5,10 @@
 //! fixed review → verify quality phases, with state persistence for crash
 //! recovery.
 
+use std::fs::{self, File, OpenOptions};
+use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use claude_agent_sdk_rs::{ClaudeClient, ContentBlock, Message, ResultMessage, ToolResultContent};
@@ -17,6 +20,8 @@ use tracing::{debug, error, info, warn};
 
 use crate::CoreError;
 use crate::config::CodaConfig;
+use crate::gh::GhOps;
+use crate::git::GitOps;
 use crate::parser::{
     extract_pr_number, extract_pr_url, parse_review_issues, parse_verification_result,
 };
@@ -276,6 +281,167 @@ impl AgentResponse {
     }
 }
 
+/// Structured run log writer for debugging agent interactions.
+///
+/// Writes a human-readable log of every prompt/response exchange to
+/// `.coda/<slug>/logs/run-<timestamp>.log`, making it easy to diagnose
+/// issues like empty responses or failed PR creation.
+struct RunLogger {
+    file: File,
+}
+
+impl RunLogger {
+    /// Creates a new logger, writing to `.coda/<slug>/logs/run-<timestamp>.log`.
+    ///
+    /// Creates the `logs/` directory if it doesn't exist. Returns `None` if
+    /// the log file cannot be created (logging is best-effort, not fatal).
+    fn new(feature_dir: &Path) -> Option<Self> {
+        let logs_dir = feature_dir.join("logs");
+        if let Err(e) = fs::create_dir_all(&logs_dir) {
+            warn!(error = %e, "Cannot create logs directory");
+            return None;
+        }
+
+        let timestamp = chrono::Utc::now().format("%Y%m%dT%H%M%S");
+        let log_path = logs_dir.join(format!("run-{timestamp}.log"));
+
+        match OpenOptions::new().create(true).append(true).open(&log_path) {
+            Ok(file) => {
+                info!(path = %log_path.display(), "Run log opened");
+                Some(Self { file })
+            }
+            Err(e) => {
+                warn!(error = %e, "Cannot open run log file");
+                None
+            }
+        }
+    }
+
+    /// Writes the run header with feature metadata.
+    fn log_header(&mut self, feature_slug: &str, model: &str, phases: &[String]) {
+        let _ = writeln!(self.file, "═══ CODA Run: {feature_slug} ═══");
+        let _ = writeln!(
+            self.file,
+            "Started: {}",
+            chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ")
+        );
+        let _ = writeln!(self.file, "Model: {model}");
+        let _ = writeln!(self.file, "Phases: {}", phases.join(" → "));
+        let _ = writeln!(self.file);
+    }
+
+    /// Logs the start of a phase.
+    fn log_phase_start(&mut self, name: &str, index: usize, total: usize, kind: &str) {
+        let _ = writeln!(self.file, "────────────────────────────────");
+        let _ = writeln!(self.file, "Phase {}/{total}: {name} [{kind}]", index + 1,);
+        let _ = writeln!(self.file, "────────────────────────────────");
+        let _ = writeln!(self.file);
+    }
+
+    /// Logs a single agent interaction (prompt + response).
+    fn log_interaction(
+        &mut self,
+        prompt: &str,
+        resp: &AgentResponse,
+        metrics: &IncrementalMetrics,
+    ) {
+        let _ = writeln!(self.file, ">>> PROMPT ({} chars)", prompt.len());
+        let truncated_prompt = truncate_for_log(prompt, LOG_TEXT_LIMIT);
+        let _ = writeln!(self.file, "{truncated_prompt}");
+        if prompt.len() > LOG_TEXT_LIMIT {
+            let _ = writeln!(self.file, "... [truncated at {LOG_TEXT_LIMIT} chars]");
+        }
+        let _ = writeln!(self.file);
+
+        let _ = writeln!(
+            self.file,
+            "<<< RESPONSE (text: {} chars, tool_output: {} chars)",
+            resp.text.len(),
+            resp.tool_output.len(),
+        );
+
+        if resp.text.is_empty() && resp.tool_output.is_empty() {
+            let _ = writeln!(self.file, "⚠ WARNING: Empty response from agent");
+        } else {
+            if !resp.text.is_empty() {
+                let _ = writeln!(self.file, "[text]");
+                let truncated = truncate_for_log(&resp.text, LOG_TEXT_LIMIT);
+                let _ = writeln!(self.file, "{truncated}");
+                if resp.text.len() > LOG_TEXT_LIMIT {
+                    let _ = writeln!(self.file, "... [truncated at {LOG_TEXT_LIMIT} chars]");
+                }
+            }
+            if !resp.tool_output.is_empty() {
+                let _ = writeln!(self.file, "[tool_output]");
+                let truncated = truncate_for_log(&resp.tool_output, LOG_TEXT_LIMIT);
+                let _ = writeln!(self.file, "{truncated}");
+                if resp.tool_output.len() > LOG_TEXT_LIMIT {
+                    let _ = writeln!(self.file, "... [truncated at {LOG_TEXT_LIMIT} chars]");
+                }
+            }
+        }
+
+        let _ = writeln!(
+            self.file,
+            "[metrics] turns={}, cost=${:.4}, input_tokens={}, output_tokens={}",
+            resp.result.as_ref().map_or(0, |r| r.num_turns),
+            metrics.cost_usd,
+            metrics.input_tokens,
+            metrics.output_tokens,
+        );
+        let _ = writeln!(self.file);
+    }
+
+    /// Logs the PR extraction process.
+    fn log_pr_extraction(
+        &mut self,
+        text_result: Option<&str>,
+        gh_result: Option<&str>,
+        final_url: Option<&str>,
+    ) {
+        let _ = writeln!(self.file, "[PR extraction]");
+        let _ = writeln!(
+            self.file,
+            "  extract_pr_url(all_text) → {}",
+            text_result.unwrap_or("None"),
+        );
+        let _ = writeln!(
+            self.file,
+            "  check_pr_exists_via_gh  → {}",
+            gh_result.unwrap_or("not attempted"),
+        );
+        let _ = writeln!(
+            self.file,
+            "  Result: {}",
+            final_url
+                .map(|u| format!("OK → {u}"))
+                .unwrap_or_else(|| "FAILED — no PR URL found".to_string()),
+        );
+        let _ = writeln!(self.file);
+    }
+
+    /// Logs a generic message.
+    fn log_message(&mut self, msg: &str) {
+        let _ = writeln!(self.file, "{msg}");
+    }
+}
+
+/// Maximum characters to include from prompt/response text in the log.
+const LOG_TEXT_LIMIT: usize = 50_000;
+
+/// Truncates text for log output at a safe UTF-8 boundary.
+fn truncate_for_log(text: &str, limit: usize) -> &str {
+    if text.len() <= limit {
+        text
+    } else {
+        let mut end = limit;
+        while end > 0 && !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        &text[..end]
+    }
+}
+
 /// Orchestrates the execution of a feature through all phases.
 ///
 /// Uses a single continuous `ClaudeClient` session with the Coder profile,
@@ -293,6 +459,12 @@ pub struct Runner {
     progress_tx: Option<UnboundedSender<RunEvent>>,
     /// Tracks cumulative SDK metrics for incremental delta computation.
     metrics: MetricsTracker,
+    /// Per-run structured log for debugging agent interactions.
+    run_logger: Option<RunLogger>,
+    /// Git operations implementation.
+    git: Arc<dyn GitOps>,
+    /// GitHub CLI operations implementation.
+    gh: Arc<dyn GhOps>,
 }
 
 impl Runner {
@@ -310,6 +482,8 @@ impl Runner {
         project_root: PathBuf,
         pm: &PromptManager,
         config: &CodaConfig,
+        git: Arc<dyn GitOps>,
+        gh: Arc<dyn GhOps>,
     ) -> Result<Self, CoreError> {
         // Find feature directory
         let feature_dir = find_feature_dir(&project_root, feature_slug)?;
@@ -343,6 +517,7 @@ impl Runner {
         );
 
         let client = ClaudeClient::new(options);
+        let run_logger = RunLogger::new(&feature_dir);
 
         Ok(Self {
             client,
@@ -356,6 +531,9 @@ impl Runner {
             verification_summary: VerificationSummary::default(),
             progress_tx: None,
             metrics: MetricsTracker::default(),
+            run_logger,
+            git,
+            gh,
         })
     }
 
@@ -383,7 +561,7 @@ impl Runner {
         self.client
             .connect()
             .await
-            .map_err(|e| CoreError::AgentSdkError(e.to_string()))?;
+            .map_err(|e| CoreError::AgentError(e.to_string()))?;
         self.connected = true;
 
         // Mark feature as in progress
@@ -424,14 +602,31 @@ impl Runner {
         // Emit initial phase list so the UI can display the full pipeline
         let phase_names: Vec<String> = self.state.phases.iter().map(|p| p.name.clone()).collect();
         self.emit_event(RunEvent::RunStarting {
-            phases: phase_names,
+            phases: phase_names.clone(),
         });
+
+        if let Some(logger) = &mut self.run_logger {
+            logger.log_header(
+                &self.state.feature.slug,
+                &self.config.agent.model,
+                &phase_names,
+            );
+        }
 
         for phase_idx in start_phase..total_phases {
             let phase_name = self.state.phases[phase_idx].name.clone();
             let phase_kind = self.state.phases[phase_idx].kind.clone();
 
             info!(phase = %phase_name, index = phase_idx, "Starting phase");
+
+            let kind_str = match &phase_kind {
+                PhaseKind::Dev => "dev",
+                PhaseKind::Quality => "quality",
+            };
+            if let Some(logger) = &mut self.run_logger {
+                logger.log_phase_start(&phase_name, phase_idx, total_phases, kind_str);
+            }
+
             self.emit_event(RunEvent::PhaseStarting {
                 name: phase_name.clone(),
                 index: phase_idx,
@@ -472,6 +667,11 @@ impl Runner {
                 }
                 Err(e) => {
                     error!(phase = %phase_name, error = %e, "Phase failed");
+                    if let Some(logger) = &mut self.run_logger {
+                        logger.log_message(&format!(
+                            "✗ Phase {phase_name} FAILED: {e}\n  Aborting run.\n",
+                        ));
+                    }
                     self.emit_event(RunEvent::PhaseFailed {
                         name: phase_name.clone(),
                         index: phase_idx,
@@ -573,13 +773,10 @@ impl Runner {
         )?;
 
         let resp = self.send_and_collect(&prompt).await?;
-        debug!(
-            response_len = resp.text.len(),
-            phase = %phase_name,
-            "Dev phase response received"
-        );
-
         let incremental = self.metrics.record(&resp.result);
+        if let Some(logger) = &mut self.run_logger {
+            logger.log_interaction(&prompt, &resp, &incremental);
+        }
         acc.record(&resp, incremental);
 
         let outcome = acc.into_outcome(serde_json::json!({}));
@@ -649,6 +846,9 @@ impl Runner {
 
             let resp = self.send_and_collect(&review_prompt).await?;
             let m = self.metrics.record(&resp.result);
+            if let Some(logger) = &mut self.run_logger {
+                logger.log_interaction(&review_prompt, &resp, &m);
+            }
             acc.record(&resp, m);
 
             self.review_summary.rounds += 1;
@@ -684,6 +884,9 @@ impl Runner {
 
             let fix_resp = self.send_and_collect(&fix_prompt).await?;
             let fm = self.metrics.record(&fix_resp.result);
+            if let Some(logger) = &mut self.run_logger {
+                logger.log_interaction(&fix_prompt, &fix_resp, &fm);
+            }
             acc.record(&fix_resp, fm);
 
             self.review_summary.issues_resolved += issue_count;
@@ -738,6 +941,9 @@ impl Runner {
 
             let resp = self.send_and_collect(&verify_prompt).await?;
             let m = self.metrics.record(&resp.result);
+            if let Some(logger) = &mut self.run_logger {
+                logger.log_interaction(&verify_prompt, &resp, &m);
+            }
             acc.record(&resp, m);
 
             // Parse verification result
@@ -775,6 +981,9 @@ impl Runner {
 
             let fix_resp = self.send_and_collect(&fix_prompt).await?;
             let fm = self.metrics.record(&fix_resp.result);
+            if let Some(logger) = &mut self.run_logger {
+                logger.log_interaction(&fix_prompt, &fix_resp, &fm);
+            }
             acc.record(&fix_resp, fm);
         }
 
@@ -837,14 +1046,30 @@ impl Runner {
 
         let resp = self.send_and_collect(&pr_prompt).await?;
         let pr_metrics = self.metrics.record(&resp.result);
+        if let Some(logger) = &mut self.run_logger {
+            logger.log_interaction(&pr_prompt, &resp, &pr_metrics);
+        }
 
         // Try to extract PR URL from all collected text (assistant text + tool output)
         let all_text = resp.all_text();
-        let pr_url = extract_pr_url(&all_text).or_else(|| {
-            // Fallback: query GitHub CLI directly
+        let url_from_text = extract_pr_url(&all_text);
+
+        let url_from_gh = if url_from_text.is_none() {
             info!("PR URL not found in agent response, checking via gh CLI...");
             self.check_pr_exists_via_gh()
-        });
+        } else {
+            None
+        };
+
+        let pr_url = url_from_text.clone().or(url_from_gh.clone());
+
+        if let Some(logger) = &mut self.run_logger {
+            logger.log_pr_extraction(
+                url_from_text.as_deref(),
+                url_from_gh.as_deref(),
+                pr_url.as_deref(),
+            );
+        }
 
         let status = if let Some(ref url) = pr_url {
             info!(url = %url, "PR created");
@@ -894,16 +1119,11 @@ impl Runner {
     ///
     /// Silently succeeds if there are no changes to commit.
     fn commit_coda_state(&self) -> Result<(), CoreError> {
-        // Stage .coda/ directory
-        run_command("git", &["add", ".coda/"], &self.worktree_path)?;
+        self.git.add(&self.worktree_path, &[".coda/"])?;
 
-        // Check if there are staged changes
-        let has_changes =
-            run_command("git", &["diff", "--cached", "--quiet"], &self.worktree_path).is_err();
-
-        if has_changes {
+        if self.git.has_staged_changes(&self.worktree_path) {
             let msg = format!("chore({}): update execution state", self.state.feature.slug);
-            run_command("git", &["commit", "-m", &msg], &self.worktree_path)?;
+            self.git.commit(&self.worktree_path, &msg)?;
             info!("Committed .coda/ state updates");
         } else {
             debug!("No .coda/ changes to commit");
@@ -917,18 +1137,23 @@ impl Runner {
     /// Captures both assistant text blocks and tool result content (e.g., bash
     /// stdout from `gh pr create`) so callers can search all output for
     /// expected patterns.
+    ///
+    /// # Errors
+    ///
+    /// Returns `CoreError::AgentError` if the agent returns an empty response
+    /// (no text and no tool output), which indicates a broken session.
     async fn send_and_collect(&mut self, prompt: &str) -> Result<AgentResponse, CoreError> {
         self.client
             .query(prompt)
             .await
-            .map_err(|e| CoreError::AgentSdkError(e.to_string()))?;
+            .map_err(|e| CoreError::AgentError(e.to_string()))?;
 
         let mut resp = AgentResponse::default();
 
         {
             let mut stream = self.client.receive_response();
             while let Some(result) = stream.next().await {
-                let msg = result.map_err(|e| CoreError::AgentSdkError(e.to_string()))?;
+                let msg = result.map_err(|e| CoreError::AgentError(e.to_string()))?;
                 match msg {
                     Message::Assistant(assistant) => {
                         for block in &assistant.message.content {
@@ -965,6 +1190,31 @@ impl Runner {
                     _ => {}
                 }
             }
+        }
+
+        if resp.text.is_empty() && resp.tool_output.is_empty() {
+            let reason = resp
+                .result
+                .as_ref()
+                .map(|r| {
+                    format!(
+                        "turns={}, cost={:?}, is_error={}",
+                        r.num_turns, r.total_cost_usd, r.is_error,
+                    )
+                })
+                .unwrap_or_else(|| "no ResultMessage received".to_string());
+
+            error!(reason = %reason, "Agent returned empty response");
+            if let Some(logger) = &mut self.run_logger {
+                logger.log_message(&format!(
+                    "⚠ EMPTY RESPONSE detected\n  prompt_len={}\n  reason: {reason}",
+                    prompt.len(),
+                ));
+            }
+
+            return Err(CoreError::AgentError(format!(
+                "Agent returned empty response (session may be disconnected): {reason}",
+            )));
         }
 
         Ok(resp)
@@ -1028,21 +1278,14 @@ impl Runner {
 
     /// Gets the git diff of all changes from the base branch.
     fn get_diff(&self) -> Result<String, CoreError> {
-        run_command(
-            "git",
-            &["diff", &self.state.git.base_branch, "HEAD"],
-            &self.worktree_path,
-        )
+        self.git
+            .diff(&self.worktree_path, &self.state.git.base_branch)
     }
 
     /// Gets the list of commits from the base branch to HEAD.
     fn get_commits(&self) -> Result<Vec<CommitInfo>, CoreError> {
         let range = format!("{}..HEAD", self.state.git.base_branch);
-        let stdout = run_command(
-            "git",
-            &["log", &range, "--oneline", "--no-decorate"],
-            &self.worktree_path,
-        )?;
+        let stdout = self.git.log_oneline(&self.worktree_path, &range)?;
 
         let commits = stdout
             .lines()
@@ -1128,36 +1371,7 @@ impl Runner {
     /// response does not contain an extractable PR URL.
     fn check_pr_exists_via_gh(&self) -> Option<String> {
         let branch = &self.state.git.branch;
-        let result = run_command(
-            "gh",
-            &[
-                "pr", "list", "--head", branch, "--json", "url", "--limit", "1",
-            ],
-            &self.worktree_path,
-        );
-
-        match result {
-            Ok(output) => {
-                let trimmed = output.trim();
-                if trimmed.is_empty() || trimmed == "[]" {
-                    debug!(branch = %branch, "No PR found via gh pr list");
-                    return None;
-                }
-                // Parse JSON array: [{"url":"https://..."}]
-                if let Ok(arr) = serde_json::from_str::<Vec<serde_json::Value>>(trimmed) {
-                    arr.first()
-                        .and_then(|v| v.get("url"))
-                        .and_then(|v| v.as_str())
-                        .map(String::from)
-                } else {
-                    extract_pr_url(trimmed)
-                }
-            }
-            Err(e) => {
-                warn!(error = %e, "gh pr list failed");
-                None
-            }
-        }
+        self.gh.pr_url_for_branch(branch, &self.worktree_path)
     }
 }
 
@@ -1198,28 +1412,6 @@ fn collect_tool_result_text(content: Option<&ToolResultContent>, buf: &mut Strin
 
 /// Runs an external command and returns its stdout, checking the exit status.
 ///
-/// # Errors
-///
-/// Returns `CoreError::GitError` if the command exits with a non-zero status,
-/// including the captured stderr for diagnostics.
-fn run_command(cmd: &str, args: &[&str], cwd: &Path) -> Result<String, CoreError> {
-    let output = std::process::Command::new(cmd)
-        .args(args)
-        .current_dir(cwd)
-        .output()
-        .map_err(CoreError::IoError)?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(CoreError::GitError(format!(
-            "{cmd} {} failed: {stderr}",
-            args.join(" "),
-        )));
-    }
-
-    Ok(String::from_utf8_lossy(&output.stdout).to_string())
-}
-
 /// Finds the `.coda/<id>-<slug>` directory for a feature by its slug.
 ///
 /// Finds the feature's `.coda/<slug>/` directory inside its worktree.

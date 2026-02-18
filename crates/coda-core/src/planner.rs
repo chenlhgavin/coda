@@ -5,6 +5,7 @@
 //! describing the artifacts produced by a successful planning session.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use claude_agent_sdk_rs::{ClaudeClient, ContentBlock, Message};
 use coda_pm::PromptManager;
@@ -13,6 +14,7 @@ use tracing::{debug, info};
 
 use crate::CoreError;
 use crate::config::CodaConfig;
+use crate::git::GitOps;
 use crate::profile::AgentProfile;
 use crate::state::{
     FeatureInfo, FeatureState, FeatureStatus, GitInfo, PhaseKind, PhaseRecord, PhaseStatus,
@@ -58,6 +60,8 @@ pub struct PlanSession {
     approved_design: Option<String>,
     /// The verification plan produced by [`approve`](Self::approve).
     approved_verification: Option<String>,
+    /// Git operations implementation.
+    git: Arc<dyn GitOps>,
 }
 
 impl PlanSession {
@@ -74,6 +78,7 @@ impl PlanSession {
         project_root: PathBuf,
         pm: &PromptManager,
         config: &CodaConfig,
+        git: Arc<dyn GitOps>,
     ) -> Result<Self, CoreError> {
         // Load .coda.md for repository context
         let coda_md_path = project_root.join(".coda.md");
@@ -100,6 +105,7 @@ impl PlanSession {
             connected: false,
             approved_design: None,
             approved_verification: None,
+            git,
         })
     }
 
@@ -107,12 +113,12 @@ impl PlanSession {
     ///
     /// # Errors
     ///
-    /// Returns `CoreError::AgentSdkError` if the connection fails.
+    /// Returns `CoreError::AgentError` if the connection fails.
     pub async fn connect(&mut self) -> Result<(), CoreError> {
         self.client
             .connect()
             .await
-            .map_err(|e| CoreError::AgentSdkError(e.to_string()))?;
+            .map_err(|e| CoreError::AgentError(e.to_string()))?;
         self.connected = true;
         debug!("PlanSession connected to Claude");
         Ok(())
@@ -124,7 +130,7 @@ impl PlanSession {
     ///
     /// # Errors
     ///
-    /// Returns `CoreError::AgentSdkError` if the query or response
+    /// Returns `CoreError::AgentError` if the query or response
     /// streaming fails.
     pub async fn send(&mut self, message: &str) -> Result<String, CoreError> {
         if !self.connected {
@@ -134,13 +140,13 @@ impl PlanSession {
         self.client
             .query(message)
             .await
-            .map_err(|e| CoreError::AgentSdkError(e.to_string()))?;
+            .map_err(|e| CoreError::AgentError(e.to_string()))?;
 
         let mut response = String::new();
         {
             let mut stream = self.client.receive_response();
             while let Some(result) = stream.next().await {
-                let msg = result.map_err(|e| CoreError::AgentSdkError(e.to_string()))?;
+                let msg = result.map_err(|e| CoreError::AgentError(e.to_string()))?;
                 match msg {
                     Message::Assistant(assistant) => {
                         for block in &assistant.message.content {
@@ -236,14 +242,17 @@ impl PlanSession {
         })?;
 
         // 1. Create git worktree first
-        let base_branch = detect_default_branch(&self.project_root, &self.config.git.base_branch);
+        let base_branch = if self.config.git.base_branch == "auto" {
+            self.git.detect_default_branch()
+        } else {
+            self.config.git.base_branch.clone()
+        };
         let branch_name = format!("{}/{}", self.config.git.branch_prefix, slug);
-        create_worktree(
-            &self.project_root,
-            &worktree_path,
-            &branch_name,
-            &base_branch,
-        )?;
+        if let Some(parent) = worktree_path.parent() {
+            std::fs::create_dir_all(parent).map_err(CoreError::IoError)?;
+        }
+        self.git
+            .worktree_add(&worktree_path, &branch_name, &base_branch)?;
         info!(
             branch = %branch_name,
             worktree = %worktree_path.display(),
@@ -314,70 +323,6 @@ impl std::fmt::Debug for PlanSession {
             .field("connected", &self.connected)
             .finish_non_exhaustive()
     }
-}
-
-/// Creates a git worktree at `worktree_path` with a new branch from `base_branch`.
-fn create_worktree(
-    project_root: &Path,
-    worktree_path: &Path,
-    branch: &str,
-    base_branch: &str,
-) -> Result<(), CoreError> {
-    if let Some(parent) = worktree_path.parent() {
-        std::fs::create_dir_all(parent).map_err(CoreError::IoError)?;
-    }
-
-    let output = std::process::Command::new("git")
-        .args([
-            "worktree",
-            "add",
-            &worktree_path.display().to_string(),
-            "-b",
-            branch,
-            base_branch,
-        ])
-        .current_dir(project_root)
-        .output()
-        .map_err(CoreError::IoError)?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(CoreError::GitError(format!(
-            "Failed to create worktree from '{base_branch}': {stderr}"
-        )));
-    }
-
-    Ok(())
-}
-
-/// Detects the repository's default branch.
-///
-/// When `configured` is `"auto"`, queries git for the default branch via
-/// `symbolic-ref`. Otherwise returns the configured value as-is.
-fn detect_default_branch(project_root: &Path, configured: &str) -> String {
-    if configured != "auto" {
-        return configured.to_string();
-    }
-
-    // Try git symbolic-ref to find what origin/HEAD points to
-    let output = std::process::Command::new("git")
-        .args(["symbolic-ref", "refs/remotes/origin/HEAD", "--short"])
-        .current_dir(project_root)
-        .output();
-
-    if let Ok(output) = output
-        && output.status.success()
-    {
-        let branch = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        // Output is like "origin/main" – strip the remote prefix
-        if let Some(name) = branch.strip_prefix("origin/") {
-            return name.to_string();
-        }
-        return branch;
-    }
-
-    // Fallback: "main" is the most common default
-    "main".to_string()
 }
 
 /// Extracts development phase names from a design specification.

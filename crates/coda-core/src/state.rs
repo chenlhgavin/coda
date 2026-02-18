@@ -236,7 +236,7 @@ pub struct TotalStats {
 }
 
 /// Overall status of a feature.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum FeatureStatus {
@@ -251,7 +251,7 @@ pub enum FeatureStatus {
 }
 
 /// Status of an individual execution phase.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum PhaseStatus {

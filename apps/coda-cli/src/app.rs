@@ -4,6 +4,7 @@
 //! dispatches CLI commands to the appropriate engine methods, providing
 //! user-facing progress display and timing information.
 
+use std::io::Write;
 use std::time::Instant;
 
 use anyhow::Result;
@@ -131,13 +132,7 @@ impl App {
         println!("  {}", "─".repeat(90));
 
         for f in &features {
-            let status_icon = match f.status {
-                coda_core::state::FeatureStatus::Planned => "○",
-                coda_core::state::FeatureStatus::InProgress => "◐",
-                coda_core::state::FeatureStatus::Completed => "●",
-                coda_core::state::FeatureStatus::Failed => "✗",
-                _ => "?",
-            };
+            let status_icon = feature_status_icon(f.status);
 
             println!(
                 "  {:<28} {status_icon} {:<12} {:<28} {:>8} {:>8}",
@@ -167,13 +162,7 @@ impl App {
     pub fn status(&self, feature_slug: &str) -> Result<()> {
         let state = self.engine.feature_status(feature_slug)?;
 
-        let status_icon = match state.status {
-            coda_core::state::FeatureStatus::Planned => "○",
-            coda_core::state::FeatureStatus::InProgress => "◐",
-            coda_core::state::FeatureStatus::Completed => "●",
-            coda_core::state::FeatureStatus::Failed => "✗",
-            _ => "?",
-        };
+        let status_icon = feature_status_icon(state.status);
 
         println!();
         println!("  Feature: {}", state.feature.slug);
@@ -205,13 +194,7 @@ impl App {
             );
 
             for phase in &state.phases {
-                let phase_icon = match phase.status {
-                    coda_core::state::PhaseStatus::Pending => "○",
-                    coda_core::state::PhaseStatus::Running => "◐",
-                    coda_core::state::PhaseStatus::Completed => "●",
-                    coda_core::state::PhaseStatus::Failed => "✗",
-                    _ => "?",
-                };
+                let phase_icon = phase_status_icon(phase.status);
 
                 println!(
                     "  {:<12} {phase_icon} {:<10} {:>8} {:>8} {:>10}",
@@ -248,6 +231,78 @@ impl App {
         println!("  ═══════════════════════════════════════");
         println!();
 
+        Ok(())
+    }
+
+    /// Handles the `coda clean` command.
+    ///
+    /// Scans all worktrees, checks their PR status, and removes worktrees
+    /// whose PR has been merged or closed. Supports `--dry-run` to preview
+    /// and `--yes` to skip confirmation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the clean operation fails.
+    pub fn clean(&self, dry_run: bool, yes: bool) -> Result<()> {
+        println!();
+        println!("  Scanning worktrees for merged/closed PRs...");
+        println!();
+
+        let candidates = self.engine.scan_cleanable_worktrees()?;
+
+        if candidates.is_empty() {
+            println!("  No worktrees to clean up.");
+            println!();
+            return Ok(());
+        }
+
+        for c in &candidates {
+            let pr_info = c
+                .pr_number
+                .map_or_else(String::new, |n| format!(" (PR #{n})"));
+            println!("  [~] {:<28} {:<10}{pr_info}", c.slug, c.pr_state,);
+        }
+
+        if dry_run {
+            println!();
+            println!(
+                "  {} worktree(s) would be removed. Run without --dry-run to proceed.",
+                candidates.len()
+            );
+            println!();
+            return Ok(());
+        }
+
+        if !yes {
+            println!();
+            print!("  Remove {} worktree(s)? [y/N] ", candidates.len());
+            std::io::stdout().flush()?;
+
+            let mut input = String::new();
+            std::io::stdin().read_line(&mut input)?;
+            if !input.trim().eq_ignore_ascii_case("y") {
+                println!("  Aborted.");
+                println!();
+                return Ok(());
+            }
+        }
+
+        let removed = self.engine.remove_worktrees(&candidates)?;
+
+        println!();
+        for result in &removed {
+            let pr_info = result
+                .pr_number
+                .map_or_else(String::new, |n| format!(" (PR #{n})"));
+            println!(
+                "  [✓] Removed {:<28} {:<10}{pr_info}",
+                result.slug, result.pr_state,
+            );
+        }
+
+        println!();
+        println!("  Cleaned {} worktree(s).", removed.len());
+        println!();
         Ok(())
     }
 
@@ -319,7 +374,7 @@ impl App {
         });
 
         // Run the engine in the current task (sender is dropped when done)
-        let run_result = self.engine.run_with_progress(feature_slug, tx).await;
+        let run_result = self.engine.run(feature_slug, Some(tx)).await;
 
         // Wait for all progress events to be displayed
         let _ = display_handle.await;
@@ -356,6 +411,26 @@ impl App {
                 Err(e.into())
             }
         }
+    }
+}
+
+fn feature_status_icon(s: coda_core::state::FeatureStatus) -> &'static str {
+    match s {
+        coda_core::state::FeatureStatus::Planned => "○",
+        coda_core::state::FeatureStatus::InProgress => "◐",
+        coda_core::state::FeatureStatus::Completed => "●",
+        coda_core::state::FeatureStatus::Failed => "✗",
+        _ => "?",
+    }
+}
+
+fn phase_status_icon(s: coda_core::state::PhaseStatus) -> &'static str {
+    match s {
+        coda_core::state::PhaseStatus::Pending => "○",
+        coda_core::state::PhaseStatus::Running => "◐",
+        coda_core::state::PhaseStatus::Completed => "●",
+        coda_core::state::PhaseStatus::Failed => "✗",
+        _ => "?",
     }
 }
 

@@ -1,24 +1,29 @@
 //! Core execution engine implementation.
 //!
 //! The `Engine` orchestrates all CODA operations: initialization, planning,
-//! and execution. It manages configuration, prompt templates, and dispatches
-//! tasks to the appropriate agent profiles.
+//! execution, and cleanup. It delegates git/gh operations through the
+//! [`GitOps`](crate::git::GitOps) and [`GhOps`](crate::gh::GhOps) traits,
+//! and feature discovery through [`FeatureScanner`](crate::scanner::FeatureScanner).
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use claude_agent_sdk_rs::Message;
 use coda_pm::PromptManager;
 use serde::Serialize;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::CoreError;
 use crate::config::CodaConfig;
+use crate::gh::{DefaultGhOps, GhOps};
+use crate::git::{DefaultGitOps, GitOps};
 use crate::planner::PlanSession;
 use crate::profile::AgentProfile;
 use crate::runner::RunEvent;
+use crate::scanner::FeatureScanner;
 use crate::task::TaskResult;
 
 /// Directories to skip when building the repository tree.
@@ -90,6 +95,15 @@ pub struct Engine {
 
     /// Project configuration loaded from `.coda/config.yml`.
     config: CodaConfig,
+
+    /// Feature worktree scanner.
+    scanner: FeatureScanner,
+
+    /// Git operations implementation (Arc for sharing with sub-sessions).
+    git: Arc<dyn GitOps>,
+
+    /// GitHub CLI operations implementation.
+    gh: Arc<dyn GhOps>,
 }
 
 impl Engine {
@@ -148,10 +162,17 @@ impl Engine {
             }
         }
 
+        let scanner = FeatureScanner::new(&project_root);
+        let git: Arc<dyn GitOps> = Arc::new(DefaultGitOps::new(project_root.clone()));
+        let gh: Arc<dyn GhOps> = Arc::new(DefaultGhOps::new(project_root.clone()));
+
         Ok(Self {
             project_root,
             pm,
             config,
+            scanner,
+            git,
+            gh,
         })
     }
 
@@ -165,14 +186,19 @@ impl Engine {
         &self.pm
     }
 
-    /// Returns a mutable reference to the prompt manager.
-    pub fn prompt_manager_mut(&mut self) -> &mut PromptManager {
-        &mut self.pm
-    }
-
     /// Returns a reference to the project configuration.
     pub fn config(&self) -> &CodaConfig {
         &self.config
+    }
+
+    /// Returns a reference to the git operations implementation.
+    pub fn git(&self) -> &dyn GitOps {
+        self.git.as_ref()
+    }
+
+    /// Returns a reference to the GitHub CLI operations implementation.
+    pub fn gh(&self) -> &dyn GhOps {
+        self.gh.as_ref()
     }
 
     /// Initializes the current repository as a CODA project.
@@ -186,7 +212,7 @@ impl Engine {
     /// # Errors
     ///
     /// Returns `CoreError::ConfigError` if the project is already initialized
-    /// (`.coda/` exists), or `CoreError::AgentSdkError` if agent calls fail.
+    /// (`.coda/` exists), or `CoreError::AgentError` if agent calls fail.
     pub async fn init(&self) -> Result<(), CoreError> {
         // 1. Check if .coda/ already exists
         if self.project_root.join(".coda").exists() {
@@ -222,7 +248,7 @@ impl Engine {
 
         let messages = claude_agent_sdk_rs::query(analyze_prompt, Some(planner_options))
             .await
-            .map_err(|e| CoreError::AgentSdkError(e.to_string()))?;
+            .map_err(|e| CoreError::AgentError(e.to_string()))?;
 
         // Extract analysis result text from messages
         let analysis_result = extract_text_from_messages(&messages);
@@ -252,7 +278,7 @@ impl Engine {
 
         let _messages = claude_agent_sdk_rs::query(setup_prompt, Some(coder_options))
             .await
-            .map_err(|e| CoreError::AgentSdkError(e.to_string()))?;
+            .map_err(|e| CoreError::AgentError(e.to_string()))?;
 
         info!("Project initialized successfully");
         Ok(())
@@ -275,74 +301,24 @@ impl Engine {
             self.project_root.clone(),
             &self.pm,
             &self.config,
+            Arc::clone(&self.git),
         )
     }
 
     /// Lists all features by scanning worktrees in `.trees/`.
     ///
-    /// Each worktree contains `.coda/<slug>/state.yml` for its feature.
-    /// Returns parsed feature states sorted by slug.
+    /// Delegates to [`FeatureScanner::list`].
     ///
     /// # Errors
     ///
-    /// Returns `CoreError::ConfigError` if `.trees/` does not exist, or
-    /// `CoreError` if a `state.yml` file cannot be read or parsed.
+    /// Returns `CoreError::ConfigError` if `.trees/` does not exist.
     pub fn list_features(&self) -> Result<Vec<crate::state::FeatureState>, CoreError> {
-        let trees_dir = self.project_root.join(".trees");
-        if !trees_dir.is_dir() {
-            return Err(CoreError::ConfigError(
-                "No .trees/ directory found. Run `coda init` first.".into(),
-            ));
-        }
-
-        let mut features = Vec::new();
-
-        for worktree_entry in fs::read_dir(&trees_dir)?.flatten() {
-            if !worktree_entry.file_type().is_ok_and(|ft| ft.is_dir()) {
-                continue;
-            }
-
-            let coda_dir = worktree_entry.path().join(".coda");
-            if !coda_dir.is_dir() {
-                continue;
-            }
-
-            // Scan .coda/ inside each worktree for feature subdirs
-            for feature_entry in fs::read_dir(&coda_dir)?.flatten() {
-                if !feature_entry.file_type().is_ok_and(|ft| ft.is_dir()) {
-                    continue;
-                }
-
-                let state_path = feature_entry.path().join("state.yml");
-                if !state_path.is_file() {
-                    continue;
-                }
-
-                let content = fs::read_to_string(&state_path).map_err(|e| {
-                    CoreError::StateError(format!("Cannot read {}: {e}", state_path.display()))
-                })?;
-
-                match serde_yaml::from_str::<crate::state::FeatureState>(&content) {
-                    Ok(state) => features.push(state),
-                    Err(e) => {
-                        debug!(
-                            path = %state_path.display(),
-                            error = %e,
-                            "Skipping invalid state.yml"
-                        );
-                    }
-                }
-            }
-        }
-
-        // Sort by feature slug
-        features.sort_by(|a, b| a.feature.slug.cmp(&b.feature.slug));
-        Ok(features)
+        self.scanner.list()
     }
 
     /// Returns detailed state for a specific feature identified by its slug.
     ///
-    /// Scans worktrees in `.trees/` for `<worktree>/.coda/<slug>/state.yml`.
+    /// Delegates to [`FeatureScanner::get`].
     ///
     /// # Errors
     ///
@@ -352,70 +328,7 @@ impl Engine {
         &self,
         feature_slug: &str,
     ) -> Result<crate::state::FeatureState, CoreError> {
-        let trees_dir = self.project_root.join(".trees");
-        if !trees_dir.is_dir() {
-            return Err(CoreError::ConfigError(
-                "No .trees/ directory found. Run `coda init` first.".into(),
-            ));
-        }
-
-        // Direct lookup: .trees/<slug>/.coda/<slug>/state.yml
-        let direct_state = trees_dir
-            .join(feature_slug)
-            .join(".coda")
-            .join(feature_slug)
-            .join("state.yml");
-
-        if direct_state.is_file() {
-            let content = fs::read_to_string(&direct_state).map_err(|e| {
-                CoreError::StateError(format!("Cannot read {}: {e}", direct_state.display()))
-            })?;
-            return serde_yaml::from_str(&content).map_err(|e| {
-                CoreError::StateError(format!(
-                    "Invalid state.yml at {}: {e}",
-                    direct_state.display()
-                ))
-            });
-        }
-
-        // Fallback: scan all worktrees
-        let mut available = Vec::new();
-
-        for worktree_entry in fs::read_dir(&trees_dir)?.flatten() {
-            if !worktree_entry.file_type().is_ok_and(|ft| ft.is_dir()) {
-                continue;
-            }
-
-            let candidate = worktree_entry
-                .path()
-                .join(".coda")
-                .join(feature_slug)
-                .join("state.yml");
-
-            if candidate.is_file() {
-                let content = fs::read_to_string(&candidate).map_err(|e| {
-                    CoreError::StateError(format!("Cannot read {}: {e}", candidate.display()))
-                })?;
-                return serde_yaml::from_str(&content).map_err(|e| {
-                    CoreError::StateError(format!(
-                        "Invalid state.yml at {}: {e}",
-                        candidate.display()
-                    ))
-                });
-            }
-
-            available.push(worktree_entry.file_name().to_string_lossy().to_string());
-        }
-
-        let hint = if available.is_empty() {
-            "No features have been planned yet.".to_string()
-        } else {
-            format!("Available features: {}", available.join(", "))
-        };
-
-        Err(CoreError::StateError(format!(
-            "No feature found for slug '{feature_slug}'. {hint}"
-        )))
+        self.scanner.get(feature_slug)
     }
 
     /// Executes a feature development run through all phases.
@@ -424,45 +337,157 @@ impl Engine {
     /// a single continuous `ClaudeClient` session with the Coder profile
     /// to execute setup → implement → test → review → verify → PR.
     ///
+    /// When `progress_tx` is provided, emits [`RunEvent`]s for real-time
+    /// progress display.
+    ///
     /// # Errors
     ///
     /// Returns `CoreError` if the runner cannot be created or any phase
     /// fails after all retries.
-    pub async fn run(&self, feature_slug: &str) -> Result<Vec<TaskResult>, CoreError> {
+    pub async fn run(
+        &self,
+        feature_slug: &str,
+        progress_tx: Option<UnboundedSender<RunEvent>>,
+    ) -> Result<Vec<TaskResult>, CoreError> {
         info!(feature_slug, "Starting feature run");
         let mut runner = crate::runner::Runner::new(
             feature_slug,
             self.project_root.clone(),
             &self.pm,
             &self.config,
+            Arc::clone(&self.git),
+            Arc::clone(&self.gh),
         )?;
+        if let Some(tx) = progress_tx {
+            runner.set_progress_sender(tx);
+        }
         runner.execute().await
     }
 
-    /// Executes a feature run with real-time progress reporting.
+    /// Cleans up worktrees whose corresponding PR has been merged or closed.
     ///
-    /// Behaves identically to [`run`](Self::run) but emits [`RunEvent`]s
-    /// through the provided channel so the caller can display live progress.
+    /// For each feature in `.trees/`:
+    /// 1. If `state.yml` contains a PR number, queries its status via `gh pr view`.
+    /// 2. Otherwise, queries `gh pr list --head <branch>` to discover the PR.
+    /// 3. If the PR is `MERGED` or `CLOSED`, removes the worktree and deletes
+    ///    the local branch.
+    ///
+    /// Scans features and returns candidates whose PR is merged or closed.
+    ///
+    /// Does **not** delete anything. Use [`remove_worktrees`](Self::remove_worktrees)
+    /// to perform the actual removal after user confirmation.
     ///
     /// # Errors
     ///
-    /// Returns `CoreError` if the runner cannot be created or any phase
-    /// fails after all retries.
-    pub async fn run_with_progress(
-        &self,
-        feature_slug: &str,
-        progress_tx: UnboundedSender<RunEvent>,
-    ) -> Result<Vec<TaskResult>, CoreError> {
-        info!(feature_slug, "Starting feature run (with progress)");
-        let mut runner = crate::runner::Runner::new(
-            feature_slug,
-            self.project_root.clone(),
-            &self.pm,
-            &self.config,
-        )?;
-        runner.set_progress_sender(progress_tx);
-        runner.execute().await
+    /// Returns `CoreError` if `.trees/` does not exist.
+    pub fn scan_cleanable_worktrees(&self) -> Result<Vec<CleanedWorktree>, CoreError> {
+        let features = self.list_features()?;
+        let mut candidates = Vec::new();
+
+        for feature in &features {
+            match self.check_feature_pr_status(feature) {
+                Ok(Some(result)) => candidates.push(result),
+                Ok(None) => {}
+                Err(e) => {
+                    warn!(
+                        slug = %feature.feature.slug,
+                        error = %e,
+                        "Failed to check PR status, skipping"
+                    );
+                }
+            }
+        }
+
+        Ok(candidates)
     }
+
+    /// Removes worktrees and branches for the given candidates.
+    ///
+    /// Designed to be called after [`scan_cleanable_worktrees`](Self::scan_cleanable_worktrees)
+    /// and user confirmation.
+    ///
+    /// # Errors
+    ///
+    /// Returns `CoreError` if a git operation fails during removal.
+    pub fn remove_worktrees(
+        &self,
+        candidates: &[CleanedWorktree],
+    ) -> Result<Vec<CleanedWorktree>, CoreError> {
+        let mut removed = Vec::new();
+
+        for c in candidates {
+            let worktree_abs = self.project_root.join(".trees").join(&c.slug);
+            if !worktree_abs.exists() {
+                info!(path = %worktree_abs.display(), "Worktree path does not exist, running prune");
+                self.git.worktree_prune()?;
+            } else {
+                self.git.worktree_remove(&worktree_abs, true)?;
+            }
+
+            if let Err(e) = self.git.branch_delete(&c.branch) {
+                warn!(branch = %c.branch, error = %e, "Failed to delete local branch (may already be deleted)");
+            }
+
+            removed.push(c.clone());
+        }
+
+        Ok(removed)
+    }
+
+    /// Checks a single feature's PR status. Returns a [`CleanedWorktree`]
+    /// candidate if the PR is merged or closed, `None` otherwise.
+    fn check_feature_pr_status(
+        &self,
+        feature: &crate::state::FeatureState,
+    ) -> Result<Option<CleanedWorktree>, CoreError> {
+        let slug = &feature.feature.slug;
+        let branch = &feature.git.branch;
+
+        let pr_status = if let Some(ref pr) = feature.pr {
+            self.gh.pr_view_state(pr.number)?
+        } else {
+            self.gh.pr_list_by_branch(branch)?
+        };
+
+        let Some(pr_status) = pr_status else {
+            debug!(slug, branch, "No PR found, skipping");
+            return Ok(None);
+        };
+
+        let state_upper = pr_status.state.to_uppercase();
+        if state_upper != "MERGED" && state_upper != "CLOSED" {
+            debug!(
+                slug,
+                branch,
+                state = %pr_status.state,
+                "PR still open, skipping"
+            );
+            return Ok(None);
+        }
+
+        Ok(Some(CleanedWorktree {
+            slug: slug.clone(),
+            branch: branch.clone(),
+            pr_number: Some(pr_status.number),
+            pr_state: state_upper,
+        }))
+    }
+}
+
+/// Result of cleaning a single worktree.
+#[derive(Debug, Clone)]
+pub struct CleanedWorktree {
+    /// Feature slug.
+    pub slug: String,
+
+    /// Git branch name.
+    pub branch: String,
+
+    /// PR number if found.
+    pub pr_number: Option<u32>,
+
+    /// PR state (e.g., "MERGED", "CLOSED").
+    pub pr_state: String,
 }
 
 impl std::fmt::Debug for Engine {
@@ -609,6 +634,180 @@ mod tests {
     use std::fs;
 
     use super::*;
+    use crate::state::{
+        FeatureInfo, FeatureState, FeatureStatus, GitInfo, PhaseKind, PhaseRecord, PhaseStatus,
+        TokenCost, TotalStats,
+    };
+
+    fn make_state(slug: &str) -> FeatureState {
+        let now = chrono::Utc::now();
+        FeatureState {
+            feature: FeatureInfo {
+                slug: slug.to_string(),
+                created_at: now,
+                updated_at: now,
+            },
+            status: FeatureStatus::Planned,
+            current_phase: 0,
+            git: GitInfo {
+                worktree_path: std::path::PathBuf::from(format!(".trees/{slug}")),
+                branch: format!("feature/{slug}"),
+                base_branch: "main".to_string(),
+            },
+            phases: vec![
+                PhaseRecord {
+                    name: "dev".to_string(),
+                    kind: PhaseKind::Dev,
+                    status: PhaseStatus::Pending,
+                    started_at: None,
+                    completed_at: None,
+                    turns: 0,
+                    cost_usd: 0.0,
+                    cost: TokenCost::default(),
+                    duration_secs: 0,
+                    details: serde_json::json!({}),
+                },
+                PhaseRecord {
+                    name: "review".to_string(),
+                    kind: PhaseKind::Quality,
+                    status: PhaseStatus::Pending,
+                    started_at: None,
+                    completed_at: None,
+                    turns: 0,
+                    cost_usd: 0.0,
+                    cost: TokenCost::default(),
+                    duration_secs: 0,
+                    details: serde_json::json!({}),
+                },
+                PhaseRecord {
+                    name: "verify".to_string(),
+                    kind: PhaseKind::Quality,
+                    status: PhaseStatus::Pending,
+                    started_at: None,
+                    completed_at: None,
+                    turns: 0,
+                    cost_usd: 0.0,
+                    cost: TokenCost::default(),
+                    duration_secs: 0,
+                    details: serde_json::json!({}),
+                },
+            ],
+            pr: None,
+            total: TotalStats::default(),
+        }
+    }
+
+    fn write_state(root: &std::path::Path, slug: &str, state: &FeatureState) {
+        let dir = root.join(".trees").join(slug).join(".coda").join(slug);
+        fs::create_dir_all(&dir).expect("create state dir");
+        let yaml = serde_yaml::to_string(state).expect("serialize state");
+        fs::write(dir.join("state.yml"), yaml).expect("write state.yml");
+    }
+
+    async fn make_engine(root: &std::path::Path) -> Engine {
+        Engine::new(root.to_path_buf())
+            .await
+            .expect("create Engine")
+    }
+
+    #[tokio::test]
+    async fn test_should_list_features_empty() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        fs::create_dir_all(tmp.path().join(".trees")).expect("mkdir");
+        let engine = make_engine(tmp.path()).await;
+
+        let features = engine.list_features().expect("list");
+        assert!(features.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_should_list_features_single() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let state = make_state("add-auth");
+        write_state(tmp.path(), "add-auth", &state);
+        let engine = make_engine(tmp.path()).await;
+
+        let features = engine.list_features().expect("list");
+        assert_eq!(features.len(), 1);
+        assert_eq!(features[0].feature.slug, "add-auth");
+    }
+
+    #[tokio::test]
+    async fn test_should_list_features_sorted_by_slug() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        write_state(tmp.path(), "zzz-last", &make_state("zzz-last"));
+        write_state(tmp.path(), "aaa-first", &make_state("aaa-first"));
+        write_state(tmp.path(), "mmm-middle", &make_state("mmm-middle"));
+        let engine = make_engine(tmp.path()).await;
+
+        let features = engine.list_features().expect("list");
+        assert_eq!(features.len(), 3);
+        assert_eq!(features[0].feature.slug, "aaa-first");
+        assert_eq!(features[1].feature.slug, "mmm-middle");
+        assert_eq!(features[2].feature.slug, "zzz-last");
+    }
+
+    #[tokio::test]
+    async fn test_should_list_features_skip_invalid_state() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        write_state(tmp.path(), "good", &make_state("good"));
+        // Write invalid YAML
+        let bad_dir = tmp.path().join(".trees/bad/.coda/bad");
+        fs::create_dir_all(&bad_dir).expect("mkdir");
+        fs::write(bad_dir.join("state.yml"), "not: valid: yaml: [").expect("write");
+        let engine = make_engine(tmp.path()).await;
+
+        let features = engine.list_features().expect("list");
+        assert_eq!(features.len(), 1);
+        assert_eq!(features[0].feature.slug, "good");
+    }
+
+    #[tokio::test]
+    async fn test_should_list_features_error_when_no_trees_dir() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let engine = make_engine(tmp.path()).await;
+
+        let result = engine.list_features();
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains(".trees/"));
+    }
+
+    #[tokio::test]
+    async fn test_should_get_feature_status_direct_lookup() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let state = make_state("add-auth");
+        write_state(tmp.path(), "add-auth", &state);
+        let engine = make_engine(tmp.path()).await;
+
+        let found = engine.feature_status("add-auth").expect("status");
+        assert_eq!(found.feature.slug, "add-auth");
+        assert_eq!(found.git.branch, "feature/add-auth");
+    }
+
+    #[tokio::test]
+    async fn test_should_get_feature_status_not_found() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        write_state(tmp.path(), "existing", &make_state("existing"));
+        let engine = make_engine(tmp.path()).await;
+
+        let result = engine.feature_status("nonexistent");
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("nonexistent"));
+        assert!(err.contains("existing"));
+    }
+
+    #[tokio::test]
+    async fn test_should_get_feature_status_error_when_no_trees_dir() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let engine = make_engine(tmp.path()).await;
+
+        let result = engine.feature_status("anything");
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains(".trees/"));
+    }
 
     #[test]
     fn test_should_gather_repo_tree_from_temp_dir() {

@@ -48,6 +48,17 @@ pub enum Commands {
         /// URL-safe feature slug (e.g., "add-user-auth").
         feature_slug: String,
     },
+
+    /// Remove worktrees whose PR has been merged or closed.
+    Clean {
+        /// Show what would be removed without actually deleting.
+        #[arg(long)]
+        dry_run: bool,
+
+        /// Skip confirmation prompt (use with caution).
+        #[arg(long, short = 'y')]
+        yes: bool,
+    },
 }
 
 impl Cli {
@@ -61,6 +72,7 @@ impl Cli {
             Commands::Run { feature_slug } => app.run(&feature_slug).await,
             Commands::List => app.list(),
             Commands::Status { feature_slug } => app.status(&feature_slug),
+            Commands::Clean { dry_run, yes } => app.clean(dry_run, yes),
         }
     }
 }
