@@ -1,0 +1,84 @@
+feature:
+  slug: update-doc
+  created_at: 2026-02-18T11:16:20.006107Z
+  updated_at: 2026-02-18T11:26:27.087018Z
+status: in_progress
+current_phase: 5
+git:
+  worktree_path: /Users/chenlehua/workspace/coda/.trees/update-doc
+  branch: feature/update-doc
+  base_branch: main
+phases:
+- name: coda-pm-api-md
+  kind: dev
+  status: completed
+  started_at: 2026-02-18T11:16:30.239102Z
+  completed_at: 2026-02-18T11:18:25.975728Z
+  turns: 13
+  cost_usd: 1.0614825
+  cost:
+    input_tokens: 11
+    output_tokens: 2186
+  duration_secs: 115
+  details: {}
+- name: coda-core-api-md
+  kind: dev
+  status: completed
+  started_at: 2026-02-18T11:18:25.978281Z
+  completed_at: 2026-02-18T11:20:26.061482Z
+  turns: 21
+  cost_usd: 3.02241275
+  cost:
+    input_tokens: 775
+    output_tokens: 2491
+  duration_secs: 120
+  details: {}
+- name: update-docs-index-md
+  kind: dev
+  status: completed
+  started_at: 2026-02-18T11:20:26.063248Z
+  completed_at: 2026-02-18T11:21:33.915395Z
+  turns: 10
+  cost_usd: 1.5924187499999993
+  cost:
+    input_tokens: 0
+    output_tokens: 0
+  duration_secs: 67
+  details: {}
+- name: review
+  kind: quality
+  status: completed
+  started_at: 2026-02-18T11:21:33.917180Z
+  completed_at: 2026-02-18T11:25:03.721221Z
+  turns: 26
+  cost_usd: 5.208219250000001
+  cost:
+    input_tokens: 597
+    output_tokens: 2962
+  duration_secs: 209
+  details:
+    issues_found: 2
+    issues_resolved: 2
+    rounds: 2
+- name: verify
+  kind: quality
+  status: completed
+  started_at: 2026-02-18T11:25:03.723942Z
+  completed_at: 2026-02-18T11:26:27.087015Z
+  turns: 16
+  cost_usd: 1.316203499999995
+  cost:
+    input_tokens: 0
+    output_tokens: 1695
+  duration_secs: 83
+  details:
+    attempts: 12
+    checks_passed: 12
+    checks_total: 12
+total:
+  turns: 0
+  cost_usd: 0.0
+  cost:
+    input_tokens: 0
+    output_tokens: 0
+  duration_secs: 0
