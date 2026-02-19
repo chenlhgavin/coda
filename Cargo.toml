@@ -8,20 +8,19 @@ members = [
 
 [workspace.package]
 version = "0.1.0"
-authors = ["Your Name <YourName@yourdomain.com>"]
+authors = ["chenlh <lehuagavin@gmail.com>"]
 edition = "2024"
 license = "MIT"
-documentation = "https://docs.rs/"
-repository = "https://github.com/TODO"
-homepage = "https://github.com/TODO"
+repository = "https://github.com/lehuagavin/coda"
+homepage = "https://github.com/lehuagavin/coda"
 readme = "README.md"
 categories = ["development-tools"]
-keywords = []
+keywords = ["claude", "ai", "agent", "development", "cli"]
 
 [workspace.dependencies]
-# Internal crates
-coda-core = { path = "crates/coda-core" }
-coda-pm = { path = "crates/coda-pm" }
+# Internal crates (path for local dev, version for crates.io publish)
+coda-core = { path = "crates/coda-core", version = "0.1.0" }
+coda-pm = { path = "crates/coda-pm", version = "0.1.0" }
 
 # Async runtime
 tokio = { version = "1.43", features = ["rt", "rt-multi-thread", "macros", "sync", "time", "fs"] }

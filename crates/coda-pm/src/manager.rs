@@ -34,6 +34,32 @@ impl PromptManager {
         }
     }
 
+    /// Creates a new prompt manager pre-loaded with all built-in templates.
+    ///
+    /// Built-in templates are embedded at compile time via [`include_str!`] and
+    /// are always available, even when installed via `cargo install`.
+    ///
+    /// # Errors
+    ///
+    /// Returns `PromptError::InvalidTemplate` if any built-in template has
+    /// invalid minijinja syntax.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use coda_pm::PromptManager;
+    ///
+    /// let pm = PromptManager::with_builtin_templates().unwrap();
+    /// assert!(pm.get_template("init/system").is_some());
+    /// ```
+    pub fn with_builtin_templates() -> Result<Self, PromptError> {
+        let mut pm = Self::new();
+        for template in crate::builtin::builtin_templates() {
+            pm.add_template(template)?;
+        }
+        Ok(pm)
+    }
+
     /// Registers a single template with the manager.
     ///
     /// # Errors
@@ -85,6 +111,22 @@ impl PromptManager {
     /// Returns a reference to the template with the given name, if it exists.
     pub fn get_template(&self, name: &str) -> Option<&PromptTemplate> {
         self.templates.get(name)
+    }
+
+    /// Returns the number of templates currently loaded.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use coda_pm::{PromptManager, PromptTemplate};
+    ///
+    /// let mut pm = PromptManager::new();
+    /// assert_eq!(pm.template_count(), 0);
+    /// pm.add_template(PromptTemplate::new("test", "Hello")).unwrap();
+    /// assert_eq!(pm.template_count(), 1);
+    /// ```
+    pub fn template_count(&self) -> usize {
+        self.templates.len()
     }
 }
 

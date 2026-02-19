@@ -139,19 +139,12 @@ impl Engine {
             CodaConfig::default()
         };
 
-        // Create PromptManager and load built-in templates
-        let mut pm = PromptManager::new();
-        let builtin_templates_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .and_then(|p| p.parent())
-            .map(|p| p.join("crates/coda-pm/templates"));
-
-        if let Some(ref dir) = builtin_templates_dir
-            && dir.exists()
-        {
-            pm.load_from_dir(dir)?;
-            info!(dir = %dir.display(), "Loaded built-in templates");
-        }
+        // Create PromptManager pre-loaded with built-in templates
+        let mut pm = PromptManager::with_builtin_templates()?;
+        info!(
+            template_count = pm.template_count(),
+            "Loaded built-in templates"
+        );
 
         // Load custom templates from configured extra directories
         for extra_dir in &config.prompts.extra_dirs {

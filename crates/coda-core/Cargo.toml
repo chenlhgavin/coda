@@ -1,10 +1,14 @@
 [package]
 name = "coda-core"
-description = "Core execution engine for CODA"
+description = "Core execution engine for CODA — orchestrates AI-driven feature development workflows"
 version.workspace = true
 authors.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "../../README.md"
+include = ["src/**/*.rs", "Cargo.toml"]
 
 [dependencies]
 coda-pm = { workspace = true }
