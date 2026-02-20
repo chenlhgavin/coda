@@ -47,23 +47,33 @@ impl App {
     /// Handles the `coda init` command.
     ///
     /// Runs the init flow (analyze repo + setup project) and prints a
-    /// success message.
+    /// success message. When `no_commit` is false (default), generated
+    /// files are auto-committed so that `coda plan` worktrees inherit them.
     ///
     /// # Errors
     ///
     /// Returns an error if initialization fails (e.g., already initialized,
     /// agent SDK errors).
-    pub async fn init(&self) -> Result<()> {
+    pub async fn init(&self, no_commit: bool) -> Result<()> {
         println!(
             "Initializing CODA in {}...",
             self.engine.project_root().display()
         );
-        match self.engine.init().await {
+        match self.engine.init(no_commit).await {
             Ok(()) => {
                 println!("CODA project initialized successfully!");
                 println!("  Created .coda/ directory with config.yml");
                 println!("  Created .trees/ directory for worktrees");
                 println!("  Generated .coda.md repository overview");
+                if no_commit {
+                    println!();
+                    println!("  Files were NOT committed (--no-commit).");
+                    println!("  Commit manually before running `coda plan`:");
+                    println!("    git add .coda/ .coda.md CLAUDE.md .gitignore");
+                    println!("    git commit -m \"chore: initialize CODA project\"");
+                } else {
+                    println!("  Committed init artifacts to current branch");
+                }
                 println!(
                     "\nNext step: run `coda plan <feature-slug>` to start planning a feature."
                 );

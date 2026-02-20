@@ -202,11 +202,15 @@ impl Engine {
     /// 2. `query(Coder)` with `init/setup_project` to create `.coda/`, `.trees/`,
     ///    `config.yml`, `.coda.md`, and update `.gitignore`.
     ///
+    /// When `no_commit` is `false` (default), the generated files are
+    /// automatically committed so that subsequent `coda plan` worktrees
+    /// inherit them. Pass `true` to skip the commit (e.g. for review).
+    ///
     /// # Errors
     ///
     /// Returns `CoreError::ConfigError` if the project is already initialized
     /// (`.coda/` exists), or `CoreError::AgentError` if agent calls fail.
-    pub async fn init(&self) -> Result<(), CoreError> {
+    pub async fn init(&self, no_commit: bool) -> Result<(), CoreError> {
         // 1. Check if .coda/ already exists
         if self.project_root.join(".coda").exists() {
             return Err(CoreError::ConfigError(
@@ -272,6 +276,19 @@ impl Engine {
         let _messages = claude_agent_sdk_rs::query(setup_prompt, Some(coder_options))
             .await
             .map_err(|e| CoreError::AgentError(e.to_string()))?;
+
+        // 5. Auto-commit init artifacts so worktrees inherit them
+        if !no_commit {
+            self.git.add(
+                &self.project_root,
+                &[".coda/", ".coda.md", "CLAUDE.md", ".gitignore"],
+            )?;
+            if self.git.has_staged_changes(&self.project_root) {
+                self.git
+                    .commit(&self.project_root, "chore: initialize CODA project")?;
+                info!("Committed CODA init artifacts");
+            }
+        }
 
         info!("Project initialized successfully");
         Ok(())

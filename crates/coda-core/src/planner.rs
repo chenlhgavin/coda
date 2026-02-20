@@ -289,6 +289,24 @@ impl PlanSession {
         } else {
             self.config.git.base_branch.clone()
         };
+
+        // Pre-flight: verify CODA config is committed to the base branch.
+        // Without this, the new worktree would be missing .coda/config.yml,
+        // .coda.md, and other init artifacts.
+        if !self
+            .git
+            .file_exists_in_ref(&base_branch, ".coda/config.yml")
+        {
+            return Err(CoreError::PlanError(format!(
+                "CODA init files are not committed to '{base_branch}'. \
+                 The worktree would be missing project configuration.\n  \
+                 Please commit them first:\n    \
+                 git add .coda/ .coda.md CLAUDE.md .gitignore && \
+                 git commit -m \"chore: initialize CODA project\"\n  \
+                 Or re-run `coda init` (it auto-commits by default)."
+            )));
+        }
+
         let branch_name = format!("{}/{}", self.config.git.branch_prefix, slug);
         if let Some(parent) = worktree_abs.parent() {
             tokio::fs::create_dir_all(parent)

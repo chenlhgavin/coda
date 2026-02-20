@@ -103,6 +103,11 @@ pub trait GitOps: Send + Sync {
     /// Returns `CoreError::GitError` if the command fails.
     fn push(&self, cwd: &Path, branch: &str) -> Result<(), CoreError>;
 
+    /// Checks whether a file exists in a given git ref (branch, tag, commit).
+    ///
+    /// Equivalent to `git cat-file -e <ref>:<path>`.
+    fn file_exists_in_ref(&self, git_ref: &str, path: &str) -> bool;
+
     /// Detects the repository's default branch.
     ///
     /// Queries `git symbolic-ref refs/remotes/origin/HEAD --short` and
@@ -189,6 +194,14 @@ impl GitOps for DefaultGitOps {
     fn push(&self, cwd: &Path, branch: &str) -> Result<(), CoreError> {
         run_git(cwd, &["push", "origin", branch])?;
         Ok(())
+    }
+
+    fn file_exists_in_ref(&self, git_ref: &str, path: &str) -> bool {
+        std::process::Command::new("git")
+            .args(["cat-file", "-e", &format!("{git_ref}:{path}")])
+            .current_dir(&self.project_root)
+            .output()
+            .is_ok_and(|o| o.status.success())
     }
 
     fn detect_default_branch(&self) -> String {
