@@ -1,9 +1,13 @@
 //! Terminal UI for the `coda init` command.
 //!
 //! Provides a ratatui-based TUI that displays real-time progress of the
-//! init pipeline (analyze-repo → setup-project), including a phase pipeline
-//! indicator, live elapsed timers, cost tracking, and a scrollable output
-//! panel that streams AI-generated text as it arrives.
+//! init pipeline (analyze-repo → setup-project), using the same split-panel
+//! layout as the run TUI: a compact phase sidebar on the left and a
+//! scrollable streaming output panel on the right, plus a pipeline bar,
+//! summary bar, and help bar.
+//!
+//! When the terminal is too narrow, the sidebar is hidden and the content
+//! area fills the full width.
 
 use std::io::{self, Stdout};
 use std::time::{Duration, Instant};
@@ -15,47 +19,12 @@ use crossterm::{
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
-use ratatui::{
-    prelude::*,
-    widgets::{
-        Block, BorderType, Borders, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState,
-        Wrap,
-    },
-};
+use ratatui::prelude::*;
 use tokio::sync::mpsc::UnboundedReceiver;
-use unicode_width::UnicodeWidthStr;
 
-use crate::fmt_utils::{format_duration, truncate_str};
-
-/// Spinner animation frames for the active phase indicator.
-const SPINNER_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
-
-/// Border color used throughout the init UI.
-const BORDER_COLOR: Color = Color::Cyan;
-
-/// Maximum number of lines retained in the output buffer.
-const OUTPUT_BUFFER_MAX_LINES: usize = 200;
-
-/// Display status of a single phase in the pipeline.
-#[derive(Debug, Clone)]
-enum PhaseDisplayStatus {
-    /// Not yet started.
-    Pending,
-    /// Currently running.
-    Running,
-    /// Completed with metrics.
-    Completed { duration: Duration, cost_usd: f64 },
-    /// Phase failed with an error.
-    Failed { error: String },
-}
-
-/// Display state of a single phase.
-#[derive(Debug, Clone)]
-struct PhaseDisplay {
-    name: String,
-    status: PhaseDisplayStatus,
-    started_at: Option<Instant>,
-}
+use crate::tui_widgets::{
+    self, MiddlePanel, PhaseDisplay, PhaseDisplayStatus, PrDisplayStatus, SummaryFields,
+};
 
 /// Summary data returned after the init TUI finishes.
 ///
@@ -89,7 +58,7 @@ pub struct InitSummary {
 /// Interactive TUI for displaying `coda init` progress.
 ///
 /// Consumes [`InitEvent`]s from an unbounded channel and renders a
-/// live progress display with a streaming output panel.
+/// live progress display with a split-panel layout matching the run TUI.
 ///
 /// # Examples
 ///
@@ -111,8 +80,16 @@ pub struct InitUi {
     active_phase: Option<usize>,
     start_time: Instant,
     total_cost: f64,
-    output_lines: Vec<String>,
+    /// Accumulated styled lines for the streaming content area.
+    content_lines: Vec<Line<'static>>,
+    /// Vertical scroll offset (number of visual rows scrolled from top).
     scroll_offset: u16,
+    /// Whether auto-scroll is active (follows new content).
+    auto_scroll: bool,
+    /// Height of the content area in rows (updated each draw for scroll math).
+    content_visible_height: u16,
+    /// Width of the content area in columns (updated each draw for wrap calculations).
+    content_visible_width: u16,
     finished: bool,
     success: bool,
     spinner_tick: usize,
@@ -139,8 +116,11 @@ impl InitUi {
                 active_phase: None,
                 start_time: Instant::now(),
                 total_cost: 0.0,
-                output_lines: Vec::new(),
+                content_lines: Vec::new(),
                 scroll_offset: 0,
+                auto_scroll: true,
+                content_visible_height: 0,
+                content_visible_width: 0,
                 finished: false,
                 success: false,
                 spinner_tick: 0,
@@ -166,16 +146,31 @@ impl InitUi {
     /// Returns an error if terminal I/O fails or the user cancels with Ctrl+C.
     pub async fn run(&mut self, mut rx: UnboundedReceiver<InitEvent>) -> Result<InitSummary> {
         loop {
-            // Non-blocking: drain all available events
+            // Non-blocking: drain all available events, coalescing consecutive
+            // text events into a single buffer append.
+            let mut pending_text: Option<String> = None;
             loop {
                 match rx.try_recv() {
-                    Ok(event) => self.handle_event(event),
+                    Ok(InitEvent::StreamText { text }) => {
+                        pending_text.get_or_insert_with(String::new).push_str(&text);
+                    }
+                    Ok(event) => {
+                        // Flush any accumulated text before processing non-text event
+                        if let Some(coalesced) = pending_text.take() {
+                            self.handle_event(InitEvent::StreamText { text: coalesced });
+                        }
+                        self.handle_event(event);
+                    }
                     Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
                     Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
                         self.finished = true;
                         break;
                     }
                 }
+            }
+            // Flush any remaining coalesced text after the drain loop
+            if let Some(coalesced) = pending_text.take() {
+                self.handle_event(InitEvent::StreamText { text: coalesced });
             }
 
             self.spinner_tick += 1;
@@ -199,16 +194,33 @@ impl InitUi {
                             return Err(anyhow::anyhow!("Cancelled by user"));
                         }
                         KeyCode::Up => {
-                            self.scroll_offset = self.scroll_offset.saturating_add(1);
+                            self.scroll_offset = self.scroll_offset.saturating_sub(1);
+                            self.auto_scroll = false;
                         }
                         KeyCode::Down => {
-                            self.scroll_offset = self.scroll_offset.saturating_sub(1);
+                            let max = self.max_scroll_offset();
+                            self.scroll_offset = (self.scroll_offset + 1).min(max);
+                            if self.scroll_offset >= max {
+                                self.auto_scroll = true;
+                            }
                         }
                         KeyCode::PageUp => {
-                            self.scroll_offset = self.scroll_offset.saturating_add(10);
+                            self.scroll_offset = self
+                                .scroll_offset
+                                .saturating_sub(self.content_visible_height);
+                            self.auto_scroll = false;
                         }
                         KeyCode::PageDown => {
-                            self.scroll_offset = self.scroll_offset.saturating_sub(10);
+                            let max = self.max_scroll_offset();
+                            self.scroll_offset =
+                                (self.scroll_offset + self.content_visible_height).min(max);
+                            if self.scroll_offset >= max {
+                                self.auto_scroll = true;
+                            }
+                        }
+                        KeyCode::End => {
+                            self.scroll_offset = self.max_scroll_offset();
+                            self.auto_scroll = true;
                         }
                         _ => {}
                     }
@@ -233,6 +245,8 @@ impl InitUi {
                         name,
                         status: PhaseDisplayStatus::Pending,
                         started_at: None,
+                        current_turn: 0,
+                        detail: String::new(),
                     })
                     .collect();
             }
@@ -242,10 +256,16 @@ impl InitUi {
                     phase.started_at = Some(Instant::now());
                 }
                 self.active_phase = Some(index);
+                // Clear content buffer for the new phase
+                self.content_lines.clear();
+                self.scroll_offset = 0;
+                self.auto_scroll = true;
             }
             InitEvent::StreamText { text } => {
-                append_stream_text(&mut self.output_lines, &text);
-                self.scroll_offset = 0;
+                tui_widgets::append_styled_text(&mut self.content_lines, &text);
+                if self.auto_scroll {
+                    self.scroll_offset = self.max_scroll_offset();
+                }
             }
             InitEvent::PhaseCompleted {
                 index,
@@ -254,16 +274,17 @@ impl InitUi {
                 ..
             } => {
                 if let Some(phase) = self.phases.get_mut(index) {
-                    phase.status = PhaseDisplayStatus::Completed { duration, cost_usd };
+                    phase.status = PhaseDisplayStatus::Completed {
+                        duration,
+                        cost_usd: Some(cost_usd),
+                    };
                 }
                 self.total_cost += cost_usd;
                 self.active_phase = None;
             }
             InitEvent::PhaseFailed { index, error, .. } => {
                 if let Some(phase) = self.phases.get_mut(index) {
-                    phase.status = PhaseDisplayStatus::Failed {
-                        error: error.clone(),
-                    };
+                    phase.status = PhaseDisplayStatus::Failed { error };
                 }
                 self.active_phase = None;
             }
@@ -284,46 +305,91 @@ impl InitUi {
         }
     }
 
+    /// Computes the maximum scroll offset based on visual row count and visible height.
+    fn max_scroll_offset(&self) -> u16 {
+        tui_widgets::max_scroll_offset(
+            &self.content_lines,
+            self.content_visible_width,
+            self.content_visible_height,
+        )
+    }
+
     /// Draws the current UI state to the terminal.
+    ///
+    /// Uses the same split-panel layout as the run TUI: the middle area
+    /// is divided horizontally into a fixed-width sidebar (phase list)
+    /// and a flexible content area (scrollable streaming output).
     fn draw(&mut self) -> Result<()> {
         let project_root = self.project_root.clone();
         let phases = self.phases.clone();
-        let active_phase = self.active_phase;
         let start_time = self.start_time;
         let total_cost = self.total_cost;
         let finished = self.finished;
         let success = self.success;
         let spinner_tick = self.spinner_tick;
         let scroll_offset = self.scroll_offset;
-        let output_lines = self.output_lines.clone();
+        let pr_status = PrDisplayStatus::NotApplicable;
+        let is_running = self.active_phase.is_some();
+        let active_phase_name = self
+            .active_phase
+            .and_then(|idx| self.phases.get(idx))
+            .map(|p| p.name.as_str())
+            .unwrap_or("")
+            .to_string();
+
+        // Move content_lines out temporarily via O(1) pointer swap
+        let content_lines = std::mem::take(&mut self.content_lines);
+
+        let mut visible_height: u16 = 0;
+        let mut visible_width: u16 = 0;
 
         self.terminal.draw(|frame| {
             let area = frame.area();
 
-            // Phase list height: 1 per phase + 2 borders + 1 title line
-            let phase_count = phases.len();
-            #[allow(clippy::cast_possible_truncation)]
-            let phase_list_height = (phase_count as u16 + 3).min(area.height.saturating_sub(10));
-
             let chunks = Layout::default()
                 .direction(Direction::Vertical)
                 .constraints([
-                    Constraint::Length(1),                 // Header
-                    Constraint::Length(3),                 // Pipeline bar
-                    Constraint::Length(phase_list_height), // Phase details
-                    Constraint::Min(5),                    // Output panel (flexible)
-                    Constraint::Length(3),                 // Summary bar
-                    Constraint::Length(1),                 // Help bar
+                    Constraint::Length(1), // Header
+                    Constraint::Length(3), // Pipeline bar
+                    Constraint::Min(8),    // Middle: sidebar + content (flexible)
+                    Constraint::Length(3), // Summary bar
+                    Constraint::Length(1), // Help bar
                 ])
                 .split(area);
 
-            render_header(frame, chunks[0], &project_root, finished, success);
-            render_pipeline(frame, chunks[1], &phases, spinner_tick);
-            render_phase_list(frame, chunks[2], &phases, active_phase, spinner_tick);
-            render_output_panel(frame, chunks[3], &output_lines, scroll_offset);
-            render_summary(frame, chunks[4], start_time, total_cost);
-            render_help_bar(frame, chunks[5], finished);
+            tui_widgets::render_header(frame, chunks[0], "Init", &project_root, finished, success);
+            tui_widgets::render_pipeline(frame, chunks[1], &phases, &pr_status, spinner_tick);
+
+            (visible_height, visible_width) = tui_widgets::render_middle(
+                frame,
+                chunks[2],
+                &MiddlePanel {
+                    phases: &phases,
+                    pr_status: &pr_status,
+                    spinner_tick,
+                    content_lines: &content_lines,
+                    scroll_offset,
+                    content_title: &active_phase_name,
+                },
+            );
+
+            tui_widgets::render_summary(
+                frame,
+                chunks[3],
+                &SummaryFields {
+                    elapsed: start_time.elapsed(),
+                    turns: None,
+                    cost: total_cost,
+                    pr_status: &pr_status,
+                },
+            );
+            tui_widgets::render_help_bar(frame, chunks[4], finished, is_running);
         })?;
+
+        self.content_visible_height = visible_height;
+        self.content_visible_width = visible_width;
+        // Restore content_lines after draw (O(1) pointer swap)
+        self.content_lines = content_lines;
 
         Ok(())
     }
@@ -334,8 +400,17 @@ impl std::fmt::Debug for InitUi {
         f.debug_struct("InitUi")
             .field("project_root", &self.project_root)
             .field("phases", &self.phases.len())
-            .field("output_lines", &self.output_lines.len())
+            .field("content_lines", &self.content_lines.len())
             .field("finished", &self.finished)
+            .field("scroll_offset", &self.scroll_offset)
+            .field("auto_scroll", &self.auto_scroll)
+            .field(
+                "content_visible",
+                &format_args!(
+                    "{}x{}",
+                    self.content_visible_width, self.content_visible_height
+                ),
+            )
             .finish_non_exhaustive()
     }
 }
@@ -344,405 +419,5 @@ impl Drop for InitUi {
     fn drop(&mut self) {
         let _ = disable_raw_mode();
         let _ = execute!(self.terminal.backend_mut(), LeaveAlternateScreen);
-    }
-}
-
-// ── Rendering Functions ──────────────────────────────────────────────
-
-/// Renders the header line showing project root and overall status.
-fn render_header(frame: &mut Frame, area: Rect, project_root: &str, finished: bool, success: bool) {
-    let status = if finished {
-        if success {
-            Span::styled(" [Completed] ", Style::default().fg(Color::Green).bold())
-        } else {
-            Span::styled(" [Failed] ", Style::default().fg(Color::Red).bold())
-        }
-    } else {
-        Span::styled(" [Running] ", Style::default().fg(Color::Yellow).bold())
-    };
-
-    let header = Line::from(vec![
-        Span::styled(
-            format!(" CODA Init: {project_root} "),
-            Style::default().fg(Color::White).bold(),
-        ),
-        status,
-    ]);
-    let paragraph = Paragraph::new(header).style(Style::default().bg(Color::DarkGray));
-    frame.render_widget(paragraph, area);
-}
-
-/// Renders the horizontal phase pipeline with status indicators.
-fn render_pipeline(frame: &mut Frame, area: Rect, phases: &[PhaseDisplay], spinner_tick: usize) {
-    let block = Block::default()
-        .title(" Pipeline ")
-        .title_style(Style::default().fg(Color::White).bold())
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(BORDER_COLOR));
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
-
-    let mut spans: Vec<Span> = Vec::new();
-
-    for (i, phase) in phases.iter().enumerate() {
-        if i > 0 {
-            spans.push(Span::styled(" → ", Style::default().fg(Color::DarkGray)));
-        }
-
-        let (icon, style) = match &phase.status {
-            PhaseDisplayStatus::Pending => ("○", Style::default().fg(Color::DarkGray)),
-            PhaseDisplayStatus::Running => {
-                let frame_char = SPINNER_FRAMES[spinner_tick % SPINNER_FRAMES.len()];
-                spans.push(Span::styled(
-                    format!("{frame_char} "),
-                    Style::default().fg(Color::Yellow),
-                ));
-                spans.push(Span::styled(
-                    phase.name.clone(),
-                    Style::default().fg(Color::Yellow).bold(),
-                ));
-                continue;
-            }
-            PhaseDisplayStatus::Completed { .. } => ("●", Style::default().fg(Color::Green)),
-            PhaseDisplayStatus::Failed { .. } => ("✗", Style::default().fg(Color::Red)),
-        };
-
-        spans.push(Span::styled(format!("{icon} "), style));
-        spans.push(Span::styled(phase.name.clone(), style));
-    }
-
-    let line = Line::from(spans);
-    let paragraph = Paragraph::new(line);
-    frame.render_widget(paragraph, inner);
-}
-
-/// Renders the detailed phase list with status, timing, and cost.
-fn render_phase_list(
-    frame: &mut Frame,
-    area: Rect,
-    phases: &[PhaseDisplay],
-    _active_phase: Option<usize>,
-    spinner_tick: usize,
-) {
-    let block = Block::default()
-        .title(" Phases ")
-        .title_style(Style::default().fg(Color::White).bold())
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(BORDER_COLOR));
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
-
-    let mut lines: Vec<Line> = Vec::new();
-
-    for phase in phases {
-        let line = match &phase.status {
-            PhaseDisplayStatus::Pending => Line::from(vec![Span::styled(
-                format!("  [○] {:<24}", phase.name),
-                Style::default().fg(Color::DarkGray),
-            )]),
-            PhaseDisplayStatus::Running => {
-                let spinner = SPINNER_FRAMES[spinner_tick % SPINNER_FRAMES.len()];
-                let elapsed = phase
-                    .started_at
-                    .map(|t| format_duration(t.elapsed()))
-                    .unwrap_or_default();
-
-                Line::from(vec![
-                    Span::styled(
-                        format!("  [{spinner}] {:<24}", phase.name),
-                        Style::default().fg(Color::Yellow).bold(),
-                    ),
-                    Span::styled(
-                        format!("{elapsed:>8}  Running..."),
-                        Style::default().fg(Color::Yellow),
-                    ),
-                ])
-            }
-            PhaseDisplayStatus::Completed { duration, cost_usd } => Line::from(vec![
-                Span::styled(
-                    format!("  [●] {:<24}", phase.name),
-                    Style::default().fg(Color::Green),
-                ),
-                Span::styled(
-                    format!("{:>8}  ${cost_usd:.4}", format_duration(*duration)),
-                    Style::default().fg(Color::White),
-                ),
-            ]),
-            PhaseDisplayStatus::Failed { error } => Line::from(vec![
-                Span::styled(
-                    format!("  [✗] {:<24}", phase.name),
-                    Style::default().fg(Color::Red),
-                ),
-                Span::styled(
-                    format!("Failed: {}", truncate_str(error, 50)),
-                    Style::default().fg(Color::Red),
-                ),
-            ]),
-        };
-        lines.push(line);
-    }
-
-    let paragraph = Paragraph::new(lines);
-    frame.render_widget(paragraph, inner);
-}
-
-/// Renders the AI streaming output panel with scrollbar.
-///
-/// Uses `Paragraph::scroll()` with a wrap-aware row offset. When
-/// `scroll_offset` is 0 the view sticks to the bottom (latest text);
-/// pressing Up / PageUp increases the offset to scroll back.
-fn render_output_panel(frame: &mut Frame, area: Rect, output_lines: &[String], scroll_offset: u16) {
-    let block = Block::default()
-        .title(" Output ")
-        .title_style(Style::default().fg(Color::White).bold())
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(BORDER_COLOR));
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
-
-    let lines: Vec<Line> = output_lines
-        .iter()
-        .map(|line| Line::from(Span::styled(line.clone(), Style::default().fg(Color::Gray))))
-        .collect();
-
-    // Calculate total visual lines accounting for Unicode-aware wrapping.
-    let total_visual_lines: u16 = lines
-        .iter()
-        .map(|l| visual_line_count(l, inner.width))
-        .sum();
-    let visible_height = inner.height;
-    let max_scroll = total_visual_lines.saturating_sub(visible_height);
-    let effective_scroll = max_scroll.saturating_sub(scroll_offset);
-
-    let paragraph = Paragraph::new(lines)
-        .wrap(Wrap { trim: false })
-        .scroll((effective_scroll, 0));
-    frame.render_widget(paragraph, inner);
-
-    // Render scrollbar
-    let mut scrollbar_state =
-        ScrollbarState::new(total_visual_lines as usize).position(effective_scroll as usize);
-    let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight);
-    frame.render_stateful_widget(scrollbar, area, &mut scrollbar_state);
-}
-
-/// Renders the summary bar with live elapsed time and cost.
-fn render_summary(frame: &mut Frame, area: Rect, start_time: Instant, total_cost: f64) {
-    let block = Block::default()
-        .title(" Summary ")
-        .title_style(Style::default().fg(Color::White).bold())
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(BORDER_COLOR));
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
-
-    let elapsed = format_duration(start_time.elapsed());
-
-    let spans = vec![
-        Span::styled(
-            format!("  Elapsed: {elapsed}"),
-            Style::default().fg(Color::White).bold(),
-        ),
-        Span::styled("   ", Style::default()),
-        Span::styled(
-            format!("Cost: ${total_cost:.4} USD"),
-            Style::default().fg(Color::White),
-        ),
-    ];
-
-    let line = Line::from(spans);
-    let paragraph = Paragraph::new(line);
-    frame.render_widget(paragraph, inner);
-}
-
-/// Renders the help bar with keyboard shortcuts.
-fn render_help_bar(frame: &mut Frame, area: Rect, finished: bool) {
-    let help = if finished {
-        Line::from(vec![Span::styled(
-            " Init finished. Exiting...",
-            Style::default().fg(Color::DarkGray),
-        )])
-    } else {
-        Line::from(vec![
-            Span::styled(" [Ctrl+C] Cancel", Style::default().fg(Color::DarkGray)),
-            Span::styled(
-                "  [↑↓] Scroll  [PgUp/PgDn] Page",
-                Style::default().fg(Color::DarkGray),
-            ),
-        ])
-    };
-    let paragraph = Paragraph::new(help);
-    frame.render_widget(paragraph, area);
-}
-
-// ── Utility Functions ────────────────────────────────────────────────
-
-/// Calculates the number of visual (wrapped) lines a single [`Line`] occupies
-/// when rendered into the given `width`, using Unicode display widths so that
-/// CJK characters (2 columns each) are accounted for correctly.
-fn visual_line_count(line: &Line, width: u16) -> u16 {
-    if width == 0 {
-        return 1;
-    }
-    let line_width: u16 = line
-        .spans
-        .iter()
-        .map(|s| {
-            #[allow(clippy::cast_possible_truncation)]
-            let w = UnicodeWidthStr::width(s.content.as_ref()) as u16;
-            w
-        })
-        .sum();
-    if line_width == 0 {
-        return 1;
-    }
-    line_width.div_ceil(width)
-}
-
-/// Appends streaming text to the output buffer, splitting on newlines.
-///
-/// Maintains a rolling buffer capped at [`OUTPUT_BUFFER_MAX_LINES`] lines.
-/// When the buffer exceeds the limit, the oldest lines are dropped.
-///
-/// # Examples
-///
-/// ```
-/// # // This function is pub(crate) so we demonstrate the logic inline.
-/// let mut buf = Vec::new();
-/// // Simulating: append_stream_text(&mut buf, "line1\nline2\n");
-/// // Would result in buf containing ["line1", "line2", ""]
-/// ```
-fn append_stream_text(buffer: &mut Vec<String>, text: &str) {
-    // Split incoming text by newlines. The first fragment is appended
-    // to the last existing line (streaming may split mid-line).
-    let mut fragments = text.split('\n');
-
-    if let Some(first) = fragments.next() {
-        if let Some(last_line) = buffer.last_mut() {
-            last_line.push_str(first);
-        } else {
-            buffer.push(first.to_string());
-        }
-    }
-
-    for fragment in fragments {
-        buffer.push(fragment.to_string());
-    }
-
-    // Enforce the rolling buffer limit
-    if buffer.len() > OUTPUT_BUFFER_MAX_LINES {
-        let overflow = buffer.len() - OUTPUT_BUFFER_MAX_LINES;
-        buffer.drain(0..overflow);
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_should_append_single_line_to_empty_buffer() {
-        let mut buf = Vec::new();
-        append_stream_text(&mut buf, "hello world");
-        assert_eq!(buf, vec!["hello world"]);
-    }
-
-    #[test]
-    fn test_should_append_to_existing_last_line_when_no_newline() {
-        let mut buf = vec!["partial".to_string()];
-        append_stream_text(&mut buf, " text");
-        assert_eq!(buf, vec!["partial text"]);
-    }
-
-    #[test]
-    fn test_should_split_on_newlines() {
-        let mut buf = Vec::new();
-        append_stream_text(&mut buf, "line1\nline2\nline3");
-        assert_eq!(buf, vec!["line1", "line2", "line3"]);
-    }
-
-    #[test]
-    fn test_should_handle_trailing_newline() {
-        let mut buf = Vec::new();
-        append_stream_text(&mut buf, "line1\n");
-        assert_eq!(buf, vec!["line1", ""]);
-    }
-
-    #[test]
-    fn test_should_continue_last_line_across_chunks() {
-        let mut buf = Vec::new();
-        append_stream_text(&mut buf, "hel");
-        append_stream_text(&mut buf, "lo\nworld");
-        assert_eq!(buf, vec!["hello", "world"]);
-    }
-
-    #[test]
-    fn test_should_cap_buffer_at_max_lines() {
-        let mut buf = Vec::new();
-        // Fill buffer to the limit
-        for i in 0..OUTPUT_BUFFER_MAX_LINES {
-            buf.push(format!("line {i}"));
-        }
-        assert_eq!(buf.len(), OUTPUT_BUFFER_MAX_LINES);
-
-        // Add one more line via newline
-        append_stream_text(&mut buf, "\nnew line");
-        assert_eq!(buf.len(), OUTPUT_BUFFER_MAX_LINES);
-        assert_eq!(buf.last().map(String::as_str), Some("new line"));
-        // Oldest line should have been dropped
-        assert_eq!(buf[0], "line 1");
-    }
-
-    #[test]
-    fn test_should_handle_empty_text() {
-        let mut buf = vec!["existing".to_string()];
-        append_stream_text(&mut buf, "");
-        assert_eq!(buf, vec!["existing"]);
-    }
-
-    #[test]
-    fn test_should_handle_multiple_consecutive_newlines() {
-        let mut buf = Vec::new();
-        append_stream_text(&mut buf, "a\n\n\nb");
-        assert_eq!(buf, vec!["a", "", "", "b"]);
-    }
-
-    #[test]
-    fn test_should_count_visual_lines_for_short_line() {
-        let line = Line::from("hello");
-        assert_eq!(visual_line_count(&line, 80), 1);
-    }
-
-    #[test]
-    fn test_should_count_visual_lines_for_long_line() {
-        // 100 chars at width 80 = 2 visual rows
-        let long_line = Line::from("a".repeat(100));
-        assert_eq!(visual_line_count(&long_line, 80), 2);
-    }
-
-    #[test]
-    fn test_should_count_visual_lines_for_empty_line() {
-        let line = Line::from("");
-        assert_eq!(visual_line_count(&line, 80), 1);
-    }
-
-    #[test]
-    fn test_should_count_visual_lines_with_zero_width() {
-        let line = Line::from("hello");
-        assert_eq!(visual_line_count(&line, 0), 1);
-    }
-
-    #[test]
-    fn test_should_count_visual_lines_exact_multiple() {
-        // Exactly 80 chars at width 80 = 1 visual row
-        let exact = Line::from("a".repeat(80));
-        assert_eq!(visual_line_count(&exact, 80), 1);
-        // 81 chars = 2 rows
-        let one_over = Line::from("a".repeat(81));
-        assert_eq!(visual_line_count(&one_over, 80), 2);
     }
 }

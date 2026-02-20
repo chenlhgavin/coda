@@ -1,7 +1,8 @@
 //! Terminal UI implementation using ratatui.
 //!
-//! Provides interactive chat UI for the `coda plan` command and
-//! progress display for the `coda run` command.
+//! Provides interactive chat UI for the `coda plan` command. Uses
+//! shared constants and utilities from [`tui_widgets`] for consistent
+//! visual style across all CODA TUI screens.
 
 use std::io::{self, Stdout};
 
@@ -21,19 +22,15 @@ use ratatui::{
 };
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
+use crate::tui_widgets::{self, BORDER_COLOR, SPINNER_FRAMES};
+
 /// Role label for user messages in the chat history.
 const USER_ROLE: &str = "You";
 /// Role label for agent messages in the chat history.
 const AGENT_ROLE: &str = "Assistant";
 
-/// Border color used throughout the plan UI.
-const BORDER_COLOR: Color = Color::Cyan;
-
 /// Input prompt displayed before the cursor.
 const INPUT_PROMPT: &str = "> ";
-
-/// Spinner animation frames for the thinking indicator.
-const SPINNER_FRAMES: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 
 /// Current phase of the planning session, displayed in the header.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -50,15 +47,31 @@ enum PlanPhase {
     Finalizing,
 }
 
+impl PlanPhase {
+    /// Returns the display label for this phase.
+    fn label(self) -> &'static str {
+        match self {
+            Self::Discussing => "Discussing",
+            Self::Thinking => "Thinking",
+            Self::Approving => "Approving",
+            Self::Approved => "Approved",
+            Self::Finalizing => "Finalizing",
+        }
+    }
+
+    /// Returns the display color for this phase.
+    fn color(self) -> Color {
+        match self {
+            Self::Discussing => Color::White,
+            Self::Thinking | Self::Approving | Self::Finalizing => Color::Yellow,
+            Self::Approved => Color::Green,
+        }
+    }
+}
+
 impl std::fmt::Display for PlanPhase {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Discussing => write!(f, "Discussing"),
-            Self::Thinking => write!(f, "Thinking"),
-            Self::Approving => write!(f, "Approving"),
-            Self::Approved => write!(f, "Approved"),
-            Self::Finalizing => write!(f, "Finalizing"),
-        }
+        f.write_str(self.label())
     }
 }
 
@@ -449,38 +462,24 @@ impl PlanUi {
 }
 
 /// Renders the header line showing feature name and current phase.
+///
+/// Uses the same dark-gray background as init/run headers for consistency.
+/// Phase label is color-coded: white for Discussing, yellow for Thinking/
+/// Approving/Finalizing, green for Approved.
 fn render_header(frame: &mut Frame, area: Rect, feature_slug: &str, phase: PlanPhase) {
+    let phase_color = phase.color();
     let header = Line::from(vec![
         Span::styled(
             format!(" CODA Plan: {feature_slug} "),
             Style::default().fg(Color::White).bold(),
         ),
-        Span::styled(format!("[{phase}]"), Style::default().fg(Color::Yellow)),
+        Span::styled(
+            format!("[{}]", phase.label()),
+            Style::default().fg(phase_color).bold(),
+        ),
     ]);
     let paragraph = Paragraph::new(header).style(Style::default().bg(Color::DarkGray));
     frame.render_widget(paragraph, area);
-}
-
-/// Calculates the number of visual (wrapped) lines a single [`Line`] occupies
-/// when rendered into the given `width`, using Unicode display widths so that
-/// CJK characters (2 columns each) are accounted for correctly.
-fn visual_line_count(line: &Line, width: u16) -> u16 {
-    if width == 0 {
-        return 1;
-    }
-    let line_width: u16 = line
-        .spans
-        .iter()
-        .map(|s| {
-            #[allow(clippy::cast_possible_truncation)]
-            let w = UnicodeWidthStr::width(s.content.as_ref()) as u16;
-            w
-        })
-        .sum();
-    if line_width == 0 {
-        return 1;
-    }
-    line_width.div_ceil(width)
 }
 
 /// Renders the chat history in the given area.
@@ -533,7 +532,11 @@ fn render_chat(frame: &mut Frame, area: Rect, messages: &[ChatMessage], scroll_o
     // Calculate total visual lines (accounting for wrapping)
     let total_visual_lines: u16 = lines
         .iter()
-        .map(|l| visual_line_count(l, inner.width))
+        .map(|l| {
+            #[allow(clippy::cast_possible_truncation)]
+            let count = tui_widgets::wrapped_line_count(l, inner.width as usize) as u16;
+            count
+        })
         .sum();
     let visible_height = inner.height;
     let max_scroll = total_visual_lines.saturating_sub(visible_height);
@@ -552,40 +555,29 @@ fn render_chat(frame: &mut Frame, area: Rect, messages: &[ChatMessage], scroll_o
 }
 
 /// Renders the bottom help bar with context-sensitive keyboard shortcuts.
+///
+/// Uses `Color::DarkGray` for help text, matching the init/run TUI style.
 fn render_help_bar(frame: &mut Frame, area: Rect, phase: PlanPhase) {
-    let key_style = Style::default().fg(Color::White);
-    let sep = Span::raw("  ");
+    let help_style = Style::default().fg(Color::DarkGray);
 
     let help = match phase {
-        PlanPhase::Discussing => Line::from(vec![
-            Span::styled("[Enter] Send", key_style),
-            sep.clone(),
-            Span::styled("[/approve] Lock design", key_style),
-            sep.clone(),
-            Span::styled("[/done] Finalize", key_style),
-            sep.clone(),
-            Span::styled("[Ctrl+C] Quit", key_style),
-            sep,
-            Span::styled("[PgUp/PgDn] Scroll", key_style),
-        ]),
-        PlanPhase::Approved => Line::from(vec![
-            Span::styled("[/done] Finalize & create worktree", key_style),
-            sep.clone(),
-            Span::styled("[Enter] Continue discussing", key_style),
-            sep.clone(),
-            Span::styled("[Ctrl+C] Quit", key_style),
-            sep,
-            Span::styled("[PgUp/PgDn] Scroll", key_style),
-        ]),
+        PlanPhase::Discussing => Line::from(Span::styled(
+            " [Enter] Send  [/approve] Lock design  [/done] Finalize  [Ctrl+C] Quit  [↑↓] Scroll",
+            help_style,
+        )),
+        PlanPhase::Approved => Line::from(Span::styled(
+            " [/done] Finalize & create worktree  [Enter] Continue discussing  [Ctrl+C] Quit  [↑↓] Scroll",
+            help_style,
+        )),
         PlanPhase::Thinking | PlanPhase::Approving => {
-            Line::from(vec![Span::styled("[Ctrl+C] Cancel", key_style)])
+            Line::from(Span::styled(" [Ctrl+C] Cancel", help_style))
         }
-        PlanPhase::Finalizing => Line::from(vec![Span::styled(
-            "Finalizing — writing specs and creating worktree...",
-            key_style,
-        )]),
+        PlanPhase::Finalizing => Line::from(Span::styled(
+            " Finalizing — writing specs and creating worktree...",
+            help_style,
+        )),
     };
-    let paragraph = Paragraph::new(help).style(Style::default().fg(Color::DarkGray));
+    let paragraph = Paragraph::new(help);
     frame.render_widget(paragraph, area);
 }
 
