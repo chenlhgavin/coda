@@ -3,10 +3,7 @@
 //! [`AppState`] is the central state container passed (as `Arc<AppState>`) to
 //! all handlers. [`BindingStore`] manages channel-to-repository mappings with
 //! concurrent access via [`DashMap`] and persistence to the config file.
-//!
-//! Some `BindingStore` methods (e.g., `get`, `len`, `is_empty`) are part of
-//! the planned interface and will be called in Phases 2-4 when commands like
-//! `list`, `status`, and `run` need to resolve channel bindings.
+//! [`RunningTasks`] tracks in-flight init/run tasks to prevent duplicates.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -24,24 +21,31 @@ use crate::slack_client::SlackClient;
 ///
 /// ```
 /// use std::path::PathBuf;
-/// use coda_server::state::{AppState, BindingStore};
+/// use coda_server::state::{AppState, BindingStore, RunningTasks};
 /// use coda_server::slack_client::SlackClient;
 ///
 /// let slack = SlackClient::new("xoxb-test".into());
 /// let bindings = BindingStore::new(PathBuf::from("/tmp/config.yml"), Default::default());
-/// let state = AppState::new(slack, bindings);
+/// let running = RunningTasks::new();
+/// let state = AppState::new(slack, bindings, running);
 /// assert!(state.bindings().get("nonexistent").is_none());
 /// ```
 #[derive(Debug)]
 pub struct AppState {
     slack: SlackClient,
     bindings: BindingStore,
+    running_tasks: RunningTasks,
 }
 
 impl AppState {
-    /// Creates a new application state with the given Slack client and bindings.
-    pub fn new(slack: SlackClient, bindings: BindingStore) -> Self {
-        Self { slack, bindings }
+    /// Creates a new application state with the given Slack client, bindings,
+    /// and running task tracker.
+    pub fn new(slack: SlackClient, bindings: BindingStore, running_tasks: RunningTasks) -> Self {
+        Self {
+            slack,
+            bindings,
+            running_tasks,
+        }
     }
 
     /// Returns a reference to the Slack Web API client.
@@ -52,6 +56,11 @@ impl AppState {
     /// Returns a reference to the channel-repo binding store.
     pub fn bindings(&self) -> &BindingStore {
         &self.bindings
+    }
+
+    /// Returns a reference to the running task tracker.
+    pub fn running_tasks(&self) -> &RunningTasks {
+        &self.running_tasks
     }
 }
 
@@ -74,7 +83,6 @@ pub struct BindingStore {
     bindings: DashMap<String, PathBuf>,
 }
 
-#[allow(dead_code)] // `len`, `is_empty` used in Phases 3-4
 impl BindingStore {
     /// Creates a new binding store with the given config path and initial bindings.
     ///
@@ -140,11 +148,13 @@ impl BindingStore {
     }
 
     /// Returns the number of active bindings.
+    #[allow(dead_code)] // Used in tests; standard collection API
     pub fn len(&self) -> usize {
         self.bindings.len()
     }
 
     /// Returns `true` if there are no active bindings.
+    #[allow(dead_code)] // Used in tests; standard collection API
     pub fn is_empty(&self) -> bool {
         self.bindings.is_empty()
     }
@@ -197,6 +207,69 @@ impl std::fmt::Debug for BindingStore {
             .field("config_path", &self.config_path)
             .field("binding_count", &self.bindings.len())
             .finish()
+    }
+}
+
+/// Tracks in-flight init/run tasks to prevent duplicate executions.
+///
+/// Keys follow the convention `"init:{channel_id}"` or `"run:{slug}"`.
+/// Each entry stores a [`tokio::task::JoinHandle`] for the spawned task,
+/// allowing status checks and cleanup when the task completes.
+///
+/// # Examples
+///
+/// ```
+/// use coda_server::state::RunningTasks;
+///
+/// let tasks = RunningTasks::new();
+/// assert!(!tasks.is_running("run:add-auth"));
+/// ```
+#[derive(Debug)]
+pub struct RunningTasks {
+    tasks: DashMap<String, tokio::task::JoinHandle<()>>,
+}
+
+impl RunningTasks {
+    /// Creates an empty running task tracker.
+    pub fn new() -> Self {
+        Self {
+            tasks: DashMap::new(),
+        }
+    }
+
+    /// Returns `true` if a task with the given key is currently running.
+    ///
+    /// Also cleans up finished tasks: if the stored handle is finished,
+    /// it is removed and `false` is returned.
+    pub fn is_running(&self, key: &str) -> bool {
+        if let Some(entry) = self.tasks.get(key) {
+            if entry.value().is_finished() {
+                drop(entry);
+                self.tasks.remove(key);
+                return false;
+            }
+            return true;
+        }
+        false
+    }
+
+    /// Inserts a running task with the given key.
+    ///
+    /// If a previous task existed under this key, it is replaced (the old
+    /// handle is dropped but the task itself continues running).
+    pub fn insert(&self, key: String, handle: tokio::task::JoinHandle<()>) {
+        self.tasks.insert(key, handle);
+    }
+
+    /// Removes a task entry by key.
+    pub fn remove(&self, key: &str) {
+        self.tasks.remove(key);
+    }
+}
+
+impl Default for RunningTasks {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -333,7 +406,8 @@ mod tests {
     fn test_should_create_app_state() {
         let slack = SlackClient::new("xoxb-test".into());
         let bindings = BindingStore::new(PathBuf::from("/tmp/config.yml"), HashMap::new());
-        let state = AppState::new(slack, bindings);
+        let running = RunningTasks::new();
+        let state = AppState::new(slack, bindings, running);
         assert!(state.bindings().is_empty());
     }
 
@@ -343,5 +417,64 @@ mod tests {
         let debug = format!("{store:?}");
         assert!(debug.contains("BindingStore"));
         assert!(debug.contains("binding_count"));
+    }
+
+    #[test]
+    fn test_should_create_empty_running_tasks() {
+        let tasks = RunningTasks::new();
+        assert!(!tasks.is_running("run:add-auth"));
+    }
+
+    #[test]
+    fn test_should_track_running_task() {
+        let tasks = RunningTasks::new();
+        // Keep runtime alive so the spawned task is not canceled
+        let _rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let handle = _rt.spawn(async {
+            tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+        });
+        tasks.insert("run:add-auth".to_string(), handle);
+        assert!(tasks.is_running("run:add-auth"));
+    }
+
+    #[test]
+    fn test_should_report_not_running_after_remove() {
+        let tasks = RunningTasks::new();
+        // Keep runtime alive so the spawned task is not canceled
+        let _rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let handle = _rt.spawn(async {
+            tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+        });
+        tasks.insert("run:add-auth".to_string(), handle);
+        tasks.remove("run:add-auth");
+        assert!(!tasks.is_running("run:add-auth"));
+    }
+
+    #[test]
+    fn test_should_clean_up_finished_task() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let tasks = RunningTasks::new();
+        // Spawn a task that completes immediately
+        let handle = rt.spawn(async {});
+        // Wait for it to finish
+        rt.block_on(async { tokio::time::sleep(std::time::Duration::from_millis(10)).await });
+        tasks.insert("run:done".to_string(), handle);
+        // is_running should detect it's finished and clean up
+        assert!(!tasks.is_running("run:done"));
+    }
+
+    #[test]
+    fn test_should_default_running_tasks() {
+        let tasks = RunningTasks::default();
+        assert!(!tasks.is_running("anything"));
     }
 }

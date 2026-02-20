@@ -2,7 +2,9 @@
 //!
 //! Each submodule implements one or more related commands:
 //! - [`bind`] — `/coda bind` and `/coda unbind`
+//! - [`init`] — `/coda init` with live progress updates
 //! - [`query`] — `/coda help`, `/coda list`, `/coda status`, `/coda clean`
+//! - [`run`] — `/coda run` with live progress updates
 //!
 //! The shared [`resolve_engine`] helper resolves a channel binding and
 //! creates an [`Engine`](coda_core::Engine) for use in command handlers.
@@ -16,7 +18,9 @@ use crate::formatter;
 use crate::state::AppState;
 
 pub mod bind;
+pub mod init;
 pub mod query;
+pub mod run;
 
 /// Resolves the channel binding and creates an Engine for the bound repository.
 ///

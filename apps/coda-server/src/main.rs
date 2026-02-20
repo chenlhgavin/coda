@@ -39,7 +39,8 @@ async fn main() -> anyhow::Result<()> {
     // Build application state
     let slack = slack_client::SlackClient::new(server_config.slack.bot_token.clone());
     let bindings = state::BindingStore::new(config_path, server_config.bindings.clone());
-    let app_state = Arc::new(state::AppState::new(slack.clone(), bindings));
+    let running_tasks = state::RunningTasks::new();
+    let app_state = Arc::new(state::AppState::new(slack.clone(), bindings, running_tasks));
 
     info!(
         binding_count = server_config.bindings.len(),

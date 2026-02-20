@@ -151,11 +151,13 @@ impl CodaCommand {
 /// Slash command payload from Slack Socket Mode.
 ///
 /// Contains metadata about the command invocation including the channel,
-/// user, and the raw command text.
-#[allow(dead_code)] // Fields used in Phases 3-4
+/// user, and the raw command text. All fields must be present for serde
+/// deserialization from the Slack API payload even if not directly read
+/// by all command handlers.
 #[derive(Debug, Clone, Deserialize)]
 pub struct SlashCommandPayload {
     /// The slash command name (e.g., `/coda`).
+    #[allow(dead_code)] // Required for serde deserialization from Slack API
     pub command: String,
 
     /// The text after the command (e.g., `"bind /path/to/repo"`).
@@ -167,9 +169,11 @@ pub struct SlashCommandPayload {
 
     /// Human-readable channel name.
     #[serde(default)]
+    #[allow(dead_code)] // Required for serde deserialization from Slack API
     pub channel_name: String,
 
     /// ID of the user who invoked the command.
+    #[allow(dead_code)] // Required for serde deserialization from Slack API
     pub user_id: String,
 
     /// Username of the invoker.
@@ -212,19 +216,24 @@ pub async fn handle_slash_command(state: Arc<AppState>, payload: serde_json::Val
         CodaCommand::Unbind => {
             commands::bind::handle_unbind(Arc::clone(&state), &cmd_payload).await
         }
+        CodaCommand::Init => commands::init::handle_init(Arc::clone(&state), &cmd_payload).await,
+        CodaCommand::Run { feature_slug } => {
+            commands::run::handle_run(Arc::clone(&state), &cmd_payload, &feature_slug).await
+        }
         CodaCommand::Help => commands::query::handle_help(Arc::clone(&state), &cmd_payload).await,
         CodaCommand::List => commands::query::handle_list(Arc::clone(&state), &cmd_payload).await,
         CodaCommand::Status { feature_slug } => {
             commands::query::handle_status(Arc::clone(&state), &cmd_payload, &feature_slug).await
         }
         CodaCommand::Clean => commands::query::handle_clean(Arc::clone(&state), &cmd_payload).await,
-        // Commands not yet implemented
-        CodaCommand::Init | CodaCommand::Plan { .. } | CodaCommand::Run { .. } => {
-            let msg = format!(
-                "Command `{}` is not yet implemented. Coming soon!",
-                cmd_payload.text.split_whitespace().next().unwrap_or("?")
-            );
-            post_error(&state, &cmd_payload.channel_id, &msg).await;
+        // Plan not yet implemented (Phase 4)
+        CodaCommand::Plan { .. } => {
+            post_error(
+                &state,
+                &cmd_payload.channel_id,
+                "Command `plan` is not yet implemented. Coming soon!",
+            )
+            .await;
             return;
         }
     };
