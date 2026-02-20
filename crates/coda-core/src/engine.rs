@@ -354,7 +354,7 @@ impl Engine {
 
         // 5. Auto-commit init artifacts unless --no-commit
         if !no_commit {
-            self.commit_init_artifacts().await?;
+            self.commit_init_artifacts()?;
         }
 
         emit(&progress_tx, InitEvent::InitFinished { success: true });
@@ -365,23 +365,20 @@ impl Engine {
     /// Commits init artifacts (`.coda/`, `.coda.md`, `CLAUDE.md`, `.gitignore`)
     /// to the current branch so that `coda plan` worktrees inherit them.
     ///
-    /// Uses [`commit_with_hooks()`] to handle pre-commit hook failures
-    /// with automatic re-staging and LLM-based fixing.
+    /// Uses `--no-verify` because these are CODA-internal files that should
+    /// not be gated by project-specific pre-commit hooks.
     ///
     /// # Errors
     ///
-    /// Returns `CoreError` if committing fails after all retry attempts.
-    async fn commit_init_artifacts(&self) -> Result<(), CoreError> {
+    /// Returns `CoreError` if staging or committing fails.
+    fn commit_init_artifacts(&self) -> Result<(), CoreError> {
         let paths: &[&str] = &[".coda/", ".coda.md", "CLAUDE.md", ".gitignore"];
-        commit_with_hooks(
+        commit_coda_artifacts(
             self.git.as_ref(),
             &self.project_root,
             paths,
             "chore: initialize CODA project",
-            &self.pm,
-            &self.config,
         )
-        .await
     }
 
     /// Runs the analyze-repo phase: streams the AI analysis and collects text.
@@ -875,19 +872,22 @@ pub fn emit(tx: &Option<UnboundedSender<InitEvent>>, event: InitEvent) {
 
 /// Stages files, commits, and handles pre-commit hook failures automatically.
 ///
-/// Implements a three-layer retry strategy:
+/// Implements a retry strategy with unrecoverable error detection:
 ///
 /// 1. **Try commit** — runs pre-commit hooks normally.
-/// 2. **Re-stage & retry** — fixer hooks (e.g. `end-of-file-fixer`, `prettier`)
+/// 2. **Check recoverability** — if the hook error is unrecoverable (e.g.
+///    `command not found`, missing tool binaries), falls back to
+///    `--no-verify` immediately instead of wasting time on retries.
+/// 3. **Re-stage & retry** — fixer hooks (e.g. `end-of-file-fixer`, `prettier`)
 ///    modify files on the first run and pass on the second. Re-staging picks up
 ///    their modifications.
-/// 3. **LLM fix & retry** — if hooks still fail, the error output is sent to a
+/// 4. **LLM fix & retry** — if hooks still fail, the error output is sent to a
 ///    Claude agent that reads and fixes the affected files, then a final commit
 ///    is attempted.
 ///
 /// # Errors
 ///
-/// Returns `CoreError` if the commit fails after all three attempts.
+/// Returns `CoreError` if the commit fails after all attempts.
 pub async fn commit_with_hooks(
     git: &dyn GitOps,
     cwd: &Path,
@@ -902,11 +902,28 @@ pub async fn commit_with_hooks(
     }
 
     // Attempt 1: normal commit
-    match git.commit(cwd, message) {
+    let first_err = match git.commit(cwd, message) {
         Ok(()) => return Ok(()),
-        Err(_first_err) => {
+        Err(e) => {
             info!("Commit failed (hooks may have modified files), retrying");
+            e
         }
+    };
+
+    // Fast path: if the hook error is unrecoverable (missing tool, bad
+    // interpreter, etc.), skip the retry/LLM layers and commit directly
+    // with --no-verify. Re-staging and LLM fixes cannot install missing
+    // binaries, so retrying would just waste time and money.
+    if is_unrecoverable_hook_error(&first_err.to_string()) {
+        warn!(
+            "Hook failure is unrecoverable (missing tool/command), \
+             falling back to --no-verify"
+        );
+        git.add(cwd, paths)?;
+        if !git.has_staged_changes(cwd) {
+            return Ok(());
+        }
+        return git.commit_internal(cwd, message);
     }
 
     // Attempt 2: re-stage (picks up fixer-hook modifications) and retry
@@ -933,6 +950,22 @@ pub async fn commit_with_hooks(
         return Ok(());
     }
     git.commit(cwd, message)
+}
+
+/// Checks whether a pre-commit hook error indicates an unrecoverable failure.
+///
+/// Unrecoverable errors are those that cannot be fixed by re-staging files or
+/// by an LLM agent — typically missing tool binaries or broken interpreters.
+/// When detected, the caller should fall back to `--no-verify`.
+fn is_unrecoverable_hook_error(error_msg: &str) -> bool {
+    let lower = error_msg.to_lowercase();
+    // "command not found" — shell reports missing binary (exit code 127)
+    // "no such file or directory" — missing interpreter or tool binary
+    // "not found in PATH" / "not found on PATH" — various tools reporting PATH issues
+    lower.contains("command not found")
+        || lower.contains("no such file or directory")
+        || lower.contains("not found in path")
+        || lower.contains("not found on path")
 }
 
 /// Invokes a Claude agent to fix files based on pre-commit hook error output.
@@ -969,6 +1002,31 @@ async fn fix_hook_errors_with_llm(
 
     info!("LLM hook-fix agent completed");
     Ok(())
+}
+
+/// Stages and commits CODA-internal artifacts without running pre-commit hooks.
+///
+/// CODA-generated files (`.coda/`, `.coda.md`, `CLAUDE.md`, etc.) are tooling
+/// infrastructure and should not be gated by project-specific linters or
+/// formatters. This function uses `git commit --no-verify` to bypass hooks
+/// entirely.
+///
+/// Silently succeeds if there are no staged changes after `git add`.
+///
+/// # Errors
+///
+/// Returns `CoreError::GitError` if staging or committing fails.
+pub fn commit_coda_artifacts(
+    git: &dyn GitOps,
+    cwd: &Path,
+    paths: &[&str],
+    message: &str,
+) -> Result<(), CoreError> {
+    git.add(cwd, paths)?;
+    if !git.has_staged_changes(cwd) {
+        return Ok(());
+    }
+    git.commit_internal(cwd, message)
 }
 
 /// Maximum length for a feature slug (keeps branch names and paths manageable).

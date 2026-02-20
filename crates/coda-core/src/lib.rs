@@ -31,8 +31,8 @@ pub mod task;
 
 pub use config::CodaConfig;
 pub use engine::{
-    CleanedWorktree, Engine, InitEvent, commit_with_hooks, emit, remove_feature_logs,
-    validate_feature_slug,
+    CleanedWorktree, Engine, InitEvent, commit_coda_artifacts, commit_with_hooks, emit,
+    remove_feature_logs, validate_feature_slug,
 };
 pub use error::CoreError;
 pub use gh::{DefaultGhOps, GhOps, PrStatus};

@@ -14,7 +14,7 @@ use tracing::{debug, info, warn};
 
 use crate::CoreError;
 use crate::config::CodaConfig;
-use crate::engine::commit_with_hooks;
+use crate::engine::commit_coda_artifacts;
 use crate::git::GitOps;
 use crate::profile::AgentProfile;
 use crate::state::{
@@ -303,15 +303,12 @@ impl PlanSession {
                 "CODA init files not committed, auto-committing before worktree creation"
             );
             let paths: &[&str] = &[".coda/", ".coda.md", "CLAUDE.md", ".gitignore"];
-            commit_with_hooks(
+            commit_coda_artifacts(
                 self.git.as_ref(),
                 &self.project_root,
                 paths,
                 "chore: initialize CODA project",
-                &self.pm,
-                &self.config,
-            )
-            .await?;
+            )?;
 
             // Re-check: if still missing, the files don't exist at all
             if !self
@@ -377,15 +374,12 @@ impl PlanSession {
         debug!(path = %state_path.display(), "Wrote state.yml");
 
         // 4. Initial commit so planning artifacts are version-controlled
-        commit_with_hooks(
+        commit_coda_artifacts(
             self.git.as_ref(),
             &worktree_abs,
             &[".coda/"],
             &format!("feat({slug}): initialize planning artifacts"),
-            &self.pm,
-            &self.config,
-        )
-        .await?;
+        )?;
 
         // 5. Clear approved state only after everything succeeded
         self.approved_design = None;
