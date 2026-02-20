@@ -28,6 +28,22 @@ const SPINNER_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦
 /// Border color used throughout the run UI.
 const BORDER_COLOR: Color = Color::Cyan;
 
+/// Pre-loaded phase data from `state.yml` for initializing the UI
+/// without waiting for engine events.
+#[derive(Debug, Clone)]
+pub struct InitialPhase {
+    /// Phase name.
+    pub name: String,
+    /// Whether this phase already completed in a previous session.
+    pub completed: bool,
+    /// Wall-clock duration (only meaningful when `completed` is true).
+    pub duration: Duration,
+    /// Agent turns used (only meaningful when `completed` is true).
+    pub turns: u32,
+    /// Cost in USD (only meaningful when `completed` is true).
+    pub cost_usd: f64,
+}
+
 /// Display status of a single phase in the pipeline.
 #[derive(Debug, Clone)]
 enum PhaseDisplayStatus {
@@ -77,6 +93,8 @@ pub struct RunUi {
     phases: Vec<PhaseDisplay>,
     active_phase: Option<usize>,
     start_time: Instant,
+    /// Accumulated elapsed time from phases completed in previous sessions.
+    prior_elapsed: Duration,
     total_turns: u32,
     total_cost: f64,
     pr_status: PrDisplayStatus,
@@ -101,23 +119,46 @@ enum PrDisplayStatus {
 impl RunUi {
     /// Creates a new run UI, entering the alternate screen and raw mode.
     ///
-    /// `initial_phases` pre-populates the phase pipeline so the first
-    /// frame already shows all phase names (avoids an empty-pipeline
-    /// flash while the engine connects to Claude).
+    /// `initial_phases` pre-populates the phase pipeline with status from
+    /// `state.yml` so the first frame shows completed phases as green with
+    /// correct metrics, and the summary includes their accumulated
+    /// turns/cost/elapsed time.
     ///
     /// # Errors
     ///
     /// Returns an error if terminal setup fails.
-    pub fn new(feature_slug: &str, initial_phases: Vec<String>) -> Result<Self> {
+    pub fn new(feature_slug: &str, initial_phases: Vec<InitialPhase>) -> Result<Self> {
         enable_raw_mode()?;
+
+        let mut prior_elapsed = Duration::ZERO;
+        let mut total_turns = 0u32;
+        let mut total_cost = 0.0f64;
 
         let phases = initial_phases
             .into_iter()
-            .map(|name| PhaseDisplay {
-                name,
-                status: PhaseDisplayStatus::Pending,
-                started_at: None,
-                detail: String::new(),
+            .map(|ip| {
+                if ip.completed {
+                    prior_elapsed += ip.duration;
+                    total_turns += ip.turns;
+                    total_cost += ip.cost_usd;
+                    PhaseDisplay {
+                        name: ip.name,
+                        status: PhaseDisplayStatus::Completed {
+                            duration: ip.duration,
+                            turns: ip.turns,
+                            cost_usd: ip.cost_usd,
+                        },
+                        started_at: None,
+                        detail: String::new(),
+                    }
+                } else {
+                    PhaseDisplay {
+                        name: ip.name,
+                        status: PhaseDisplayStatus::Pending,
+                        started_at: None,
+                        detail: String::new(),
+                    }
+                }
             })
             .collect();
 
@@ -132,8 +173,9 @@ impl RunUi {
                 phases,
                 active_phase: None,
                 start_time: Instant::now(),
-                total_turns: 0,
-                total_cost: 0.0,
+                prior_elapsed,
+                total_turns,
+                total_cost,
                 pr_status: PrDisplayStatus::Pending,
                 finished: false,
                 success: false,
@@ -208,15 +250,19 @@ impl RunUi {
     fn handle_event(&mut self, event: RunEvent) {
         match event {
             RunEvent::RunStarting { phases } => {
-                self.phases = phases
-                    .into_iter()
-                    .map(|name| PhaseDisplay {
-                        name,
-                        status: PhaseDisplayStatus::Pending,
-                        started_at: None,
-                        detail: String::new(),
-                    })
-                    .collect();
+                // If phases were already pre-populated (resume scenario),
+                // keep the existing state so completed phases stay green.
+                if self.phases.is_empty() {
+                    self.phases = phases
+                        .into_iter()
+                        .map(|name| PhaseDisplay {
+                            name,
+                            status: PhaseDisplayStatus::Pending,
+                            started_at: None,
+                            detail: String::new(),
+                        })
+                        .collect();
+                }
             }
             RunEvent::PhaseStarting { index, .. } => {
                 if let Some(phase) = self.phases.get_mut(index) {
@@ -232,6 +278,13 @@ impl RunUi {
                 cost_usd,
                 ..
             } => {
+                // Skip accumulation if this phase was already pre-populated
+                // as completed during init (avoids double-counting on resume).
+                let already_completed = self
+                    .phases
+                    .get(index)
+                    .is_some_and(|p| matches!(p.status, PhaseDisplayStatus::Completed { .. }));
+
                 if let Some(phase) = self.phases.get_mut(index) {
                     phase.status = PhaseDisplayStatus::Completed {
                         duration,
@@ -239,8 +292,10 @@ impl RunUi {
                         cost_usd,
                     };
                 }
-                self.total_turns += turns;
-                self.total_cost += cost_usd;
+                if !already_completed {
+                    self.total_turns += turns;
+                    self.total_cost += cost_usd;
+                }
                 self.active_phase = None;
             }
             RunEvent::PhaseFailed { index, error, .. } => {
@@ -306,7 +361,7 @@ impl RunUi {
     /// Builds the final summary from accumulated state.
     fn build_summary(&self) -> RunSummary {
         RunSummary {
-            elapsed: self.start_time.elapsed(),
+            elapsed: self.prior_elapsed + self.start_time.elapsed(),
             total_turns: self.total_turns,
             total_cost: self.total_cost,
             pr_url: match &self.pr_status {
@@ -323,6 +378,7 @@ impl RunUi {
         let phases = self.phases.clone();
         let active_phase = self.active_phase;
         let start_time = self.start_time;
+        let prior_elapsed = self.prior_elapsed;
         let total_turns = self.total_turns;
         let total_cost = self.total_cost;
         let pr_status = self.pr_status.clone();
@@ -364,7 +420,7 @@ impl RunUi {
             render_summary(
                 frame,
                 chunks[3],
-                start_time,
+                prior_elapsed + start_time.elapsed(),
                 total_turns,
                 total_cost,
                 &pr_status,
@@ -608,7 +664,7 @@ fn render_phase_list(
 fn render_summary(
     frame: &mut Frame,
     area: Rect,
-    start_time: Instant,
+    elapsed: Duration,
     total_turns: u32,
     total_cost: f64,
     pr_status: &PrDisplayStatus,
@@ -622,7 +678,7 @@ fn render_summary(
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    let elapsed = format_duration(start_time.elapsed());
+    let elapsed = format_duration(elapsed);
 
     let mut spans = vec![
         Span::styled(

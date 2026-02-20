@@ -5,7 +5,7 @@
 //! user-facing progress display and timing information.
 
 use std::io::Write;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use coda_core::{Engine, InitEvent, RunEvent};
@@ -466,13 +466,25 @@ impl App {
 
     /// Runs with interactive TUI display.
     async fn run_tui(&self, feature_slug: &str) -> Result<()> {
-        // Pre-load phase names from state.yml so the first TUI frame
-        // already shows the full pipeline (avoids empty-pipeline flash
-        // while the engine connects to Claude).
+        // Pre-load phase state from state.yml so the first TUI frame
+        // already shows completed phases as green with correct metrics
+        // (avoids a gray-flash and wrong totals on resume).
         let initial_phases = self
             .engine
             .feature_status(feature_slug)
-            .map(|state| state.phases.iter().map(|p| p.name.clone()).collect())
+            .map(|state| {
+                state
+                    .phases
+                    .iter()
+                    .map(|p| crate::run_ui::InitialPhase {
+                        name: p.name.clone(),
+                        completed: p.status == coda_core::state::PhaseStatus::Completed,
+                        duration: Duration::from_secs(p.duration_secs),
+                        turns: p.turns,
+                        cost_usd: p.cost_usd,
+                    })
+                    .collect()
+            })
             .unwrap_or_default();
 
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<RunEvent>();
