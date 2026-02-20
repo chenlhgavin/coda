@@ -8,9 +8,11 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use claude_agent_sdk_rs::Message;
 use coda_pm::PromptManager;
+use futures::StreamExt;
 use serde::Serialize;
 use tracing::{debug, info, warn};
 
@@ -72,6 +74,85 @@ const SAMPLE_MAX_LINES: usize = 40;
 
 /// Maximum tree depth when gathering the repository tree.
 const TREE_MAX_DEPTH: usize = 4;
+
+/// Phase names used during the init pipeline.
+const INIT_PHASE_ANALYZE: &str = "analyze-repo";
+
+/// Phase name for the project setup step.
+const INIT_PHASE_SETUP: &str = "setup-project";
+
+/// Progress events emitted during `coda init` for real-time UI updates.
+///
+/// These events are sent through an [`UnboundedSender`] channel from
+/// [`Engine::init()`] to the UI layer, enabling live progress display
+/// with streaming AI output.
+///
+/// # Examples
+///
+/// ```
+/// use std::time::Duration;
+/// use coda_core::InitEvent;
+///
+/// let event = InitEvent::PhaseStarting {
+///     name: "analyze-repo".to_string(),
+///     index: 0,
+///     total: 2,
+/// };
+/// assert!(matches!(event, InitEvent::PhaseStarting { index: 0, .. }));
+/// ```
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub enum InitEvent {
+    /// Init pipeline starting with the ordered phase names.
+    InitStarting {
+        /// Ordered list of phase names for the init pipeline.
+        phases: Vec<String>,
+    },
+
+    /// A phase is about to start executing.
+    PhaseStarting {
+        /// Phase name (e.g., `"analyze-repo"`, `"setup-project"`).
+        name: String,
+        /// Zero-based phase index.
+        index: usize,
+        /// Total number of phases.
+        total: usize,
+    },
+
+    /// A chunk of streaming text from the AI agent.
+    StreamText {
+        /// The text chunk received from the AI.
+        text: String,
+    },
+
+    /// A phase completed successfully.
+    PhaseCompleted {
+        /// Phase name.
+        name: String,
+        /// Zero-based phase index.
+        index: usize,
+        /// Wall-clock duration of the phase.
+        duration: Duration,
+        /// Cost in USD for this phase.
+        cost_usd: f64,
+    },
+
+    /// A phase failed.
+    PhaseFailed {
+        /// Phase name.
+        name: String,
+        /// Zero-based phase index.
+        index: usize,
+        /// Error description.
+        error: String,
+    },
+
+    /// The entire init flow has finished.
+    InitFinished {
+        /// Whether the init completed successfully.
+        success: bool,
+    },
+}
 
 /// A sampled file for repository analysis, serializable for template rendering.
 #[derive(Debug, Serialize)]
@@ -196,11 +277,15 @@ impl Engine {
 
     /// Initializes the current repository as a CODA project.
     ///
-    /// The init flow performs two agent calls:
-    /// 1. `query(Planner)` with `init/analyze_repo` to analyze the repository
-    ///    structure, tech stack, and architecture.
-    /// 2. `query(Coder)` with `init/setup_project` to create `.coda/`, `.trees/`,
-    ///    `config.yml`, `.coda.md`, and update `.gitignore`.
+    /// The init flow performs two streaming agent calls:
+    /// 1. `query_stream(Planner)` with `init/analyze_repo` to analyze the
+    ///    repository structure, tech stack, and architecture.
+    /// 2. `query_stream(Coder)` with `init/setup_project` to create `.coda/`,
+    ///    `.trees/`, `config.yml`, `.coda.md`, and update `.gitignore`.
+    ///
+    /// When `progress_tx` is provided, emits [`InitEvent`]s for real-time
+    /// progress display. When `None`, the function behaves silently (useful
+    /// for testing or CI).
     ///
     /// When `no_commit` is `false` (default), the generated files are
     /// automatically committed so that subsequent `coda plan` worktrees
@@ -210,7 +295,10 @@ impl Engine {
     ///
     /// Returns `CoreError::ConfigError` if the project is already initialized
     /// (`.coda/` exists), or `CoreError::AgentError` if agent calls fail.
-    pub async fn init(&self, no_commit: bool) -> Result<(), CoreError> {
+    pub async fn init(
+        &self,
+        progress_tx: Option<UnboundedSender<InitEvent>>,
+    ) -> Result<(), CoreError> {
         // 1. Check if .coda/ already exists
         if self.project_root.join(".coda").exists() {
             return Err(CoreError::ConfigError(
@@ -218,10 +306,62 @@ impl Engine {
             ));
         }
 
+        let phases = vec![INIT_PHASE_ANALYZE.to_string(), INIT_PHASE_SETUP.to_string()];
+        emit(
+            &progress_tx,
+            InitEvent::InitStarting {
+                phases: phases.clone(),
+            },
+        );
+
         // 2. Render system prompt for init
         let system_prompt = self.pm.render("init/system", minijinja::context!())?;
 
-        // 3. Analyze repository structure
+        // 3. Analyze repository structure (phase 0)
+        let analysis_result = match self.run_analyze_phase(&system_prompt, &progress_tx).await {
+            Ok(result) => result,
+            Err(e) => {
+                emit(
+                    &progress_tx,
+                    InitEvent::PhaseFailed {
+                        name: INIT_PHASE_ANALYZE.to_string(),
+                        index: 0,
+                        error: e.to_string(),
+                    },
+                );
+                emit(&progress_tx, InitEvent::InitFinished { success: false });
+                return Err(e);
+            }
+        };
+
+        // 4. Setup project structure (phase 1)
+        if let Err(e) = self
+            .run_setup_phase(&system_prompt, &analysis_result, &progress_tx)
+            .await
+        {
+            emit(
+                &progress_tx,
+                InitEvent::PhaseFailed {
+                    name: INIT_PHASE_SETUP.to_string(),
+                    index: 1,
+                    error: e.to_string(),
+                },
+            );
+            emit(&progress_tx, InitEvent::InitFinished { success: false });
+            return Err(e);
+        }
+
+        emit(&progress_tx, InitEvent::InitFinished { success: true });
+        info!("Project initialized successfully");
+        Ok(())
+    }
+
+    /// Runs the analyze-repo phase: streams the AI analysis and collects text.
+    async fn run_analyze_phase(
+        &self,
+        system_prompt: &str,
+        progress_tx: &Option<UnboundedSender<InitEvent>>,
+    ) -> Result<String, CoreError> {
         let repo_tree = gather_repo_tree(&self.project_root)?;
         let file_samples = gather_file_samples(&self.project_root)?;
 
@@ -233,28 +373,87 @@ impl Engine {
             ),
         )?;
 
+        emit(
+            progress_tx,
+            InitEvent::PhaseStarting {
+                name: INIT_PHASE_ANALYZE.to_string(),
+                index: 0,
+                total: 2,
+            },
+        );
+
         debug!("Analyzing repository structure...");
 
         let planner_options = AgentProfile::Planner.to_options(
-            &system_prompt,
+            system_prompt,
             self.project_root.clone(),
             5, // max_turns for analysis
             self.config.agent.max_budget_usd,
             &self.config.agent.model,
         );
 
-        let messages = claude_agent_sdk_rs::query(analyze_prompt, Some(planner_options))
+        let phase_start = Instant::now();
+
+        let mut stream = claude_agent_sdk_rs::query_stream(analyze_prompt, Some(planner_options))
             .await
             .map_err(|e| CoreError::AgentError(e.to_string()))?;
 
-        // Extract analysis result text from messages
-        let analysis_result = extract_text_from_messages(&messages);
+        let mut text_parts: Vec<String> = Vec::new();
+        let mut cost_usd = 0.0;
+
+        while let Some(result) = stream.next().await {
+            let message = result.map_err(|e| CoreError::AgentError(e.to_string()))?;
+            match message {
+                Message::Assistant(ref assistant) => {
+                    for block in &assistant.message.content {
+                        if let claude_agent_sdk_rs::ContentBlock::Text(text_block) = block {
+                            emit(
+                                progress_tx,
+                                InitEvent::StreamText {
+                                    text: text_block.text.clone(),
+                                },
+                            );
+                            text_parts.push(text_block.text.clone());
+                        }
+                    }
+                }
+                Message::Result(ref result_msg) => {
+                    if let Some(c) = result_msg.total_cost_usd {
+                        cost_usd = c;
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        let duration = phase_start.elapsed();
+        let analysis_result = text_parts.join("\n");
+
         debug!(
             analysis_len = analysis_result.len(),
             "Repository analysis complete"
         );
 
-        // 4. Setup project structure
+        emit(
+            progress_tx,
+            InitEvent::PhaseCompleted {
+                name: INIT_PHASE_ANALYZE.to_string(),
+                index: 0,
+                duration,
+                cost_usd,
+            },
+        );
+
+        Ok(analysis_result)
+    }
+
+    /// Runs the setup-project phase: streams the AI setup and collects cost.
+    async fn run_setup_phase(
+        &self,
+        system_prompt: &str,
+        analysis_result: &str,
+        progress_tx: &Option<UnboundedSender<InitEvent>>,
+    ) -> Result<(), CoreError> {
         let setup_prompt = self.pm.render(
             "init/setup_project",
             minijinja::context!(
@@ -263,34 +462,69 @@ impl Engine {
             ),
         )?;
 
+        emit(
+            progress_tx,
+            InitEvent::PhaseStarting {
+                name: INIT_PHASE_SETUP.to_string(),
+                index: 1,
+                total: 2,
+            },
+        );
+
         debug!("Setting up project structure...");
 
         let coder_options = AgentProfile::Coder.to_options(
-            &system_prompt,
+            system_prompt,
             self.project_root.clone(),
             10, // max_turns for setup
             self.config.agent.max_budget_usd,
             &self.config.agent.model,
         );
 
-        let _messages = claude_agent_sdk_rs::query(setup_prompt, Some(coder_options))
+        let phase_start = Instant::now();
+
+        let mut stream = claude_agent_sdk_rs::query_stream(setup_prompt, Some(coder_options))
             .await
             .map_err(|e| CoreError::AgentError(e.to_string()))?;
 
-        // 5. Auto-commit init artifacts so worktrees inherit them
-        if !no_commit {
-            self.git.add(
-                &self.project_root,
-                &[".coda/", ".coda.md", "CLAUDE.md", ".gitignore"],
-            )?;
-            if self.git.has_staged_changes(&self.project_root) {
-                self.git
-                    .commit(&self.project_root, "chore: initialize CODA project")?;
-                info!("Committed CODA init artifacts");
+        let mut cost_usd = 0.0;
+
+        while let Some(result) = stream.next().await {
+            let message = result.map_err(|e| CoreError::AgentError(e.to_string()))?;
+            match message {
+                Message::Assistant(ref assistant) => {
+                    for block in &assistant.message.content {
+                        if let claude_agent_sdk_rs::ContentBlock::Text(text_block) = block {
+                            emit(
+                                progress_tx,
+                                InitEvent::StreamText {
+                                    text: text_block.text.clone(),
+                                },
+                            );
+                        }
+                    }
+                }
+                Message::Result(ref result_msg) => {
+                    if let Some(c) = result_msg.total_cost_usd {
+                        cost_usd = c;
+                    }
+                }
+                _ => {}
             }
         }
 
-        info!("Project initialized successfully");
+        let duration = phase_start.elapsed();
+
+        emit(
+            progress_tx,
+            InitEvent::PhaseCompleted {
+                name: INIT_PHASE_SETUP.to_string(),
+                index: 1,
+                duration,
+                cost_usd,
+            },
+        );
+
         Ok(())
     }
 
@@ -588,6 +822,29 @@ impl std::fmt::Debug for Engine {
 // Helper functions
 // ---------------------------------------------------------------------------
 
+/// Sends an [`InitEvent`] through the optional channel.
+///
+/// Silently ignores send failures (receiver dropped) and `None` channels.
+/// This avoids verbose `if let Some(tx) = &progress_tx { let _ = tx.send(...); }`
+/// at every callsite.
+///
+/// # Examples
+///
+/// ```
+/// use tokio::sync::mpsc;
+/// use coda_core::InitEvent;
+///
+/// let (tx, mut rx) = mpsc::unbounded_channel();
+/// coda_core::emit(&Some(tx), InitEvent::InitFinished { success: true });
+/// let event = rx.try_recv().unwrap();
+/// assert!(matches!(event, InitEvent::InitFinished { success: true }));
+/// ```
+pub fn emit(tx: &Option<UnboundedSender<InitEvent>>, event: InitEvent) {
+    if let Some(tx) = tx {
+        let _ = tx.send(event);
+    }
+}
+
 /// Maximum length for a feature slug (keeps branch names and paths manageable).
 const SLUG_MAX_LEN: usize = 64;
 
@@ -768,34 +1025,6 @@ fn gather_file_samples(root: &Path) -> Result<Vec<FileSample>, CoreError> {
     Ok(samples)
 }
 
-/// Extracts all text content from a sequence of Claude SDK messages.
-///
-/// Iterates through assistant messages, collecting text blocks into a
-/// single concatenated string. Non-text content blocks are skipped.
-fn extract_text_from_messages(messages: &[Message]) -> String {
-    let mut text_parts: Vec<String> = Vec::new();
-
-    for message in messages {
-        match message {
-            Message::Assistant(assistant) => {
-                for block in &assistant.message.content {
-                    if let claude_agent_sdk_rs::ContentBlock::Text(text_block) = block {
-                        text_parts.push(text_block.text.clone());
-                    }
-                }
-            }
-            Message::Result(result) => {
-                if let Some(ref result_text) = result.result {
-                    text_parts.push(result_text.clone());
-                }
-            }
-            _ => {}
-        }
-    }
-
-    text_parts.join("\n")
-}
-
 #[cfg(test)]
 mod tests {
     use std::fs;
@@ -875,6 +1104,93 @@ mod tests {
         Engine::new(root.to_path_buf())
             .await
             .expect("create Engine")
+    }
+
+    #[test]
+    fn test_should_emit_event_when_sender_is_some() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        emit(&Some(tx), InitEvent::InitFinished { success: true });
+
+        let event = rx.try_recv().expect("should receive event");
+        assert!(matches!(event, InitEvent::InitFinished { success: true }));
+    }
+
+    #[test]
+    fn test_should_not_panic_when_emitting_to_none() {
+        emit(&None, InitEvent::InitFinished { success: false });
+    }
+
+    #[test]
+    fn test_should_not_panic_when_receiver_is_dropped() {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        drop(rx);
+        emit(&Some(tx), InitEvent::InitFinished { success: true });
+    }
+
+    #[test]
+    fn test_should_emit_all_init_event_variants() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let sender = Some(tx);
+
+        emit(
+            &sender,
+            InitEvent::InitStarting {
+                phases: vec!["analyze-repo".to_string(), "setup-project".to_string()],
+            },
+        );
+        emit(
+            &sender,
+            InitEvent::PhaseStarting {
+                name: "analyze-repo".to_string(),
+                index: 0,
+                total: 2,
+            },
+        );
+        emit(
+            &sender,
+            InitEvent::StreamText {
+                text: "some output".to_string(),
+            },
+        );
+        emit(
+            &sender,
+            InitEvent::PhaseCompleted {
+                name: "analyze-repo".to_string(),
+                index: 0,
+                duration: Duration::from_secs(30),
+                cost_usd: 0.01,
+            },
+        );
+        emit(
+            &sender,
+            InitEvent::PhaseFailed {
+                name: "setup-project".to_string(),
+                index: 1,
+                error: "agent error".to_string(),
+            },
+        );
+        emit(&sender, InitEvent::InitFinished { success: false });
+
+        // Verify all 6 events arrived in order
+        assert!(matches!(rx.try_recv(), Ok(InitEvent::InitStarting { .. })));
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(InitEvent::PhaseStarting { index: 0, .. })
+        ));
+        assert!(matches!(rx.try_recv(), Ok(InitEvent::StreamText { .. })));
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(InitEvent::PhaseCompleted { index: 0, .. })
+        ));
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(InitEvent::PhaseFailed { index: 1, .. })
+        ));
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(InitEvent::InitFinished { success: false })
+        ));
+        assert!(rx.try_recv().is_err());
     }
 
     #[tokio::test]
@@ -1009,52 +1325,6 @@ mod tests {
         let names: Vec<&str> = samples.iter().map(|s| s.path.as_str()).collect();
         assert!(names.contains(&"Cargo.toml"));
         assert!(names.contains(&"README.md"));
-    }
-
-    #[test]
-    fn test_should_extract_text_from_assistant_messages() {
-        let messages = vec![
-            Message::Assistant(claude_agent_sdk_rs::AssistantMessage {
-                message: claude_agent_sdk_rs::AssistantMessageInner {
-                    content: vec![claude_agent_sdk_rs::ContentBlock::Text(
-                        claude_agent_sdk_rs::TextBlock {
-                            text: "Hello from assistant".to_string(),
-                        },
-                    )],
-                    model: None,
-                    id: None,
-                    stop_reason: None,
-                    usage: None,
-                    error: None,
-                },
-                parent_tool_use_id: None,
-                session_id: None,
-                uuid: None,
-            }),
-            Message::Result(claude_agent_sdk_rs::ResultMessage {
-                subtype: "success".to_string(),
-                duration_ms: 100,
-                duration_api_ms: 80,
-                is_error: false,
-                num_turns: 1,
-                session_id: "test".to_string(),
-                total_cost_usd: Some(0.01),
-                usage: None,
-                result: Some("Result text".to_string()),
-                structured_output: None,
-            }),
-        ];
-
-        let text = extract_text_from_messages(&messages);
-        assert!(text.contains("Hello from assistant"));
-        assert!(text.contains("Result text"));
-    }
-
-    #[test]
-    fn test_should_return_empty_for_no_text_messages() {
-        let messages: Vec<Message> = vec![];
-        let text = extract_text_from_messages(&messages);
-        assert!(text.is_empty());
     }
 
     #[test]

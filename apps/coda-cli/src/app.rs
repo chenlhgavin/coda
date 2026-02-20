@@ -8,9 +8,10 @@ use std::io::Write;
 use std::time::Instant;
 
 use anyhow::Result;
-use coda_core::{Engine, RunEvent};
+use coda_core::{Engine, InitEvent, RunEvent};
 use tracing::error;
 
+use crate::fmt_utils::{format_duration, truncate_str};
 use crate::ui::PlanUi;
 
 /// Application state holding the core engine.
@@ -46,6 +47,9 @@ impl App {
 
     /// Handles the `coda init` command.
     ///
+    /// Runs the init flow with a live TUI showing streaming AI output,
+    /// phase progress, elapsed time, and cost. Uses `tokio::select!` to
+    /// run the engine and UI concurrently (same pattern as `run_tui`).
     /// Runs the init flow (analyze repo + setup project) and prints a
     /// success message. When `no_commit` is false (default), generated
     /// files are auto-committed so that `coda plan` worktrees inherit them.
@@ -53,15 +57,65 @@ impl App {
     /// # Errors
     ///
     /// Returns an error if initialization fails (e.g., already initialized,
-    /// agent SDK errors).
-    pub async fn init(&self, no_commit: bool) -> Result<()> {
-        println!(
-            "Initializing CODA in {}...",
-            self.engine.project_root().display()
-        );
-        match self.engine.init(no_commit).await {
-            Ok(()) => {
-                println!("CODA project initialized successfully!");
+    /// agent SDK errors) or the user cancels with Ctrl+C.
+    pub async fn init(&self) -> Result<()> {
+        let project_root_display = self.engine.project_root().display().to_string();
+
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<InitEvent>();
+
+        let mut ui = crate::init_ui::InitUi::new(&project_root_display)?;
+
+        let engine_future = self.engine.init(Some(tx));
+
+        tokio::pin!(engine_future);
+
+        let mut engine_result: Option<Result<(), coda_core::CoreError>> = None;
+
+        // Run UI and engine concurrently: UI drives the event loop,
+        // engine sends events through the channel.
+        let ui_result = {
+            let mut ui_future = std::pin::pin!(ui.run(rx));
+            loop {
+                tokio::select! {
+                    // Bias engine branch so its result is always captured
+                    // before the UI branch can break the loop.
+                    biased;
+
+                    result = &mut engine_future, if engine_result.is_none() => {
+                        engine_result = Some(result);
+                        // Engine done — channel sender dropped, UI will see Disconnected
+                        // and finish on its own. Continue the loop to let UI drain.
+                    }
+                    ui_res = &mut ui_future => {
+                        break ui_res;
+                    }
+                }
+            }
+        };
+
+        // If engine completed but select! picked the UI branch first (both
+        // were ready simultaneously), await the engine future now — it will
+        // return immediately since it already completed.
+        if engine_result.is_none() {
+            engine_result = Some(engine_future.await);
+        }
+
+        // Drop UI to restore terminal before printing final output
+        drop(ui);
+
+        // Print final summary to normal stdout
+        match (engine_result, ui_result) {
+            (Some(Ok(())), Ok(summary)) => {
+                println!();
+                println!("  CODA Init: {project_root_display}");
+                println!("  ═══════════════════════════════════════");
+                println!(
+                    "  Total: {} elapsed, ${:.4} USD",
+                    format_duration(summary.elapsed),
+                    summary.total_cost,
+                );
+                println!("  ═══════════════════════════════════════");
+                println!();
                 println!("  Created .coda/ directory with config.yml");
                 println!("  Created .trees/ directory for worktrees");
                 println!("  Generated .coda.md repository overview");
@@ -79,9 +133,24 @@ impl App {
                 );
                 Ok(())
             }
-            Err(e) => {
+            (Some(Err(e)), _) => {
                 error!("Init failed: {e}");
+                println!();
+                println!("  CODA Init: {project_root_display} — FAILED");
+                println!("  ═══════════════════════════════════════");
+                println!("  Error: {e}");
+                println!("  ═══════════════════════════════════════");
+                println!();
                 Err(e.into())
+            }
+            (_, Err(e)) => {
+                // UI error (e.g. user cancelled with Ctrl+C)
+                error!("UI error: {e}");
+                Err(e)
+            }
+            (None, _) => {
+                // Should never happen: engine_future is awaited above as fallback
+                Err(anyhow::anyhow!("Engine did not complete"))
             }
         }
     }
@@ -640,35 +709,5 @@ fn phase_status_icon(s: coda_core::state::PhaseStatus) -> &'static str {
         coda_core::state::PhaseStatus::Completed => "●",
         coda_core::state::PhaseStatus::Failed => "✗",
         _ => "?",
-    }
-}
-
-/// Formats a `Duration` into a human-readable string (e.g., `"1m 23s"`, `"45s"`).
-fn format_duration(d: std::time::Duration) -> String {
-    let total_secs = d.as_secs();
-    if total_secs >= 3600 {
-        let hours = total_secs / 3600;
-        let mins = (total_secs % 3600) / 60;
-        let secs = total_secs % 60;
-        format!("{hours}h {mins}m {secs}s")
-    } else if total_secs >= 60 {
-        let mins = total_secs / 60;
-        let secs = total_secs % 60;
-        format!("{mins}m {secs}s")
-    } else {
-        format!("{total_secs}s")
-    }
-}
-
-/// Truncates a string to fit within `max_len` characters, appending `…` if needed.
-///
-/// Uses character boundaries instead of byte offsets to avoid panics on
-/// multi-byte UTF-8 sequences (e.g., CJK characters, emoji).
-fn truncate_str(s: &str, max_len: usize) -> String {
-    if s.chars().count() <= max_len {
-        s.to_string()
-    } else {
-        let truncated: String = s.chars().take(max_len.saturating_sub(1)).collect();
-        format!("{truncated}…")
     }
 }

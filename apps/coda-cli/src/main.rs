@@ -5,6 +5,8 @@
 
 mod app;
 mod cli;
+pub(crate) mod fmt_utils;
+pub(crate) mod init_ui;
 mod line_editor;
 mod run_ui;
 #[allow(dead_code)]

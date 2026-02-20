@@ -1,0 +1,88 @@
+feature:
+  slug: optimize-init
+  created_at: 2026-02-20T01:26:02.722596Z
+  updated_at: 2026-02-20T02:04:56.128803Z
+status: completed
+current_phase: 5
+git:
+  worktree_path: .trees/optimize-init
+  branch: feature/optimize-init
+  base_branch: main
+phases:
+- name: initevent-streaming-engine
+  kind: dev
+  status: completed
+  started_at: 2026-02-20T01:26:12.859919Z
+  completed_at: 2026-02-20T01:36:13.658193Z
+  turns: 52
+  cost_usd: 3.99734075
+  cost:
+    input_tokens: 43
+    output_tokens: 29267
+  duration_secs: 600
+  details: {}
+- name: initui-tui
+  kind: dev
+  status: completed
+  started_at: 2026-02-20T01:36:13.659267Z
+  completed_at: 2026-02-20T01:39:27.764975Z
+  turns: 15
+  cost_usd: 1.3161985000000005
+  cost:
+    input_tokens: 0
+    output_tokens: 0
+  duration_secs: 194
+  details: {}
+- name: wire-app-layer
+  kind: dev
+  status: completed
+  started_at: 2026-02-20T01:39:27.765516Z
+  completed_at: 2026-02-20T01:42:51.934132Z
+  turns: 15
+  cost_usd: 1.9458347500000013
+  cost:
+    input_tokens: 0
+    output_tokens: 49
+  duration_secs: 204
+  details: {}
+- name: review
+  kind: quality
+  status: completed
+  started_at: 2026-02-20T01:42:51.934700Z
+  completed_at: 2026-02-20T02:03:21.429010Z
+  turns: 54
+  cost_usd: 6.720868000000002
+  cost:
+    input_tokens: 26
+    output_tokens: 46002
+  duration_secs: 1229
+  details:
+    issues_found: 3
+    issues_resolved: 3
+    rounds: 2
+- name: verify
+  kind: quality
+  status: completed
+  started_at: 2026-02-20T02:03:21.429451Z
+  completed_at: 2026-02-20T02:04:56.128802Z
+  turns: 14
+  cost_usd: 0.4512877499999952
+  cost:
+    input_tokens: 4
+    output_tokens: 0
+  duration_secs: 94
+  details:
+    attempts: 22
+    checks_passed: 22
+    checks_total: 22
+pr:
+  url: https://github.com/lehuagavin/coda/pull/7
+  number: 7
+  title: 'feat(optimize-init): feature implementation'
+total:
+  turns: 150
+  cost_usd: 14.43152975
+  cost:
+    input_tokens: 73
+    output_tokens: 75318
+  duration_secs: 2321
