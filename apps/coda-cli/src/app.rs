@@ -664,6 +664,12 @@ impl App {
                             println!("      Try manually: gh pr create --head <branch>");
                         }
                     }
+                    RunEvent::Connecting => {
+                        println!("  [▸] Connecting to Claude...");
+                    }
+                    RunEvent::StderrOutput { line } => {
+                        eprintln!("  [stderr] {}", line.trim());
+                    }
                     _ => {}
                 }
             }

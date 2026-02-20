@@ -642,10 +642,8 @@ impl Engine {
             &self.config,
             Arc::clone(&self.git),
             Arc::clone(&self.gh),
+            progress_tx,
         )?;
-        if let Some(tx) = progress_tx {
-            runner.set_progress_sender(tx);
-        }
         runner.execute().await
     }
 

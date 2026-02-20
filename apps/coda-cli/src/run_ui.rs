@@ -322,6 +322,10 @@ impl RunUi {
                     .is_some_and(|p| matches!(p.status, PhaseDisplayStatus::Completed { .. }));
 
                 if let Some(phase) = self.phases.get_mut(index) {
+                    // Preserve turn count for sidebar display (set by
+                    // TurnCompleted events during the phase, or from the
+                    // completion event for replayed/resumed phases).
+                    phase.current_turn = turns;
                     phase.status = PhaseDisplayStatus::Completed {
                         duration,
                         cost_usd: None,
@@ -404,6 +408,21 @@ impl RunUi {
             }
             RunEvent::ToolActivity { tool_name, summary } => {
                 tui_widgets::append_tool_activity(&mut self.content_lines, &tool_name, &summary);
+                if self.auto_scroll {
+                    self.scroll_offset = self.max_scroll_offset();
+                }
+            }
+            RunEvent::Connecting => {
+                tui_widgets::append_styled_text(
+                    &mut self.content_lines,
+                    "Connecting to Claude...\n",
+                );
+                if self.auto_scroll {
+                    self.scroll_offset = self.max_scroll_offset();
+                }
+            }
+            RunEvent::StderrOutput { line } => {
+                tui_widgets::append_tool_activity(&mut self.content_lines, "[stderr]", line.trim());
                 if self.auto_scroll {
                     self.scroll_offset = self.max_scroll_offset();
                 }

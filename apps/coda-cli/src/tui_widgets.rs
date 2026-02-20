@@ -268,16 +268,24 @@ fn render_sidebar_phase(
                 .started_at
                 .map(|t| format_duration(t.elapsed()))
                 .unwrap_or_default();
-            // Reserve space for " elapsed" suffix
-            let time_len = elapsed.len() + 1;
-            let avail = name_budget.saturating_sub(time_len);
+            let turns_str = if phase.current_turn > 0 {
+                format!(" T:{}", phase.current_turn)
+            } else {
+                String::new()
+            };
+            // Reserve space for " T:N elapsed" suffix
+            let suffix_len = turns_str.len() + elapsed.len() + 1;
+            let avail = name_budget.saturating_sub(suffix_len);
             let name = truncate_str(&phase.name, avail);
             let mut result = vec![Line::from(vec![
                 Span::styled(
                     format!("[{spinner}] {name}"),
                     Style::default().fg(Color::Yellow).bold(),
                 ),
-                Span::styled(format!(" {elapsed}"), Style::default().fg(Color::Yellow)),
+                Span::styled(
+                    format!("{turns_str} {elapsed}"),
+                    Style::default().fg(Color::Yellow),
+                ),
             ])];
             // Show review/verify detail text as a sub-line when available
             if !phase.detail.is_empty() {
@@ -291,18 +299,23 @@ fn render_sidebar_phase(
         }
         PhaseDisplayStatus::Completed { duration, cost_usd } => {
             let dur = format_duration(*duration);
+            let turns_str = if phase.current_turn > 0 {
+                format!(" T:{}", phase.current_turn)
+            } else {
+                String::new()
+            };
             // If cost is available, show it after duration
             let suffix = if let Some(cost) = cost_usd {
-                format!(" {dur} ${cost:.4}")
+                format!("{turns_str} {dur} ${cost:.4}")
             } else {
-                format!(" {dur}")
+                format!("{turns_str} {dur}")
             };
             let suffix_len = suffix.len();
             let avail = name_budget.saturating_sub(suffix_len);
             let name = truncate_str(&phase.name, avail);
             vec![Line::from(vec![
                 Span::styled(format!("[●] {name}"), Style::default().fg(Color::Green)),
-                Span::styled(suffix, Style::default().fg(Color::White)),
+                Span::styled(format!(" {suffix}"), Style::default().fg(Color::White)),
             ])]
         }
         PhaseDisplayStatus::Failed { error } => {

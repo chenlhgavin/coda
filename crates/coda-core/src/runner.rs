@@ -145,6 +145,19 @@ pub enum RunEvent {
         /// Brief summary of the tool input (file path, command, pattern, etc.).
         summary: String,
     },
+    /// Emitted before connecting to the Claude CLI subprocess.
+    ///
+    /// Allows the TUI to display a "Connecting..." status so the user
+    /// knows initialization is in progress.
+    Connecting,
+    /// Stderr output received from the Claude CLI subprocess.
+    ///
+    /// Surfaces CLI errors (authentication failures, rate limits, etc.)
+    /// that would otherwise be silently dropped.
+    StderrOutput {
+        /// A single line of stderr output from the CLI.
+        line: String,
+    },
 }
 
 /// Progress tracking for a multi-phase feature development run.
@@ -664,6 +677,7 @@ impl Runner {
         config: &CodaConfig,
         git: Arc<dyn GitOps>,
         gh: Arc<dyn GhOps>,
+        progress_tx: Option<UnboundedSender<RunEvent>>,
     ) -> Result<Self, CoreError> {
         // Find feature directory
         let feature_dir = find_feature_dir(&project_root, feature_slug)?;
@@ -700,6 +714,15 @@ impl Runner {
         // containing token-level text deltas for real-time UI streaming.
         options.include_partial_messages = true;
 
+        // Forward CLI stderr output as RunEvent::StderrOutput so errors
+        // (auth failures, rate limits, etc.) are visible in the TUI.
+        if let Some(ref tx) = progress_tx {
+            let tx_clone = tx.clone();
+            options.stderr_callback = Some(Arc::new(move |line: String| {
+                let _ = tx_clone.send(RunEvent::StderrOutput { line });
+            }));
+        }
+
         let client = ClaudeClient::new(options);
         let run_logger = RunLogger::new(&feature_dir);
 
@@ -713,20 +736,12 @@ impl Runner {
             connected: false,
             review_summary: ReviewSummary::default(),
             verification_summary: VerificationSummary::default(),
-            progress_tx: None,
+            progress_tx,
             metrics: MetricsTracker::default(),
             run_logger,
             git,
             gh,
         })
-    }
-
-    /// Sets a progress event sender for real-time status reporting.
-    ///
-    /// When set, the runner emits [`RunEvent`]s at phase transitions so
-    /// the caller can display live progress without polling.
-    pub fn set_progress_sender(&mut self, tx: UnboundedSender<RunEvent>) {
-        self.progress_tx = Some(tx);
     }
 
     /// Executes all remaining phases from the current checkpoint.
@@ -742,6 +757,7 @@ impl Runner {
     /// Returns `CoreError` if any phase fails after all retries.
     pub async fn execute(&mut self) -> Result<Vec<TaskResult>, CoreError> {
         // Connect to Claude
+        self.emit_event(RunEvent::Connecting);
         self.client
             .connect()
             .await
@@ -1377,10 +1393,28 @@ impl Runner {
 
         let mut resp = AgentResponse::default();
         let mut turn_count: u32 = 0;
+        let idle_timeout = Duration::from_secs(self.config.agent.idle_timeout_secs);
 
         {
             let mut stream = self.client.receive_response();
-            while let Some(result) = stream.next().await {
+            loop {
+                let result = match tokio::time::timeout(idle_timeout, stream.next()).await {
+                    Ok(Some(result)) => result,
+                    Ok(None) => break,
+                    Err(_) => {
+                        error!(
+                            idle_secs = self.config.agent.idle_timeout_secs,
+                            turns = turn_count,
+                            "Agent idle timeout — no response received",
+                        );
+                        return Err(CoreError::AgentError(format!(
+                            "Agent idle for {}s with no response — possible API issue. \
+                             Check network and API status. \
+                             Adjust `agent.idle_timeout_secs` in config to change.",
+                            self.config.agent.idle_timeout_secs,
+                        )));
+                    }
+                };
                 let msg = result.map_err(|e| CoreError::AgentError(e.to_string()))?;
                 match msg {
                     Message::Assistant(assistant) => {
