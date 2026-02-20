@@ -468,6 +468,37 @@ pub fn no_cleanable_worktrees() -> Vec<serde_json::Value> {
     )]
 }
 
+/// Builds a Block Kit thread parent message for a plan session.
+///
+/// Displays the feature slug and current phase indicator (e.g.,
+/// "Discussing", "Approved", "Finalized", "Cancelled"). Updated
+/// in-place via `chat.update` as the session progresses.
+///
+/// # Examples
+///
+/// ```
+/// use coda_server::formatter;
+///
+/// let blocks = formatter::plan_thread_header("add-auth", "Discussing");
+/// assert_eq!(blocks.len(), 2);
+/// let header_text = blocks[0]["text"]["text"].as_str().unwrap_or("");
+/// assert!(header_text.contains("add-auth"));
+/// ```
+pub fn plan_thread_header(feature_slug: &str, phase: &str) -> Vec<serde_json::Value> {
+    let phase_icon = match phase {
+        "Discussing" => ":speech_balloon:",
+        "Approved" => ":white_check_mark:",
+        "Finalized" => ":rocket:",
+        "Cancelled" => ":no_entry_sign:",
+        _ => ":clipboard:",
+    };
+
+    vec![
+        header(&format!("Plan: `{feature_slug}`")),
+        section(&format!("{phase_icon} *Status:* {phase}")),
+    ]
+}
+
 /// Builds a Block Kit error message with a warning icon.
 ///
 /// # Examples
@@ -1041,5 +1072,51 @@ mod tests {
             ":white_check_mark:"
         );
         assert_eq!(display_status_icon(PhaseDisplayStatus::Failed), ":x:");
+    }
+
+    #[test]
+    fn test_should_build_plan_thread_header_discussing() {
+        let blocks = plan_thread_header("add-auth", "Discussing");
+        assert_eq!(blocks.len(), 2);
+
+        assert_eq!(blocks[0]["type"], "header");
+        let header_text = blocks[0]["text"]["text"].as_str().unwrap_or("");
+        assert!(header_text.contains("add-auth"));
+
+        let status_text = blocks[1]["text"]["text"].as_str().unwrap_or("");
+        assert!(status_text.contains(":speech_balloon:"));
+        assert!(status_text.contains("Discussing"));
+    }
+
+    #[test]
+    fn test_should_build_plan_thread_header_approved() {
+        let blocks = plan_thread_header("fix-login", "Approved");
+        let status_text = blocks[1]["text"]["text"].as_str().unwrap_or("");
+        assert!(status_text.contains(":white_check_mark:"));
+        assert!(status_text.contains("Approved"));
+    }
+
+    #[test]
+    fn test_should_build_plan_thread_header_finalized() {
+        let blocks = plan_thread_header("add-api", "Finalized");
+        let status_text = blocks[1]["text"]["text"].as_str().unwrap_or("");
+        assert!(status_text.contains(":rocket:"));
+        assert!(status_text.contains("Finalized"));
+    }
+
+    #[test]
+    fn test_should_build_plan_thread_header_cancelled() {
+        let blocks = plan_thread_header("add-api", "Cancelled");
+        let status_text = blocks[1]["text"]["text"].as_str().unwrap_or("");
+        assert!(status_text.contains(":no_entry_sign:"));
+        assert!(status_text.contains("Cancelled"));
+    }
+
+    #[test]
+    fn test_should_build_plan_thread_header_unknown_phase() {
+        let blocks = plan_thread_header("add-api", "CustomPhase");
+        let status_text = blocks[1]["text"]["text"].as_str().unwrap_or("");
+        assert!(status_text.contains(":clipboard:"));
+        assert!(status_text.contains("CustomPhase"));
     }
 }

@@ -171,7 +171,7 @@ pub async fn dispatch(state: Arc<AppState>, envelope: Envelope) {
             handlers::commands::handle_slash_command(state, envelope.payload).await;
         }
         EnvelopeType::EventsApi => {
-            debug!("Events API handler not yet implemented");
+            handlers::events::handle_event(state, envelope.payload).await;
         }
         EnvelopeType::Interactive => {
             handlers::interactions::handle_interaction(state, envelope.payload).await;

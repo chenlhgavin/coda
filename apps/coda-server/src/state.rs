@@ -4,6 +4,7 @@
 //! all handlers. [`BindingStore`] manages channel-to-repository mappings with
 //! concurrent access via [`DashMap`] and persistence to the config file.
 //! [`RunningTasks`] tracks in-flight init/run tasks to prevent duplicates.
+//! [`SessionManager`](crate::session::SessionManager) tracks active plan sessions.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -13,6 +14,7 @@ use tracing::{debug, info};
 
 use crate::config::ServerConfig;
 use crate::error::ServerError;
+use crate::session::SessionManager;
 use crate::slack_client::SlackClient;
 
 /// Shared application state, passed as `Arc<AppState>` to all handlers.
@@ -22,12 +24,14 @@ use crate::slack_client::SlackClient;
 /// ```
 /// use std::path::PathBuf;
 /// use coda_server::state::{AppState, BindingStore, RunningTasks};
+/// use coda_server::session::SessionManager;
 /// use coda_server::slack_client::SlackClient;
 ///
 /// let slack = SlackClient::new("xoxb-test".into());
 /// let bindings = BindingStore::new(PathBuf::from("/tmp/config.yml"), Default::default());
 /// let running = RunningTasks::new();
-/// let state = AppState::new(slack, bindings, running);
+/// let sessions = SessionManager::new();
+/// let state = AppState::new(slack, bindings, running, sessions);
 /// assert!(state.bindings().get("nonexistent").is_none());
 /// ```
 #[derive(Debug)]
@@ -35,16 +39,23 @@ pub struct AppState {
     slack: SlackClient,
     bindings: BindingStore,
     running_tasks: RunningTasks,
+    sessions: SessionManager,
 }
 
 impl AppState {
     /// Creates a new application state with the given Slack client, bindings,
-    /// and running task tracker.
-    pub fn new(slack: SlackClient, bindings: BindingStore, running_tasks: RunningTasks) -> Self {
+    /// running task tracker, and session manager.
+    pub fn new(
+        slack: SlackClient,
+        bindings: BindingStore,
+        running_tasks: RunningTasks,
+        sessions: SessionManager,
+    ) -> Self {
         Self {
             slack,
             bindings,
             running_tasks,
+            sessions,
         }
     }
 
@@ -61,6 +72,11 @@ impl AppState {
     /// Returns a reference to the running task tracker.
     pub fn running_tasks(&self) -> &RunningTasks {
         &self.running_tasks
+    }
+
+    /// Returns a reference to the plan session manager.
+    pub fn sessions(&self) -> &SessionManager {
+        &self.sessions
     }
 }
 
@@ -407,8 +423,10 @@ mod tests {
         let slack = SlackClient::new("xoxb-test".into());
         let bindings = BindingStore::new(PathBuf::from("/tmp/config.yml"), HashMap::new());
         let running = RunningTasks::new();
-        let state = AppState::new(slack, bindings, running);
+        let sessions = SessionManager::new();
+        let state = AppState::new(slack, bindings, running, sessions);
         assert!(state.bindings().is_empty());
+        assert!(state.sessions().is_empty());
     }
 
     #[test]

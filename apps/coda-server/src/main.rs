@@ -10,14 +10,22 @@ mod dispatch;
 mod error;
 mod formatter;
 mod handlers;
+pub mod session;
 mod slack_client;
 mod socket;
 mod state;
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::Context;
 use tracing::info;
+
+/// Interval between session reaper runs (5 minutes).
+const REAPER_INTERVAL: Duration = Duration::from_secs(300);
+
+/// Maximum idle time before a plan session is reaped (30 minutes).
+const MAX_SESSION_IDLE: Duration = Duration::from_secs(1800);
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -40,7 +48,13 @@ async fn main() -> anyhow::Result<()> {
     let slack = slack_client::SlackClient::new(server_config.slack.bot_token.clone());
     let bindings = state::BindingStore::new(config_path, server_config.bindings.clone());
     let running_tasks = state::RunningTasks::new();
-    let app_state = Arc::new(state::AppState::new(slack.clone(), bindings, running_tasks));
+    let sessions = session::SessionManager::new();
+    let app_state = Arc::new(state::AppState::new(
+        slack.clone(),
+        bindings,
+        running_tasks,
+        sessions,
+    ));
 
     info!(
         binding_count = server_config.bindings.len(),
@@ -73,6 +87,26 @@ async fn main() -> anyhow::Result<()> {
         }
 
         let _ = shutdown_tx.send(true);
+    });
+
+    // Start background session reaper
+    let reaper_state = Arc::clone(&app_state);
+    let mut reaper_shutdown = shutdown_rx.clone();
+    tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                _ = tokio::time::sleep(REAPER_INTERVAL) => {
+                    let reaped = reaper_state.sessions().reap_idle(MAX_SESSION_IDLE).await;
+                    if reaped > 0 {
+                        info!(reaped, "Session reaper completed");
+                    }
+                }
+                _ = reaper_shutdown.changed() => {
+                    info!("Session reaper shutting down");
+                    break;
+                }
+            }
+        }
     });
 
     // Connect and run Socket Mode event loop

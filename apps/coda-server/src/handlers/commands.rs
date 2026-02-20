@@ -217,6 +217,9 @@ pub async fn handle_slash_command(state: Arc<AppState>, payload: serde_json::Val
             commands::bind::handle_unbind(Arc::clone(&state), &cmd_payload).await
         }
         CodaCommand::Init => commands::init::handle_init(Arc::clone(&state), &cmd_payload).await,
+        CodaCommand::Plan { feature_slug } => {
+            commands::plan::handle_plan(Arc::clone(&state), &cmd_payload, &feature_slug).await
+        }
         CodaCommand::Run { feature_slug } => {
             commands::run::handle_run(Arc::clone(&state), &cmd_payload, &feature_slug).await
         }
@@ -226,16 +229,6 @@ pub async fn handle_slash_command(state: Arc<AppState>, payload: serde_json::Val
             commands::query::handle_status(Arc::clone(&state), &cmd_payload, &feature_slug).await
         }
         CodaCommand::Clean => commands::query::handle_clean(Arc::clone(&state), &cmd_payload).await,
-        // Plan not yet implemented (Phase 4)
-        CodaCommand::Plan { .. } => {
-            post_error(
-                &state,
-                &cmd_payload.channel_id,
-                "Command `plan` is not yet implemented. Coming soon!",
-            )
-            .await;
-            return;
-        }
     };
 
     if let Err(e) = result {

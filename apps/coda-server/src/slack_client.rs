@@ -2,10 +2,6 @@
 //!
 //! Wraps `reqwest::Client` with the bot token for authorization and provides
 //! typed methods for the Slack endpoints needed by this application.
-//!
-//! Some methods are defined here but only used in later development phases
-//! (e.g., `update_message` for live progress, `add_reaction` for thinking
-//! indicators). They are part of the planned interface from the design spec.
 
 use serde::Deserialize;
 use tracing::{debug, warn};
@@ -34,13 +30,9 @@ pub struct SlackClient {
 
 /// Successful response from `chat.postMessage`.
 #[derive(Debug, Clone)]
-#[allow(dead_code)] // Fields read in Phases 2-4 for message updates
 pub struct PostMessageResponse {
-    /// Message timestamp (used as message ID for updates).
+    /// Message timestamp (used as message ID for updates and thread parent).
     pub ts: String,
-
-    /// Channel where the message was posted.
-    pub channel: String,
 }
 
 /// Base URL for Slack Web API.
@@ -54,8 +46,6 @@ struct SlackApiResponse {
     error: Option<String>,
     #[serde(default)]
     ts: Option<String>,
-    #[serde(default)]
-    channel: Option<String>,
     #[serde(default)]
     url: Option<String>,
 }
@@ -89,9 +79,6 @@ impl SlackClient {
             ts: resp.ts.ok_or_else(|| {
                 ServerError::SlackApi("chat.postMessage response missing 'ts'".into())
             })?,
-            channel: resp.channel.ok_or_else(|| {
-                ServerError::SlackApi("chat.postMessage response missing 'channel'".into())
-            })?,
         })
     }
 
@@ -123,7 +110,6 @@ impl SlackClient {
     /// # Errors
     ///
     /// Returns `ServerError::SlackApi` if the API call fails or returns an error.
-    #[allow(dead_code)] // Used in Phase 4 for plan thread replies
     pub async fn post_thread_reply(
         &self,
         channel: &str,
@@ -147,7 +133,6 @@ impl SlackClient {
     /// # Errors
     ///
     /// Returns `ServerError::SlackApi` if the API call fails or returns an error.
-    #[allow(dead_code)] // Used in Phase 4 for long content uploads
     pub async fn upload_file(
         &self,
         channel: &str,
@@ -194,7 +179,6 @@ impl SlackClient {
     /// # Errors
     ///
     /// Returns `ServerError::SlackApi` if the API call fails or returns an error.
-    #[allow(dead_code)] // Used in Phase 4 for thinking indicator
     pub async fn add_reaction(
         &self,
         channel: &str,
@@ -216,7 +200,6 @@ impl SlackClient {
     /// # Errors
     ///
     /// Returns `ServerError::SlackApi` if the API call fails or returns an error.
-    #[allow(dead_code)] // Used in Phase 4 for thinking indicator
     pub async fn remove_reaction(
         &self,
         channel: &str,

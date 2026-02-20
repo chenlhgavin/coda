@@ -3,6 +3,7 @@
 //! Each submodule implements one or more related commands:
 //! - [`bind`] — `/coda bind` and `/coda unbind`
 //! - [`init`] — `/coda init` with live progress updates
+//! - [`plan`] — `/coda plan` with interactive Slack thread sessions
 //! - [`query`] — `/coda help`, `/coda list`, `/coda status`, `/coda clean`
 //! - [`run`] — `/coda run` with live progress updates
 //!
@@ -19,6 +20,7 @@ use crate::state::AppState;
 
 pub mod bind;
 pub mod init;
+pub mod plan;
 pub mod query;
 pub mod run;
 
