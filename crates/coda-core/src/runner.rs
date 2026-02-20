@@ -637,6 +637,26 @@ impl Runner {
             );
         }
 
+        // Replay events for phases that completed in a previous session so
+        // the UI shows them as completed with correct metrics and the
+        // summary accumulates their turns/cost.
+        for (phase_idx, phase) in self.state.phases[..start_phase].iter().enumerate() {
+            let name = phase_names[phase_idx].clone();
+
+            self.emit_event(RunEvent::PhaseStarting {
+                name: name.clone(),
+                index: phase_idx,
+                total: total_phases,
+            });
+            self.emit_event(RunEvent::PhaseCompleted {
+                name,
+                index: phase_idx,
+                duration: Duration::from_secs(phase.duration_secs),
+                turns: phase.turns,
+                cost_usd: phase.cost_usd,
+            });
+        }
+
         for phase_idx in start_phase..total_phases {
             let phase_name = self.state.phases[phase_idx].name.clone();
             let phase_kind = self.state.phases[phase_idx].kind.clone();

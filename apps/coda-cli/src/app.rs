@@ -104,7 +104,9 @@ impl App {
         // If engine completed but select! picked the UI branch first (both
         // were ready simultaneously), await the engine future now — it will
         // return immediately since it already completed.
-        if engine_result.is_none() {
+        // When the UI was cancelled (Ctrl+C), skip the await so the engine
+        // future is dropped and cancelled instead of blocking indefinitely.
+        if engine_result.is_none() && ui_result.is_ok() {
             engine_result = Some(engine_future.await);
         }
 
@@ -151,14 +153,14 @@ impl App {
                 println!();
                 Err(e.into())
             }
-            (_, Err(e)) => {
-                // UI error (e.g. user cancelled with Ctrl+C)
-                error!("UI error: {e}");
-                Err(e)
-            }
-            (None, _) => {
+            (None, Ok(_)) => {
                 // Should never happen: engine_future is awaited above as fallback
                 Err(anyhow::anyhow!("Engine did not complete"))
+            }
+            (_, Err(e)) => {
+                // UI error or user cancelled with Ctrl+C
+                error!("UI error: {e}");
+                Err(e)
             }
         }
     }
@@ -509,7 +511,9 @@ impl App {
         // If engine completed but select! picked the UI branch first (both
         // were ready simultaneously), await the engine future now — it will
         // return immediately since it already completed.
-        if engine_result.is_none() {
+        // When the UI was cancelled (Ctrl+C), skip the await so the engine
+        // future is dropped and cancelled instead of blocking indefinitely.
+        if engine_result.is_none() && ui_result.is_ok() {
             engine_result = Some(engine_future.await);
         }
 
@@ -545,14 +549,14 @@ impl App {
                 println!();
                 Err(e.into())
             }
-            (_, Err(e)) => {
-                // UI error (e.g. user cancelled)
-                error!("UI error: {e}");
-                Err(e)
-            }
-            (None, _) => {
+            (None, Ok(_)) => {
                 // Should never happen: engine_future is awaited above as fallback
                 Err(anyhow::anyhow!("Engine did not complete"))
+            }
+            (_, Err(e)) => {
+                // UI error or user cancelled with Ctrl+C
+                error!("UI error: {e}");
+                Err(e)
             }
         }
     }
