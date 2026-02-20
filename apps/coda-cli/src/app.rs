@@ -58,7 +58,7 @@ impl App {
     ///
     /// Returns an error if initialization fails (e.g., already initialized,
     /// agent SDK errors) or the user cancels with Ctrl+C.
-    pub async fn init(&self) -> Result<()> {
+    pub async fn init(&self, no_commit: bool) -> Result<()> {
         let project_root_display = self.engine.project_root().display().to_string();
 
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<InitEvent>();
