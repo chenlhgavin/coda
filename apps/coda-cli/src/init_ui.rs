@@ -17,9 +17,13 @@ use crossterm::{
 };
 use ratatui::{
     prelude::*,
-    widgets::{Block, BorderType, Borders, Paragraph, Wrap},
+    widgets::{
+        Block, BorderType, Borders, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState,
+        Wrap,
+    },
 };
 use tokio::sync::mpsc::UnboundedReceiver;
+use unicode_width::UnicodeWidthStr;
 
 use crate::fmt_utils::{format_duration, truncate_str};
 
@@ -108,6 +112,7 @@ pub struct InitUi {
     start_time: Instant,
     total_cost: f64,
     output_lines: Vec<String>,
+    scroll_offset: u16,
     finished: bool,
     success: bool,
     spinner_tick: usize,
@@ -135,6 +140,7 @@ impl InitUi {
                 start_time: Instant::now(),
                 total_cost: 0.0,
                 output_lines: Vec::new(),
+                scroll_offset: 0,
                 finished: false,
                 success: false,
                 spinner_tick: 0,
@@ -187,10 +193,25 @@ impl InitUi {
             while event::poll(Duration::ZERO)? {
                 if let Event::Key(key) = event::read()?
                     && key.kind == KeyEventKind::Press
-                    && key.code == KeyCode::Char('c')
-                    && key.modifiers.contains(KeyModifiers::CONTROL)
                 {
-                    return Err(anyhow::anyhow!("Cancelled by user"));
+                    match key.code {
+                        KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                            return Err(anyhow::anyhow!("Cancelled by user"));
+                        }
+                        KeyCode::Up => {
+                            self.scroll_offset = self.scroll_offset.saturating_add(1);
+                        }
+                        KeyCode::Down => {
+                            self.scroll_offset = self.scroll_offset.saturating_sub(1);
+                        }
+                        KeyCode::PageUp => {
+                            self.scroll_offset = self.scroll_offset.saturating_add(10);
+                        }
+                        KeyCode::PageDown => {
+                            self.scroll_offset = self.scroll_offset.saturating_sub(10);
+                        }
+                        _ => {}
+                    }
                 }
             }
 
@@ -224,6 +245,7 @@ impl InitUi {
             }
             InitEvent::StreamText { text } => {
                 append_stream_text(&mut self.output_lines, &text);
+                self.scroll_offset = 0;
             }
             InitEvent::PhaseCompleted {
                 index,
@@ -272,6 +294,7 @@ impl InitUi {
         let finished = self.finished;
         let success = self.success;
         let spinner_tick = self.spinner_tick;
+        let scroll_offset = self.scroll_offset;
         let output_lines = self.output_lines.clone();
 
         self.terminal.draw(|frame| {
@@ -297,7 +320,7 @@ impl InitUi {
             render_header(frame, chunks[0], &project_root, finished, success);
             render_pipeline(frame, chunks[1], &phases, spinner_tick);
             render_phase_list(frame, chunks[2], &phases, active_phase, spinner_tick);
-            render_output_panel(frame, chunks[3], &output_lines);
+            render_output_panel(frame, chunks[3], &output_lines, scroll_offset);
             render_summary(frame, chunks[4], start_time, total_cost);
             render_help_bar(frame, chunks[5], finished);
         })?;
@@ -465,12 +488,12 @@ fn render_phase_list(
     frame.render_widget(paragraph, inner);
 }
 
-/// Renders the AI streaming output panel.
+/// Renders the AI streaming output panel with scrollbar.
 ///
-/// Uses `Paragraph::scroll()` with a wrap-aware row offset to ensure
-/// the latest streamed text is always visible, even when long lines
-/// wrap to multiple visual rows.
-fn render_output_panel(frame: &mut Frame, area: Rect, output_lines: &[String]) {
+/// Uses `Paragraph::scroll()` with a wrap-aware row offset. When
+/// `scroll_offset` is 0 the view sticks to the bottom (latest text);
+/// pressing Up / PageUp increases the offset to scroll back.
+fn render_output_panel(frame: &mut Frame, area: Rect, output_lines: &[String], scroll_offset: u16) {
     let block = Block::default()
         .title(" Output ")
         .title_style(Style::default().fg(Color::White).bold())
@@ -480,28 +503,30 @@ fn render_output_panel(frame: &mut Frame, area: Rect, output_lines: &[String]) {
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    let visible_height = inner.height as usize;
-    let panel_width = inner.width as usize;
-
-    // Calculate total visual rows accounting for line wrapping.
-    // Each line occupies at least 1 row; longer lines wrap to ceil(chars / width).
-    let total_rows: usize = output_lines
-        .iter()
-        .map(|line| wrapped_line_count(line, panel_width))
-        .sum();
-
-    #[allow(clippy::cast_possible_truncation)]
-    let scroll_offset = total_rows.saturating_sub(visible_height) as u16;
-
     let lines: Vec<Line> = output_lines
         .iter()
         .map(|line| Line::from(Span::styled(line.clone(), Style::default().fg(Color::Gray))))
         .collect();
 
+    // Calculate total visual lines accounting for Unicode-aware wrapping.
+    let total_visual_lines: u16 = lines
+        .iter()
+        .map(|l| visual_line_count(l, inner.width))
+        .sum();
+    let visible_height = inner.height;
+    let max_scroll = total_visual_lines.saturating_sub(visible_height);
+    let effective_scroll = max_scroll.saturating_sub(scroll_offset);
+
     let paragraph = Paragraph::new(lines)
         .wrap(Wrap { trim: false })
-        .scroll((scroll_offset, 0));
+        .scroll((effective_scroll, 0));
     frame.render_widget(paragraph, inner);
+
+    // Render scrollbar
+    let mut scrollbar_state =
+        ScrollbarState::new(total_visual_lines as usize).position(effective_scroll as usize);
+    let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight);
+    frame.render_stateful_widget(scrollbar, area, &mut scrollbar_state);
 }
 
 /// Renders the summary bar with live elapsed time and cost.
@@ -542,16 +567,41 @@ fn render_help_bar(frame: &mut Frame, area: Rect, finished: bool) {
             Style::default().fg(Color::DarkGray),
         )])
     } else {
-        Line::from(vec![Span::styled(
-            " [Ctrl+C] Cancel",
-            Style::default().fg(Color::DarkGray),
-        )])
+        Line::from(vec![
+            Span::styled(" [Ctrl+C] Cancel", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                "  [↑↓] Scroll  [PgUp/PgDn] Page",
+                Style::default().fg(Color::DarkGray),
+            ),
+        ])
     };
     let paragraph = Paragraph::new(help);
     frame.render_widget(paragraph, area);
 }
 
 // ── Utility Functions ────────────────────────────────────────────────
+
+/// Calculates the number of visual (wrapped) lines a single [`Line`] occupies
+/// when rendered into the given `width`, using Unicode display widths so that
+/// CJK characters (2 columns each) are accounted for correctly.
+fn visual_line_count(line: &Line, width: u16) -> u16 {
+    if width == 0 {
+        return 1;
+    }
+    let line_width: u16 = line
+        .spans
+        .iter()
+        .map(|s| {
+            #[allow(clippy::cast_possible_truncation)]
+            let w = UnicodeWidthStr::width(s.content.as_ref()) as u16;
+            w
+        })
+        .sum();
+    if line_width == 0 {
+        return 1;
+    }
+    line_width.div_ceil(width)
+}
 
 /// Appends streaming text to the output buffer, splitting on newlines.
 ///
@@ -587,23 +637,6 @@ fn append_stream_text(buffer: &mut Vec<String>, text: &str) {
     if buffer.len() > OUTPUT_BUFFER_MAX_LINES {
         let overflow = buffer.len() - OUTPUT_BUFFER_MAX_LINES;
         buffer.drain(0..overflow);
-    }
-}
-
-/// Calculates the number of visual rows a line occupies when wrapped
-/// to the given panel width.
-///
-/// Returns at least 1 row per line. Uses character count as an
-/// approximation (accurate for monospace terminals with ASCII text).
-fn wrapped_line_count(line: &str, panel_width: usize) -> usize {
-    if panel_width == 0 {
-        return 1;
-    }
-    let char_count = line.chars().count();
-    if char_count == 0 {
-        1
-    } else {
-        char_count.div_ceil(panel_width)
     }
 }
 
@@ -679,34 +712,37 @@ mod tests {
     }
 
     #[test]
-    fn test_should_count_wrapped_lines_for_short_line() {
-        assert_eq!(wrapped_line_count("hello", 80), 1);
+    fn test_should_count_visual_lines_for_short_line() {
+        let line = Line::from("hello");
+        assert_eq!(visual_line_count(&line, 80), 1);
     }
 
     #[test]
-    fn test_should_count_wrapped_lines_for_long_line() {
+    fn test_should_count_visual_lines_for_long_line() {
         // 100 chars at width 80 = 2 visual rows
-        let long_line = "a".repeat(100);
-        assert_eq!(wrapped_line_count(&long_line, 80), 2);
+        let long_line = Line::from("a".repeat(100));
+        assert_eq!(visual_line_count(&long_line, 80), 2);
     }
 
     #[test]
-    fn test_should_count_wrapped_lines_for_empty_line() {
-        assert_eq!(wrapped_line_count("", 80), 1);
+    fn test_should_count_visual_lines_for_empty_line() {
+        let line = Line::from("");
+        assert_eq!(visual_line_count(&line, 80), 1);
     }
 
     #[test]
-    fn test_should_count_wrapped_lines_with_zero_width() {
-        assert_eq!(wrapped_line_count("hello", 0), 1);
+    fn test_should_count_visual_lines_with_zero_width() {
+        let line = Line::from("hello");
+        assert_eq!(visual_line_count(&line, 0), 1);
     }
 
     #[test]
-    fn test_should_count_wrapped_lines_exact_multiple() {
+    fn test_should_count_visual_lines_exact_multiple() {
         // Exactly 80 chars at width 80 = 1 visual row
-        let exact = "a".repeat(80);
-        assert_eq!(wrapped_line_count(&exact, 80), 1);
+        let exact = Line::from("a".repeat(80));
+        assert_eq!(visual_line_count(&exact, 80), 1);
         // 81 chars = 2 rows
-        let one_over = "a".repeat(81);
-        assert_eq!(wrapped_line_count(&one_over, 80), 2);
+        let one_over = Line::from("a".repeat(81));
+        assert_eq!(visual_line_count(&one_over, 80), 2);
     }
 }

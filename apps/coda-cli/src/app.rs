@@ -73,7 +73,7 @@ impl App {
 
         let mut ui = crate::init_ui::InitUi::new(&project_root_display)?;
 
-        let engine_future = self.engine.init(Some(tx));
+        let engine_future = self.engine.init(no_commit, Some(tx));
 
         tokio::pin!(engine_future);
 

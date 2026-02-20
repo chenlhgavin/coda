@@ -297,6 +297,7 @@ impl Engine {
     /// (`.coda/` exists), or `CoreError::AgentError` if agent calls fail.
     pub async fn init(
         &self,
+        no_commit: bool,
         progress_tx: Option<UnboundedSender<InitEvent>>,
     ) -> Result<(), CoreError> {
         // 1. Check if .coda/ already exists
@@ -351,8 +352,30 @@ impl Engine {
             return Err(e);
         }
 
+        // 5. Auto-commit init artifacts unless --no-commit
+        if !no_commit {
+            self.commit_init_artifacts()?;
+        }
+
         emit(&progress_tx, InitEvent::InitFinished { success: true });
         info!("Project initialized successfully");
+        Ok(())
+    }
+
+    /// Commits init artifacts (`.coda/`, `.coda.md`, `CLAUDE.md`, `.gitignore`)
+    /// to the current branch so that `coda plan` worktrees inherit them.
+    ///
+    /// # Errors
+    ///
+    /// Returns `CoreError::GitError` if git add or commit fails.
+    fn commit_init_artifacts(&self) -> Result<(), CoreError> {
+        let paths: &[&str] = &[".coda/", ".coda.md", "CLAUDE.md", ".gitignore"];
+        self.git.add(&self.project_root, paths)?;
+        if self.git.has_staged_changes(&self.project_root) {
+            self.git
+                .commit(&self.project_root, "chore: initialize CODA project")?;
+            info!("Auto-committed init artifacts");
+        }
         Ok(())
     }
 
