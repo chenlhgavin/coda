@@ -9,7 +9,7 @@ use std::time::Instant;
 
 use anyhow::Result;
 use coda_core::{Engine, InitEvent, RunEvent};
-use tracing::error;
+use tracing::{error, info};
 
 use crate::fmt_utils::{format_duration, truncate_str};
 use crate::ui::PlanUi;
@@ -157,10 +157,14 @@ impl App {
                 // Should never happen: engine_future is awaited above as fallback
                 Err(anyhow::anyhow!("Engine did not complete"))
             }
-            (_, Err(e)) => {
-                // UI error or user cancelled with Ctrl+C
-                error!("UI error: {e}");
-                Err(e)
+            (_, Err(_)) => {
+                // User cancelled with Ctrl+C — friendly exit
+                info!("Init cancelled by user");
+                println!();
+                println!("  CODA Init: cancelled");
+                println!("  Run `coda init` again to retry.");
+                println!();
+                Ok(())
             }
         }
     }
@@ -553,10 +557,14 @@ impl App {
                 // Should never happen: engine_future is awaited above as fallback
                 Err(anyhow::anyhow!("Engine did not complete"))
             }
-            (_, Err(e)) => {
-                // UI error or user cancelled with Ctrl+C
-                error!("UI error: {e}");
-                Err(e)
+            (_, Err(_)) => {
+                // User cancelled with Ctrl+C — friendly exit
+                info!("Run cancelled by user");
+                println!();
+                println!("  CODA Run: {feature_slug} — cancelled");
+                println!("  Progress has been saved. Run `coda run {feature_slug}` to resume.");
+                println!();
+                Ok(())
             }
         }
     }
