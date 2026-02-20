@@ -1,0 +1,100 @@
+feature:
+  slug: support-slack
+  created_at: 2026-02-20T11:13:42.321966Z
+  updated_at: 2026-02-20T13:12:45.987801Z
+status: completed
+current_phase: 6
+git:
+  worktree_path: .trees/support-slack
+  branch: feature/support-slack
+  base_branch: main
+phases:
+- name: server-foundation-socket-connection
+  kind: dev
+  status: completed
+  started_at: 2026-02-20T11:13:49.125137Z
+  completed_at: 2026-02-20T11:37:20.959287Z
+  turns: 87
+  cost_usd: 8.808408250000003
+  cost:
+    input_tokens: 8016
+    output_tokens: 85434
+  duration_secs: 1411
+  details: {}
+- name: synchronous-commands
+  kind: dev
+  status: completed
+  started_at: 2026-02-20T11:37:20.961437Z
+  completed_at: 2026-02-20T11:52:10.297301Z
+  turns: 56
+  cost_usd: 5.624961749999995
+  cost:
+    input_tokens: 0
+    output_tokens: 0
+  duration_secs: 889
+  details: {}
+- name: init-run-with-live-progress
+  kind: dev
+  status: completed
+  started_at: 2026-02-20T12:39:36.810202Z
+  completed_at: 2026-02-20T12:57:20.359799Z
+  turns: 96
+  cost_usd: 8.8983855
+  cost:
+    input_tokens: 76
+    output_tokens: 67506
+  duration_secs: 1063
+  details: {}
+- name: plan-interactive-thread
+  kind: dev
+  status: completed
+  started_at: 2026-02-20T12:58:20.173007Z
+  completed_at: 2026-02-20T13:12:14.316804Z
+  turns: 71
+  cost_usd: 6.180014
+  cost:
+    input_tokens: 484
+    output_tokens: 53715
+  duration_secs: 834
+  details: {}
+- name: review
+  kind: quality
+  status: completed
+  started_at: 2026-02-20T13:12:14.318276Z
+  completed_at: 2026-02-20T13:12:18.466009Z
+  turns: 1
+  cost_usd: 0.0
+  cost:
+    input_tokens: 0
+    output_tokens: 0
+  duration_secs: 4
+  details:
+    issues_found: 0
+    issues_resolved: 0
+    rounds: 1
+- name: verify
+  kind: quality
+  status: completed
+  started_at: 2026-02-20T13:12:18.467198Z
+  completed_at: 2026-02-20T13:12:45.987799Z
+  turns: 7
+  cost_usd: 0.0
+  cost:
+    input_tokens: 0
+    output_tokens: 0
+  duration_secs: 27
+  details:
+    attempts: 1
+    checks_passed: 0
+    checks_total: 1
+pr:
+  url: https://github.com/chenlhgavin/coda/pull/1
+  number: 1
+  title: 'feat(support-slack): feature implementation'
+total:
+  turns: 318
+  cost_usd: 29.5117695
+  cost:
+    input_tokens: 8576
+    output_tokens: 206655
+  duration_secs: 4228

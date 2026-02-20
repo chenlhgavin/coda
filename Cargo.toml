@@ -4,6 +4,7 @@ members = [
     "crates/coda-core",
     "crates/coda-pm",
     "apps/coda-cli",
+    "apps/coda-server",
 ]
 
 [workspace.package]
@@ -56,3 +57,10 @@ thiserror = "2.0"
 # Tracing
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# HTTP / WebSocket (used by coda-server)
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+tokio-tungstenite = { version = "0.24", default-features = false, features = ["connect", "rustls-tls-webpki-roots"] }
+
+# Concurrent data structures
+dashmap = "6.1"
