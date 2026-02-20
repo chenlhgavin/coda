@@ -27,7 +27,7 @@ pub struct Cli {
 pub enum Commands {
     /// Initialize current repository as a CODA project.
     Init {
-        /// Skip auto-commit of generated files (for manual review).
+        /// Skip auto-committing init artifacts (user must commit manually).
         #[arg(long)]
         no_commit: bool,
     },

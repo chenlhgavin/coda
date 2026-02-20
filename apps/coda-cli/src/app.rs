@@ -50,9 +50,10 @@ impl App {
     /// Runs the init flow with a live TUI showing streaming AI output,
     /// phase progress, elapsed time, and cost. Uses `tokio::select!` to
     /// run the engine and UI concurrently (same pattern as `run_tui`).
-    /// Runs the init flow (analyze repo + setup project) and prints a
-    /// success message. When `no_commit` is false (default), generated
-    /// files are auto-committed so that `coda plan` worktrees inherit them.
+    ///
+    /// Generated files are **not** auto-committed. The user must commit
+    /// them manually before running `coda plan`, which requires init
+    /// artifacts to be present on the base branch.
     ///
     /// # Errors
     ///
@@ -104,8 +105,8 @@ impl App {
         // If engine completed but select! picked the UI branch first (both
         // were ready simultaneously), await the engine future now — it will
         // return immediately since it already completed.
-        // When the UI was cancelled (Ctrl+C), skip the await so the engine
-        // future is dropped and cancelled instead of blocking indefinitely.
+        // Guard: skip if UI errored (e.g. Ctrl+C) to avoid blocking on the
+        // engine future while the user wants to cancel.
         if engine_result.is_none() && ui_result.is_ok() {
             engine_result = Some(engine_future.await);
         }
@@ -129,14 +130,13 @@ impl App {
                 println!("  Created .coda/ directory with config.yml");
                 println!("  Created .trees/ directory for worktrees");
                 println!("  Generated .coda.md repository overview");
+                println!();
                 if no_commit {
-                    println!();
-                    println!("  Files were NOT committed (--no-commit).");
-                    println!("  Commit manually before running `coda plan`:");
+                    println!("  Commit the init artifacts before running `coda plan`:");
                     println!("    git add .coda/ .coda.md CLAUDE.md .gitignore");
                     println!("    git commit -m \"chore: initialize CODA project\"");
                 } else {
-                    println!("  Committed init artifacts to current branch");
+                    println!("  Init artifacts have been committed automatically.");
                 }
                 println!(
                     "\nNext step: run `coda plan <feature-slug>` to start planning a feature."
@@ -153,18 +153,18 @@ impl App {
                 println!();
                 Err(e.into())
             }
-            (None, Ok(_)) => {
-                // Should never happen: engine_future is awaited above as fallback
-                Err(anyhow::anyhow!("Engine did not complete"))
-            }
             (_, Err(_)) => {
-                // User cancelled with Ctrl+C — friendly exit
+                // UI cancelled (e.g. Ctrl+C) — show friendly message
                 info!("Init cancelled by user");
                 println!();
-                println!("  CODA Init: cancelled");
+                println!("  CODA Init: {project_root_display} — cancelled");
                 println!("  Run `coda init` again to retry.");
                 println!();
                 Ok(())
+            }
+            (None, _) => {
+                // Should never happen: engine_future is awaited above as fallback
+                Err(anyhow::anyhow!("Engine did not complete"))
             }
         }
     }
@@ -527,8 +527,8 @@ impl App {
         // If engine completed but select! picked the UI branch first (both
         // were ready simultaneously), await the engine future now — it will
         // return immediately since it already completed.
-        // When the UI was cancelled (Ctrl+C), skip the await so the engine
-        // future is dropped and cancelled instead of blocking indefinitely.
+        // Guard: skip if UI errored (e.g. Ctrl+C) to avoid blocking on the
+        // engine future while the user wants to cancel.
         if engine_result.is_none() && ui_result.is_ok() {
             engine_result = Some(engine_future.await);
         }
@@ -565,18 +565,18 @@ impl App {
                 println!();
                 Err(e.into())
             }
-            (None, Ok(_)) => {
-                // Should never happen: engine_future is awaited above as fallback
-                Err(anyhow::anyhow!("Engine did not complete"))
-            }
             (_, Err(_)) => {
-                // User cancelled with Ctrl+C — friendly exit
+                // UI cancelled (e.g. Ctrl+C) — show friendly message with resume hint
                 info!("Run cancelled by user");
                 println!();
                 println!("  CODA Run: {feature_slug} — cancelled");
                 println!("  Progress has been saved. Run `coda run {feature_slug}` to resume.");
                 println!();
                 Ok(())
+            }
+            (None, _) => {
+                // Should never happen: engine_future is awaited above as fallback
+                Err(anyhow::anyhow!("Engine did not complete"))
             }
         }
     }

@@ -16,7 +16,7 @@ use coda_pm::PromptManager;
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc::UnboundedSender;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info, trace, warn};
 
 use crate::CoreError;
 use crate::config::CodaConfig;
@@ -107,6 +107,43 @@ pub enum RunEvent {
     RunFinished {
         /// Whether the run completed successfully.
         success: bool,
+    },
+    /// Incremental text delta from the assistant (token-level streaming).
+    ///
+    /// Emitted when `include_partial_messages` is enabled and the SDK
+    /// delivers a `content_block_delta` with a `text_delta` payload.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// # use coda_core::RunEvent;
+    /// let event = RunEvent::AgentTextDelta {
+    ///     text: "Hello".to_string(),
+    /// };
+    /// ```
+    AgentTextDelta {
+        /// The text fragment to append to the streaming buffer.
+        text: String,
+    },
+    /// A tool invocation observed during agent execution.
+    ///
+    /// Emitted when a `Message::Assistant` contains a `ContentBlock::ToolUse`
+    /// block, providing visibility into which tools the agent is invoking.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// # use coda_core::RunEvent;
+    /// let event = RunEvent::ToolActivity {
+    ///     tool_name: "Bash".to_string(),
+    ///     summary: "cargo build".to_string(),
+    /// };
+    /// ```
+    ToolActivity {
+        /// Tool name (e.g., `"Bash"`, `"Write"`, `"Read"`, `"Glob"`, `"Grep"`).
+        tool_name: String,
+        /// Brief summary of the tool input (file path, command, pattern, etc.).
+        summary: String,
     },
 }
 
@@ -458,6 +495,9 @@ impl RunLogger {
 /// Maximum characters to include from prompt/response text in the log.
 const LOG_TEXT_LIMIT: usize = 50_000;
 
+/// Maximum characters for tool input summaries in streaming events.
+const TOOL_SUMMARY_MAX_LEN: usize = 60;
+
 /// Truncates text for log output at a safe UTF-8 boundary.
 fn truncate_for_log(text: &str, limit: usize) -> &str {
     if text.len() <= limit {
@@ -468,6 +508,116 @@ fn truncate_for_log(text: &str, limit: usize) -> &str {
             end -= 1;
         }
         &text[..end]
+    }
+}
+
+/// Truncates a string to the given maximum length, appending `…` if truncated.
+///
+/// Uses character boundaries to avoid splitting multi-byte UTF-8 sequences.
+///
+/// # Examples
+///
+/// ```
+/// # // This is a private function; doc-test is illustrative only.
+/// # fn truncate_str(s: &str, max_len: usize) -> String {
+/// #     if s.chars().count() <= max_len { s.to_string() }
+/// #     else { let t: String = s.chars().take(max_len.saturating_sub(1)).collect(); format!("{t}\u{2026}") }
+/// # }
+/// assert_eq!(truncate_str("hello", 10), "hello");
+/// assert_eq!(truncate_str("hello world!", 5), "hell…");
+/// ```
+fn truncate_str(s: &str, max_len: usize) -> String {
+    if s.chars().count() <= max_len {
+        s.to_string()
+    } else {
+        let truncated: String = s.chars().take(max_len.saturating_sub(1)).collect();
+        format!("{truncated}\u{2026}")
+    }
+}
+
+/// Extracts text delta content from a raw `StreamEvent.event` JSON value.
+///
+/// Parses `content_block_delta` events with a `text_delta` delta type.
+/// Returns `None` for all other event types.
+///
+/// # Examples
+///
+/// ```
+/// # use serde_json::json;
+/// # fn extract_text_delta(event: &serde_json::Value) -> Option<&str> {
+/// #     if event.get("type")?.as_str()? == "content_block_delta" {
+/// #         let delta = event.get("delta")?;
+/// #         if delta.get("type")?.as_str()? == "text_delta" {
+/// #             return delta.get("text")?.as_str();
+/// #         }
+/// #     }
+/// #     None
+/// # }
+/// let event = json!({
+///     "type": "content_block_delta",
+///     "delta": { "type": "text_delta", "text": "Hello" }
+/// });
+/// assert_eq!(extract_text_delta(&event), Some("Hello"));
+///
+/// let other = json!({"type": "message_start"});
+/// assert_eq!(extract_text_delta(&other), None);
+/// ```
+fn extract_text_delta(event: &serde_json::Value) -> Option<&str> {
+    if event.get("type")?.as_str()? == "content_block_delta" {
+        let delta = event.get("delta")?;
+        if delta.get("type")?.as_str()? == "text_delta" {
+            return delta.get("text")?.as_str();
+        }
+    }
+    None
+}
+
+/// Extracts a brief summary from a tool use input for UI display.
+///
+/// Returns a human-readable string like the file path for Write/Read,
+/// the command for Bash, or the pattern for Grep/Glob. Returns an empty
+/// string for unknown tools.
+///
+/// # Examples
+///
+/// ```
+/// # use serde_json::json;
+/// # fn summarize_tool_input(tool_name: &str, input: &serde_json::Value) -> String {
+/// #     match tool_name {
+/// #         "Bash" => input.get("command").and_then(|v| v.as_str()).map(|s| s.to_string()).unwrap_or_default(),
+/// #         "Write" | "Read" | "Edit" => input.get("file_path").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+/// #         _ => String::new(),
+/// #     }
+/// # }
+/// let input = json!({"command": "cargo build"});
+/// assert_eq!(summarize_tool_input("Bash", &input), "cargo build");
+///
+/// let input = json!({"file_path": "src/main.rs"});
+/// assert_eq!(summarize_tool_input("Write", &input), "src/main.rs");
+/// ```
+fn summarize_tool_input(tool_name: &str, input: &serde_json::Value) -> String {
+    match tool_name {
+        "Bash" => input
+            .get("command")
+            .and_then(|v| v.as_str())
+            .map(|s| truncate_str(s, TOOL_SUMMARY_MAX_LEN))
+            .unwrap_or_default(),
+        "Write" | "Read" | "Edit" => input
+            .get("file_path")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string(),
+        "Grep" => input
+            .get("pattern")
+            .and_then(|v| v.as_str())
+            .map(|s| truncate_str(s, TOOL_SUMMARY_MAX_LEN))
+            .unwrap_or_default(),
+        "Glob" => input
+            .get("pattern")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string(),
+        _ => String::new(),
     }
 }
 
@@ -500,7 +650,8 @@ impl Runner {
     /// Creates a new runner for the given feature.
     ///
     /// Loads the feature state from `state.yml` and configures a
-    /// `ClaudeClient` with the Coder profile.
+    /// `ClaudeClient` with the Coder profile. Enables partial message
+    /// streaming so the UI can display real-time text deltas.
     ///
     /// # Errors
     ///
@@ -537,13 +688,17 @@ impl Runner {
         let system_prompt = pm.render("run/system", minijinja::context!(coda_md => coda_md))?;
 
         // Create client with Coder profile, cwd = worktree
-        let options = AgentProfile::Coder.to_options(
+        let mut options = AgentProfile::Coder.to_options(
             &system_prompt,
             worktree_path.clone(),
             config.agent.max_turns,
             config.agent.max_budget_usd,
             &config.agent.model,
         );
+
+        // Enable partial messages so the SDK emits StreamEvent messages
+        // containing token-level text deltas for real-time UI streaming.
+        options.include_partial_messages = true;
 
         let client = ClaudeClient::new(options);
         let run_logger = RunLogger::new(&feature_dir);
@@ -647,7 +802,6 @@ impl Runner {
         // summary accumulates their turns/cost.
         for (phase_idx, phase) in self.state.phases[..start_phase].iter().enumerate() {
             let name = phase_names[phase_idx].clone();
-
             self.emit_event(RunEvent::PhaseStarting {
                 name: name.clone(),
                 index: phase_idx,
@@ -766,7 +920,7 @@ impl Runner {
         // Commit and push final state (PR info, status, log) so the PR
         // branch includes all execution metadata.
         self.commit_coda_state().await?;
-        let branch = &self.state.git.branch.clone();
+        let branch = &self.state.git.branch;
         self.git.push(&self.worktree_path, branch)?;
 
         self.emit_event(RunEvent::RunFinished {
@@ -1212,6 +1366,10 @@ impl Runner {
     /// stdout from `gh pr create`) so callers can search all output for
     /// expected patterns.
     ///
+    /// When `include_partial_messages` is enabled, also emits
+    /// [`RunEvent::AgentTextDelta`] for streaming text deltas and
+    /// [`RunEvent::ToolActivity`] for tool invocations observed in the stream.
+    ///
     /// # Errors
     ///
     /// Returns `CoreError::AgentError` if the agent returns an empty response
@@ -1240,6 +1398,18 @@ impl Runner {
                                 ContentBlock::Text(text) => {
                                     resp.text.push_str(&text.text);
                                 }
+                                ContentBlock::ToolUse(tu) => {
+                                    let summary = summarize_tool_input(&tu.name, &tu.input);
+                                    trace!(
+                                        tool = %tu.name,
+                                        summary = %summary,
+                                        "Tool invocation observed",
+                                    );
+                                    self.emit_event(RunEvent::ToolActivity {
+                                        tool_name: tu.name.clone(),
+                                        summary,
+                                    });
+                                }
                                 ContentBlock::ToolResult(tr) => {
                                     collect_tool_result_text(
                                         tr.content.as_ref(),
@@ -1262,6 +1432,13 @@ impl Runner {
                             }
                         }
                     }
+                    Message::StreamEvent(event) => {
+                        if let Some(text) = extract_text_delta(&event.event) {
+                            self.emit_event(RunEvent::AgentTextDelta {
+                                text: text.to_string(),
+                            });
+                        }
+                    }
                     Message::Result(r) => {
                         resp.result = Some(r);
                         break;
@@ -1273,6 +1450,9 @@ impl Runner {
 
         if resp.text.is_empty() && resp.tool_output.is_empty() {
             // Check if the empty response is due to budget exhaustion.
+            // The SDK enforces the budget via max_budget_usd in options,
+            // but its error is opaque. Provide a clear, actionable
+            // diagnostic when the cost meets or exceeds the configured limit.
             let budget_limit = self.config.agent.max_budget_usd;
             if let Some(spent) = resp.result.as_ref().and_then(|r| r.total_cost_usd)
                 && spent >= budget_limit
@@ -1510,10 +1690,6 @@ fn collect_tool_result_text(content: Option<&ToolResultContent>, buf: &mut Strin
     }
 }
 
-/// Runs an external command and returns its stdout, checking the exit status.
-///
-/// Finds the `.coda/<id>-<slug>` directory for a feature by its slug.
-///
 /// Finds the feature's `.coda/<slug>/` directory inside its worktree.
 ///
 /// Scans `.trees/` for a worktree matching the slug, then returns
@@ -1729,5 +1905,140 @@ mod tests {
             result: None,
         };
         assert_eq!(resp_no_tool.all_text(), "only text");
+    }
+
+    #[test]
+    fn test_should_extract_text_delta_from_content_block_delta() {
+        let event = serde_json::json!({
+            "type": "content_block_delta",
+            "delta": {
+                "type": "text_delta",
+                "text": "Hello, world!"
+            }
+        });
+        assert_eq!(extract_text_delta(&event), Some("Hello, world!"));
+    }
+
+    #[test]
+    fn test_should_return_none_for_non_text_delta() {
+        // input_json_delta type (not text_delta)
+        let event = serde_json::json!({
+            "type": "content_block_delta",
+            "delta": {
+                "type": "input_json_delta",
+                "partial_json": "{\"key\":"
+            }
+        });
+        assert_eq!(extract_text_delta(&event), None);
+    }
+
+    #[test]
+    fn test_should_return_none_for_non_delta_event() {
+        let event = serde_json::json!({
+            "type": "message_start",
+            "message": {}
+        });
+        assert_eq!(extract_text_delta(&event), None);
+    }
+
+    #[test]
+    fn test_should_return_none_for_empty_event() {
+        let event = serde_json::json!({});
+        assert_eq!(extract_text_delta(&event), None);
+    }
+
+    #[test]
+    fn test_should_return_none_for_missing_text_field() {
+        let event = serde_json::json!({
+            "type": "content_block_delta",
+            "delta": {
+                "type": "text_delta"
+            }
+        });
+        assert_eq!(extract_text_delta(&event), None);
+    }
+
+    #[test]
+    fn test_should_summarize_bash_command() {
+        let input = serde_json::json!({"command": "cargo build --release"});
+        assert_eq!(
+            summarize_tool_input("Bash", &input),
+            "cargo build --release"
+        );
+    }
+
+    #[test]
+    fn test_should_truncate_long_bash_command() {
+        let long_cmd = "a".repeat(100);
+        let input = serde_json::json!({"command": long_cmd});
+        let summary = summarize_tool_input("Bash", &input);
+        assert!(summary.len() <= TOOL_SUMMARY_MAX_LEN + 3); // +3 for the `…` UTF-8 bytes
+        assert!(summary.ends_with('\u{2026}'));
+    }
+
+    #[test]
+    fn test_should_summarize_write_file_path() {
+        let input = serde_json::json!({"file_path": "/src/main.rs", "content": "fn main() {}"});
+        assert_eq!(summarize_tool_input("Write", &input), "/src/main.rs");
+    }
+
+    #[test]
+    fn test_should_summarize_read_file_path() {
+        let input = serde_json::json!({"file_path": "/src/lib.rs"});
+        assert_eq!(summarize_tool_input("Read", &input), "/src/lib.rs");
+    }
+
+    #[test]
+    fn test_should_summarize_edit_file_path() {
+        let input = serde_json::json!({"file_path": "/src/handler.rs"});
+        assert_eq!(summarize_tool_input("Edit", &input), "/src/handler.rs");
+    }
+
+    #[test]
+    fn test_should_summarize_grep_pattern() {
+        let input = serde_json::json!({"pattern": "fn main", "path": "/src"});
+        assert_eq!(summarize_tool_input("Grep", &input), "fn main");
+    }
+
+    #[test]
+    fn test_should_summarize_glob_pattern() {
+        let input = serde_json::json!({"pattern": "**/*.rs"});
+        assert_eq!(summarize_tool_input("Glob", &input), "**/*.rs");
+    }
+
+    #[test]
+    fn test_should_return_empty_for_unknown_tool() {
+        let input = serde_json::json!({"something": "value"});
+        assert_eq!(summarize_tool_input("UnknownTool", &input), "");
+    }
+
+    #[test]
+    fn test_should_return_empty_when_expected_field_missing() {
+        let input = serde_json::json!({"other": "value"});
+        assert_eq!(summarize_tool_input("Bash", &input), "");
+        assert_eq!(summarize_tool_input("Write", &input), "");
+        assert_eq!(summarize_tool_input("Grep", &input), "");
+        assert_eq!(summarize_tool_input("Glob", &input), "");
+    }
+
+    #[test]
+    fn test_should_truncate_short_string_unchanged() {
+        assert_eq!(truncate_str("hello", 10), "hello");
+    }
+
+    #[test]
+    fn test_should_truncate_long_string_with_ellipsis() {
+        let result = truncate_str("hello world!", 5);
+        assert_eq!(result, "hell\u{2026}");
+    }
+
+    #[test]
+    fn test_should_handle_empty_string_truncation() {
+        assert_eq!(truncate_str("", 10), "");
+    }
+
+    #[test]
+    fn test_should_handle_exact_length_truncation() {
+        assert_eq!(truncate_str("hello", 5), "hello");
     }
 }
