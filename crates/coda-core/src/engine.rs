@@ -287,9 +287,9 @@ impl Engine {
     /// progress display. When `None`, the function behaves silently (useful
     /// for testing or CI).
     ///
-    /// When `no_commit` is `false` (default), the generated files are
-    /// automatically committed so that subsequent `coda plan` worktrees
-    /// inherit them. Pass `true` to skip the commit (e.g. for review).
+    /// The generated files are **not** auto-committed. The caller must
+    /// commit them before running `coda plan`, which requires init
+    /// artifacts to be present on the base branch.
     ///
     /// # Errors
     ///

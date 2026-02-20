@@ -9,7 +9,7 @@ use std::time::Instant;
 
 use anyhow::Result;
 use coda_core::{Engine, InitEvent, RunEvent};
-use tracing::error;
+use tracing::{error, info};
 
 use crate::fmt_utils::{format_duration, truncate_str};
 use crate::ui::PlanUi;
@@ -50,15 +50,16 @@ impl App {
     /// Runs the init flow with a live TUI showing streaming AI output,
     /// phase progress, elapsed time, and cost. Uses `tokio::select!` to
     /// run the engine and UI concurrently (same pattern as `run_tui`).
-    /// Runs the init flow (analyze repo + setup project) and prints a
-    /// success message. When `no_commit` is false (default), generated
-    /// files are auto-committed so that `coda plan` worktrees inherit them.
+    ///
+    /// Generated files are **not** auto-committed. The user must commit
+    /// them manually before running `coda plan`, which requires init
+    /// artifacts to be present on the base branch.
     ///
     /// # Errors
     ///
     /// Returns an error if initialization fails (e.g., already initialized,
     /// agent SDK errors) or the user cancels with Ctrl+C.
-    pub async fn init(&self, no_commit: bool) -> Result<()> {
+    pub async fn init(&self) -> Result<()> {
         // Pre-flight: fail fast before launching TUI
         let project_root = self.engine.project_root();
         if project_root.join(".coda").exists() {
@@ -104,7 +105,9 @@ impl App {
         // If engine completed but select! picked the UI branch first (both
         // were ready simultaneously), await the engine future now — it will
         // return immediately since it already completed.
-        if engine_result.is_none() {
+        // Guard: skip if UI errored (e.g. Ctrl+C) to avoid blocking on the
+        // engine future while the user wants to cancel.
+        if engine_result.is_none() && ui_result.is_ok() {
             engine_result = Some(engine_future.await);
         }
 
@@ -127,15 +130,10 @@ impl App {
                 println!("  Created .coda/ directory with config.yml");
                 println!("  Created .trees/ directory for worktrees");
                 println!("  Generated .coda.md repository overview");
-                if no_commit {
-                    println!();
-                    println!("  Files were NOT committed (--no-commit).");
-                    println!("  Commit manually before running `coda plan`:");
-                    println!("    git add .coda/ .coda.md CLAUDE.md .gitignore");
-                    println!("    git commit -m \"chore: initialize CODA project\"");
-                } else {
-                    println!("  Committed init artifacts to current branch");
-                }
+                println!();
+                println!("  Commit the init artifacts before running `coda plan`:");
+                println!("    git add .coda/ .coda.md CLAUDE.md .gitignore");
+                println!("    git commit -m \"chore: initialize CODA project\"");
                 println!(
                     "\nNext step: run `coda plan <feature-slug>` to start planning a feature."
                 );
@@ -151,10 +149,12 @@ impl App {
                 println!();
                 Err(e.into())
             }
-            (_, Err(e)) => {
-                // UI error (e.g. user cancelled with Ctrl+C)
-                error!("UI error: {e}");
-                Err(e)
+            (_, Err(_)) => {
+                // UI cancelled (e.g. Ctrl+C) — show friendly message
+                info!("Init cancelled by user");
+                println!();
+                println!("  CODA Init: {project_root_display} — cancelled");
+                Ok(())
             }
             (None, _) => {
                 // Should never happen: engine_future is awaited above as fallback
@@ -509,7 +509,9 @@ impl App {
         // If engine completed but select! picked the UI branch first (both
         // were ready simultaneously), await the engine future now — it will
         // return immediately since it already completed.
-        if engine_result.is_none() {
+        // Guard: skip if UI errored (e.g. Ctrl+C) to avoid blocking on the
+        // engine future while the user wants to cancel.
+        if engine_result.is_none() && ui_result.is_ok() {
             engine_result = Some(engine_future.await);
         }
 
@@ -545,10 +547,13 @@ impl App {
                 println!();
                 Err(e.into())
             }
-            (_, Err(e)) => {
-                // UI error (e.g. user cancelled)
-                error!("UI error: {e}");
-                Err(e)
+            (_, Err(_)) => {
+                // UI cancelled (e.g. Ctrl+C) — show friendly message with resume hint
+                info!("Run cancelled by user");
+                println!();
+                println!("  CODA Run: {feature_slug} — cancelled");
+                println!("  Progress has been saved. Run `coda run {feature_slug}` to resume.");
+                Ok(())
             }
             (None, _) => {
                 // Should never happen: engine_future is awaited above as fallback

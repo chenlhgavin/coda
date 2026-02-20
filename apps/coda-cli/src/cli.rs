@@ -26,11 +26,7 @@ pub struct Cli {
 #[derive(Subcommand)]
 pub enum Commands {
     /// Initialize current repository as a CODA project.
-    Init {
-        /// Skip auto-commit of generated files (for manual review).
-        #[arg(long)]
-        no_commit: bool,
-    },
+    Init,
 
     /// Interactive feature planning.
     Plan {
@@ -79,7 +75,7 @@ impl Cli {
         let app = App::new().await?;
 
         match self.command {
-            Commands::Init { no_commit } => app.init(no_commit).await,
+            Commands::Init => app.init().await,
             Commands::Plan { feature_slug } => app.plan(&feature_slug).await,
             Commands::Run {
                 feature_slug,

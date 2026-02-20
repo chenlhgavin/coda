@@ -1,0 +1,100 @@
+feature:
+  slug: optimize-run
+  created_at: 2026-02-20T02:30:09.311686Z
+  updated_at: 2026-02-20T04:58:25.844717Z
+status: completed
+current_phase: 6
+git:
+  worktree_path: .trees/optimize-run
+  branch: feature/optimize-run
+  base_branch: main
+phases:
+- name: extend-runevent-and-emit-streaming-events-from-runner
+  kind: dev
+  status: completed
+  started_at: 2026-02-20T02:30:19.936416Z
+  completed_at: 2026-02-20T02:39:05.030530Z
+  turns: 38
+  cost_usd: 2.6077607499999984
+  cost:
+    input_tokens: 8482
+    output_tokens: 32129
+  duration_secs: 525
+  details: {}
+- name: rework-runui-layout-to-split-panel
+  kind: dev
+  status: completed
+  started_at: 2026-02-20T02:39:05.030857Z
+  completed_at: 2026-02-20T02:47:00.312873Z
+  turns: 19
+  cost_usd: 2.9802277500000014
+  cost:
+    input_tokens: 0
+    output_tokens: 0
+  duration_secs: 475
+  details: {}
+- name: implement-streaming-buffer-and-scroll-behavior
+  kind: dev
+  status: completed
+  started_at: 2026-02-20T02:47:00.313594Z
+  completed_at: 2026-02-20T02:53:41.082091Z
+  turns: 24
+  cost_usd: 2.360934500000001
+  cost:
+    input_tokens: 35
+    output_tokens: 0
+  duration_secs: 400
+  details: {}
+- name: polish-and-edge-cases
+  kind: dev
+  status: completed
+  started_at: 2026-02-20T02:53:41.082486Z
+  completed_at: 2026-02-20T02:58:35.817395Z
+  turns: 12
+  cost_usd: 1.3931740000000037
+  cost:
+    input_tokens: 0
+    output_tokens: 0
+  duration_secs: 294
+  details: {}
+- name: review
+  kind: quality
+  status: completed
+  started_at: 2026-02-20T04:10:06.891530Z
+  completed_at: 2026-02-20T04:43:27.999046Z
+  turns: 62
+  cost_usd: 9.636321
+  cost:
+    input_tokens: 22
+    output_tokens: 87233
+  duration_secs: 2001
+  details:
+    issues_found: 5
+    issues_resolved: 5
+    rounds: 2
+- name: verify
+  kind: quality
+  status: completed
+  started_at: 2026-02-20T04:43:28.001235Z
+  completed_at: 2026-02-20T04:58:25.844717Z
+  turns: 125
+  cost_usd: 6.830537999999988
+  cost:
+    input_tokens: 90
+    output_tokens: 28976
+  duration_secs: 897
+  details:
+    attempts: 40
+    checks_passed: 40
+    checks_total: 40
+pr:
+  url: https://github.com/lehuagavin/coda/pull/8
+  number: 8
+  title: 'feat(optimize-run): feature implementation'
+total:
+  turns: 280
+  cost_usd: 25.808955999999995
+  cost:
+    input_tokens: 8629
+    output_tokens: 148338
+  duration_secs: 4592

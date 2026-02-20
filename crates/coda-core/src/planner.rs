@@ -375,7 +375,7 @@ impl PlanSession {
         // 4. Initial commit so planning artifacts are version-controlled
         self.git.add(&worktree_abs, &[".coda/"])?;
         if self.git.has_staged_changes(&worktree_abs) {
-            self.git.commit(
+            self.git.commit_internal(
                 &worktree_abs,
                 &format!("feat({slug}): initialize planning artifacts"),
             )?;

@@ -69,15 +69,29 @@ pub trait GitOps: Send + Sync {
 
     /// Creates a commit with the given message, skipping pre-commit hooks.
     ///
-    /// Equivalent to `git commit --no-verify -m <message>` run inside `cwd`.
-    /// Uses `--no-verify` because all callers are CODA-internal automation
-    /// commits (init artifacts, planning artifacts, state updates) that
-    /// should not trigger user-configured hooks.
+    /// Equivalent to `git commit -m <message>` run inside `cwd`.
+    /// Respects user-configured pre-commit hooks.
     ///
     /// # Errors
     ///
     /// Returns `CoreError::GitError` if the command fails.
     fn commit(&self, cwd: &Path, message: &str) -> Result<(), CoreError>;
+
+    /// Creates a commit with the given message, skipping pre-commit hooks.
+    ///
+    /// Equivalent to `git commit --no-verify -m <message>` run inside `cwd`.
+    /// Intended for CODA-internal automation commits (state updates, planning
+    /// artifacts) that should not trigger user-configured hooks.
+    ///
+    /// The default implementation delegates to [`commit`](GitOps::commit).
+    /// [`DefaultGitOps`] overrides this to pass `--no-verify`.
+    ///
+    /// # Errors
+    ///
+    /// Returns `CoreError::GitError` if the command fails.
+    fn commit_internal(&self, cwd: &Path, message: &str) -> Result<(), CoreError> {
+        self.commit(cwd, message)
+    }
 
     /// Returns the diff between `base` and HEAD.
     ///
@@ -182,6 +196,11 @@ impl GitOps for DefaultGitOps {
     }
 
     fn commit(&self, cwd: &Path, message: &str) -> Result<(), CoreError> {
+        run_git(cwd, &["commit", "--no-verify", "-m", message])?;
+        Ok(())
+    }
+
+    fn commit_internal(&self, cwd: &Path, message: &str) -> Result<(), CoreError> {
         run_git(cwd, &["commit", "--no-verify", "-m", message])?;
         Ok(())
     }
