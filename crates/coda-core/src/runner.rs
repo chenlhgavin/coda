@@ -1242,6 +1242,27 @@ impl Runner {
         }
 
         if resp.text.is_empty() && resp.tool_output.is_empty() {
+            // Check if the empty response is due to budget exhaustion.
+            let budget_limit = self.config.agent.max_budget_usd;
+            if let Some(spent) = resp.result.as_ref().and_then(|r| r.total_cost_usd)
+                && spent >= budget_limit
+            {
+                error!(
+                    spent = spent,
+                    limit = budget_limit,
+                    "Session budget exhausted",
+                );
+                if let Some(logger) = &mut self.run_logger {
+                    logger.log_message(&format!(
+                        "⚠ BUDGET EXHAUSTED: spent ${spent:.2} of ${budget_limit:.2}",
+                    ));
+                }
+                return Err(CoreError::BudgetExhausted {
+                    spent,
+                    limit: budget_limit,
+                });
+            }
+
             let reason = resp
                 .result
                 .as_ref()

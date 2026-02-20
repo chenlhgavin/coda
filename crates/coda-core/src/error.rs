@@ -19,6 +19,22 @@ pub enum CoreError {
     #[error("Agent error: {0}")]
     AgentError(String),
 
+    /// The session budget has been exhausted.
+    ///
+    /// Emitted when `total_cost_usd` reaches or exceeds the configured
+    /// `max_budget_usd`. The user should increase
+    /// `agent.max_budget_usd` in `.coda/config.yml`.
+    #[error(
+        "Budget exhausted: spent ${spent:.2} of ${limit:.2} budget. \
+         Increase `agent.max_budget_usd` in .coda/config.yml to allow more spending."
+    )]
+    BudgetExhausted {
+        /// Amount spent so far in USD.
+        spent: f64,
+        /// Configured budget limit in USD.
+        limit: f64,
+    },
+
     /// An error from the prompt template manager.
     #[error("Prompt error: {0}")]
     PromptError(#[from] coda_pm::PromptError),
