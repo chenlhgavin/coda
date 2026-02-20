@@ -59,7 +59,13 @@ impl App {
     /// Returns an error if initialization fails (e.g., already initialized,
     /// agent SDK errors) or the user cancels with Ctrl+C.
     pub async fn init(&self, no_commit: bool) -> Result<()> {
-        let project_root_display = self.engine.project_root().display().to_string();
+        // Pre-flight: fail fast before launching TUI
+        let project_root = self.engine.project_root();
+        if project_root.join(".coda").exists() {
+            anyhow::bail!("Project already initialized. .coda/ directory exists.");
+        }
+
+        let project_root_display = project_root.display().to_string();
 
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<InitEvent>();
 
