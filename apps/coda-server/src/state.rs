@@ -74,7 +74,7 @@ pub struct BindingStore {
     bindings: DashMap<String, PathBuf>,
 }
 
-#[allow(dead_code)] // `get`, `len`, `is_empty` used in Phases 2-4 for binding resolution
+#[allow(dead_code)] // `len`, `is_empty` used in Phases 3-4
 impl BindingStore {
     /// Creates a new binding store with the given config path and initial bindings.
     ///

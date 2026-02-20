@@ -1,12 +1,19 @@
-//! `/coda help` command handler.
+//! Query command handlers: `/coda help`, `/coda list`, `/coda status`, `/coda clean`.
 //!
-//! Displays available commands and usage information.
+//! These commands read state from `coda-core` and post formatted results
+//! back to Slack. None of them perform mutations beyond `clean`, which
+//! delegates to the interaction handler after user confirmation.
 
 use std::sync::Arc;
 
+use tracing::info;
+
 use crate::error::ServerError;
+use crate::formatter;
 use crate::handlers::commands::SlashCommandPayload;
 use crate::state::AppState;
+
+use super::resolve_engine;
 
 /// Help text listing all available commands.
 const HELP_TEXT: &str = "\
@@ -52,6 +59,108 @@ pub async fn handle_help(
         .slack()
         .post_message(&payload.channel_id, blocks)
         .await?;
+    Ok(())
+}
+
+/// Handles `/coda list`.
+///
+/// Resolves the channel binding, creates an Engine, lists all features,
+/// and posts a formatted feature list to the channel.
+///
+/// # Errors
+///
+/// Returns `ServerError` if the Slack API call fails or the Engine
+/// cannot be created.
+pub async fn handle_list(
+    state: Arc<AppState>,
+    payload: &SlashCommandPayload,
+) -> Result<(), ServerError> {
+    let channel = &payload.channel_id;
+
+    let Some((repo_path, engine)) = resolve_engine(state.as_ref(), channel).await? else {
+        return Ok(());
+    };
+
+    info!(channel, "Listing features");
+
+    let blocks = match engine.list_features() {
+        Ok(features) if features.is_empty() => formatter::empty_feature_list(&repo_path),
+        Ok(features) => formatter::feature_list(&repo_path, &features),
+        Err(e) => formatter::error(&e.to_string()),
+    };
+
+    state.slack().post_message(channel, blocks).await?;
+    Ok(())
+}
+
+/// Handles `/coda status <feature_slug>`.
+///
+/// Resolves the channel binding, creates an Engine, queries feature
+/// status, and posts a detailed status view to the channel.
+///
+/// # Errors
+///
+/// Returns `ServerError` if the Slack API call fails or the Engine
+/// cannot be created.
+pub async fn handle_status(
+    state: Arc<AppState>,
+    payload: &SlashCommandPayload,
+    feature_slug: &str,
+) -> Result<(), ServerError> {
+    let channel = &payload.channel_id;
+
+    let Some((_repo_path, engine)) = resolve_engine(state.as_ref(), channel).await? else {
+        return Ok(());
+    };
+
+    info!(channel, feature_slug, "Querying feature status");
+
+    let blocks = match engine.feature_status(feature_slug) {
+        Ok(feature_state) => formatter::feature_status(&feature_state),
+        Err(e) => formatter::error(&e.to_string()),
+    };
+
+    state.slack().post_message(channel, blocks).await?;
+    Ok(())
+}
+
+/// Handles `/coda clean`.
+///
+/// Resolves the channel binding, creates an Engine, scans for cleanable
+/// worktrees (merged/closed PRs), and posts candidates with a confirm
+/// button. The actual removal is handled by the interaction handler
+/// when the user clicks the button.
+///
+/// # Errors
+///
+/// Returns `ServerError` if the Slack API call fails or the Engine
+/// cannot be created.
+pub async fn handle_clean(
+    state: Arc<AppState>,
+    payload: &SlashCommandPayload,
+) -> Result<(), ServerError> {
+    let channel = &payload.channel_id;
+
+    let Some((_repo_path, engine)) = resolve_engine(state.as_ref(), channel).await? else {
+        return Ok(());
+    };
+
+    info!(channel, "Scanning for cleanable worktrees");
+
+    let blocks = match engine.scan_cleanable_worktrees() {
+        Ok(candidates) if candidates.is_empty() => formatter::no_cleanable_worktrees(),
+        Ok(candidates) => {
+            info!(
+                channel,
+                count = candidates.len(),
+                "Found cleanable worktrees"
+            );
+            formatter::clean_candidates(&candidates)
+        }
+        Err(e) => formatter::error(&e.to_string()),
+    };
+
+    state.slack().post_message(channel, blocks).await?;
     Ok(())
 }
 

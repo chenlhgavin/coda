@@ -8,6 +8,7 @@ mod commands;
 mod config;
 mod dispatch;
 mod error;
+mod formatter;
 mod handlers;
 mod slack_client;
 mod socket;

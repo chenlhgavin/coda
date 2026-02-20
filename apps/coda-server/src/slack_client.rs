@@ -100,7 +100,6 @@ impl SlackClient {
     /// # Errors
     ///
     /// Returns `ServerError::SlackApi` if the API call fails or returns an error.
-    #[allow(dead_code)] // Used in Phase 3 for live progress updates
     pub async fn update_message(
         &self,
         channel: &str,

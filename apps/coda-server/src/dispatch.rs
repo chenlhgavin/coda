@@ -174,7 +174,7 @@ pub async fn dispatch(state: Arc<AppState>, envelope: Envelope) {
             debug!("Events API handler not yet implemented");
         }
         EnvelopeType::Interactive => {
-            debug!("Interactive handler not yet implemented");
+            handlers::interactions::handle_interaction(state, envelope.payload).await;
         }
     }
 }

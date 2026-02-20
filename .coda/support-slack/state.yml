@@ -1,9 +1,9 @@
 feature:
   slug: support-slack
   created_at: 2026-02-20T11:13:42.321966Z
-  updated_at: 2026-02-20T11:13:42.321966Z
+  updated_at: 2026-02-20T11:37:20.959288Z
 status: in_progress
-current_phase: 0
+current_phase: 1
 git:
   worktree_path: .trees/support-slack
   branch: feature/support-slack
@@ -11,18 +11,20 @@ git:
 phases:
 - name: server-foundation-socket-connection
   kind: dev
-  status: running
+  status: completed
   started_at: 2026-02-20T11:13:49.125137Z
-  turns: 0
-  cost_usd: 0.0
+  completed_at: 2026-02-20T11:37:20.959287Z
+  turns: 87
+  cost_usd: 8.808408250000003
   cost:
-    input_tokens: 0
-    output_tokens: 0
-  duration_secs: 0
+    input_tokens: 8016
+    output_tokens: 85434
+  duration_secs: 1411
   details: {}
 - name: synchronous-commands
   kind: dev
-  status: pending
+  status: running
+  started_at: 2026-02-20T11:37:20.961437Z
   turns: 0
   cost_usd: 0.0
   cost:
