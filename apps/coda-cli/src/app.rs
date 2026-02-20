@@ -670,6 +670,15 @@ impl App {
                     RunEvent::StderrOutput { line } => {
                         eprintln!("  [stderr] {}", line.trim());
                     }
+                    RunEvent::IdleWarning {
+                        attempt,
+                        max_retries,
+                        idle_secs,
+                    } => {
+                        println!(
+                            "  [warn] Agent idle for {idle_secs}s — retry {attempt}/{max_retries}",
+                        );
+                    }
                     _ => {}
                 }
             }

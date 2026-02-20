@@ -427,6 +427,20 @@ impl RunUi {
                     self.scroll_offset = self.max_scroll_offset();
                 }
             }
+            RunEvent::IdleWarning {
+                attempt,
+                max_retries,
+                idle_secs,
+            } => {
+                tui_widgets::append_tool_activity(
+                    &mut self.content_lines,
+                    "[warn]",
+                    &format!("Agent idle for {idle_secs}s — retry {attempt}/{max_retries}",),
+                );
+                if self.auto_scroll {
+                    self.scroll_offset = self.max_scroll_offset();
+                }
+            }
             // Future variants added to the non_exhaustive enum
             _ => {}
         }

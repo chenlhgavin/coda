@@ -60,9 +60,14 @@ pub struct AgentConfig {
     /// Maximum agent conversation turns per phase.
     pub max_turns: u32,
 
-    /// Maximum seconds of silence (no messages from CLI) before aborting
-    /// a phase. Prevents indefinite hangs when the API is unresponsive.
+    /// Maximum seconds of silence (no messages from CLI) before counting
+    /// as one idle timeout. Prevents indefinite hangs when the API is
+    /// unresponsive.
     pub idle_timeout_secs: u64,
+
+    /// How many consecutive idle timeouts to tolerate before aborting.
+    /// Total maximum silence = `idle_timeout_secs * (idle_retries + 1)`.
+    pub idle_retries: u32,
 }
 
 /// Configuration for prompt template directories.
@@ -128,6 +133,7 @@ impl Default for AgentConfig {
             max_retries: 3,
             max_turns: 100,
             idle_timeout_secs: 300,
+            idle_retries: 2,
         }
     }
 }

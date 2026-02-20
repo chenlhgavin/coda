@@ -158,6 +158,18 @@ pub enum RunEvent {
         /// A single line of stderr output from the CLI.
         line: String,
     },
+    /// Emitted when an idle timeout fires but retries remain.
+    ///
+    /// Gives the user visibility that the agent has been silent and the
+    /// system is about to retry (or abort if retries are exhausted).
+    IdleWarning {
+        /// Which retry attempt this is (1-based).
+        attempt: u32,
+        /// Maximum retries before aborting.
+        max_retries: u32,
+        /// How many seconds of silence elapsed.
+        idle_secs: u64,
+    },
 }
 
 /// Progress tracking for a multi-phase feature development run.
@@ -1394,24 +1406,49 @@ impl Runner {
         let mut resp = AgentResponse::default();
         let mut turn_count: u32 = 0;
         let idle_timeout = Duration::from_secs(self.config.agent.idle_timeout_secs);
+        let max_idle_retries = self.config.agent.idle_retries;
+        let mut consecutive_timeouts: u32 = 0;
 
         {
             let mut stream = self.client.receive_response();
             loop {
                 let result = match tokio::time::timeout(idle_timeout, stream.next()).await {
-                    Ok(Some(result)) => result,
+                    Ok(Some(result)) => {
+                        // Reset counter on any successful message
+                        consecutive_timeouts = 0;
+                        result
+                    }
                     Ok(None) => break,
                     Err(_) => {
+                        consecutive_timeouts += 1;
+                        if consecutive_timeouts <= max_idle_retries {
+                            warn!(
+                                idle_secs = self.config.agent.idle_timeout_secs,
+                                attempt = consecutive_timeouts,
+                                max_retries = max_idle_retries,
+                                turns = turn_count,
+                                "Agent idle timeout — retrying",
+                            );
+                            self.emit_event(RunEvent::IdleWarning {
+                                attempt: consecutive_timeouts,
+                                max_retries: max_idle_retries,
+                                idle_secs: self.config.agent.idle_timeout_secs,
+                            });
+                            continue;
+                        }
+                        let total_secs =
+                            self.config.agent.idle_timeout_secs * u64::from(max_idle_retries + 1);
                         error!(
-                            idle_secs = self.config.agent.idle_timeout_secs,
+                            total_idle_secs = total_secs,
                             turns = turn_count,
-                            "Agent idle timeout — no response received",
+                            "Agent idle timeout — all retries exhausted",
                         );
                         return Err(CoreError::AgentError(format!(
-                            "Agent idle for {}s with no response — possible API issue. \
+                            "Agent idle for {total_secs}s with no response \
+                             ({} retries exhausted) — possible API issue. \
                              Check network and API status. \
-                             Adjust `agent.idle_timeout_secs` in config to change.",
-                            self.config.agent.idle_timeout_secs,
+                             Adjust `agent.idle_timeout_secs` / `agent.idle_retries` in config.",
+                            max_idle_retries,
                         )));
                     }
                 };
