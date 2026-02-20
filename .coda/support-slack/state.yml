@@ -1,0 +1,78 @@
+feature:
+  slug: support-slack
+  created_at: 2026-02-20T11:13:42.321966Z
+  updated_at: 2026-02-20T11:13:42.321966Z
+status: planned
+current_phase: 0
+git:
+  worktree_path: .trees/support-slack
+  branch: feature/support-slack
+  base_branch: main
+phases:
+- name: server-foundation-socket-connection
+  kind: dev
+  status: pending
+  turns: 0
+  cost_usd: 0.0
+  cost:
+    input_tokens: 0
+    output_tokens: 0
+  duration_secs: 0
+  details: {}
+- name: synchronous-commands
+  kind: dev
+  status: pending
+  turns: 0
+  cost_usd: 0.0
+  cost:
+    input_tokens: 0
+    output_tokens: 0
+  duration_secs: 0
+  details: {}
+- name: init-run-with-live-progress
+  kind: dev
+  status: pending
+  turns: 0
+  cost_usd: 0.0
+  cost:
+    input_tokens: 0
+    output_tokens: 0
+  duration_secs: 0
+  details: {}
+- name: plan-interactive-thread
+  kind: dev
+  status: pending
+  turns: 0
+  cost_usd: 0.0
+  cost:
+    input_tokens: 0
+    output_tokens: 0
+  duration_secs: 0
+  details: {}
+- name: review
+  kind: quality
+  status: pending
+  turns: 0
+  cost_usd: 0.0
+  cost:
+    input_tokens: 0
+    output_tokens: 0
+  duration_secs: 0
+  details: {}
+- name: verify
+  kind: quality
+  status: pending
+  turns: 0
+  cost_usd: 0.0
+  cost:
+    input_tokens: 0
+    output_tokens: 0
+  duration_secs: 0
+  details: {}
+total:
+  turns: 22
+  cost_usd: 11.6170785
+  cost:
+    input_tokens: 0
+    output_tokens: 0
+  duration_secs: 0
