@@ -67,9 +67,12 @@ pub trait GitOps: Send + Sync {
     /// Equivalent to `git diff --cached --quiet` (returns `true` when dirty).
     fn has_staged_changes(&self, cwd: &Path) -> bool;
 
-    /// Creates a commit with the given message.
+    /// Creates a commit with the given message, skipping pre-commit hooks.
     ///
-    /// Equivalent to `git commit -m <message>` run inside `cwd`.
+    /// Equivalent to `git commit --no-verify -m <message>` run inside `cwd`.
+    /// Uses `--no-verify` because all callers are CODA-internal automation
+    /// commits (init artifacts, planning artifacts, state updates) that
+    /// should not trigger user-configured hooks.
     ///
     /// # Errors
     ///
@@ -179,7 +182,7 @@ impl GitOps for DefaultGitOps {
     }
 
     fn commit(&self, cwd: &Path, message: &str) -> Result<(), CoreError> {
-        run_git(cwd, &["commit", "-m", message])?;
+        run_git(cwd, &["commit", "--no-verify", "-m", message])?;
         Ok(())
     }
 
