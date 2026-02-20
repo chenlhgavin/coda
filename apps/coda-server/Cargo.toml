@@ -1,0 +1,33 @@
+[package]
+name = "coda-server"
+description = "Slack Socket Mode server for CODA — triggers AI-driven workflows from Slack channels"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "../../README.md"
+include = ["src/**/*.rs", "Cargo.toml"]
+
+[[bin]]
+name = "coda-server"
+path = "src/main.rs"
+
+[dependencies]
+coda-core = { workspace = true }
+tokio = { workspace = true, features = ["signal"] }
+reqwest = { workspace = true, features = ["multipart"] }
+tokio-tungstenite = { workspace = true }
+dashmap = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_yaml = { workspace = true }
+futures = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"

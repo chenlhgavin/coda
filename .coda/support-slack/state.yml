@@ -2,7 +2,7 @@ feature:
   slug: support-slack
   created_at: 2026-02-20T11:13:42.321966Z
   updated_at: 2026-02-20T11:13:42.321966Z
-status: planned
+status: in_progress
 current_phase: 0
 git:
   worktree_path: .trees/support-slack
@@ -11,7 +11,8 @@ git:
 phases:
 - name: server-foundation-socket-connection
   kind: dev
-  status: pending
+  status: running
+  started_at: 2026-02-20T11:13:49.125137Z
   turns: 0
   cost_usd: 0.0
   cost:
