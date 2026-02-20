@@ -91,6 +91,11 @@ pub enum RunEvent {
         /// Whether all checks passed in this attempt.
         passed: bool,
     },
+    /// An agent turn completed within the current phase.
+    TurnCompleted {
+        /// Number of turns completed so far in this phase.
+        current_turn: u32,
+    },
     /// Creating pull request after all phases.
     CreatingPr,
     /// PR creation completed.
@@ -1218,6 +1223,7 @@ impl Runner {
             .map_err(|e| CoreError::AgentError(e.to_string()))?;
 
         let mut resp = AgentResponse::default();
+        let mut turn_count: u32 = 0;
 
         {
             let mut stream = self.client.receive_response();
@@ -1225,6 +1231,10 @@ impl Runner {
                 let msg = result.map_err(|e| CoreError::AgentError(e.to_string()))?;
                 match msg {
                     Message::Assistant(assistant) => {
+                        turn_count += 1;
+                        self.emit_event(RunEvent::TurnCompleted {
+                            current_turn: turn_count,
+                        });
                         for block in &assistant.message.content {
                             match block {
                                 ContentBlock::Text(text) => {

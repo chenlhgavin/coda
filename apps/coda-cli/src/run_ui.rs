@@ -67,6 +67,8 @@ struct PhaseDisplay {
     name: String,
     status: PhaseDisplayStatus,
     started_at: Option<Instant>,
+    /// Number of agent turns completed so far (live counter for running phase).
+    current_turn: u32,
     detail: String,
 }
 
@@ -149,6 +151,7 @@ impl RunUi {
                             cost_usd: ip.cost_usd,
                         },
                         started_at: None,
+                        current_turn: 0,
                         detail: String::new(),
                     }
                 } else {
@@ -156,6 +159,7 @@ impl RunUi {
                         name: ip.name,
                         status: PhaseDisplayStatus::Pending,
                         started_at: None,
+                        current_turn: 0,
                         detail: String::new(),
                     }
                 }
@@ -259,6 +263,7 @@ impl RunUi {
                             name,
                             status: PhaseDisplayStatus::Pending,
                             started_at: None,
+                            current_turn: 0,
                             detail: String::new(),
                         })
                         .collect();
@@ -297,6 +302,13 @@ impl RunUi {
                     self.total_cost += cost_usd;
                 }
                 self.active_phase = None;
+            }
+            RunEvent::TurnCompleted { current_turn } => {
+                if let Some(idx) = self.active_phase
+                    && let Some(phase) = self.phases.get_mut(idx)
+                {
+                    phase.current_turn = current_turn;
+                }
             }
             RunEvent::PhaseFailed { index, error, .. } => {
                 if let Some(phase) = self.phases.get_mut(index) {
@@ -379,7 +391,13 @@ impl RunUi {
         let active_phase = self.active_phase;
         let start_time = self.start_time;
         let prior_elapsed = self.prior_elapsed;
-        let total_turns = self.total_turns;
+        // Include live turn count from the active phase so the summary
+        // updates in real-time as the agent works.
+        let live_turns = self.total_turns
+            + self
+                .active_phase
+                .and_then(|idx| self.phases.get(idx))
+                .map_or(0, |p| p.current_turn);
         let total_cost = self.total_cost;
         let pr_status = self.pr_status.clone();
         let finished = self.finished;
@@ -421,7 +439,7 @@ impl RunUi {
                 frame,
                 chunks[3],
                 prior_elapsed + start_time.elapsed(),
-                total_turns,
+                live_turns,
                 total_cost,
                 &pr_status,
             );
@@ -579,6 +597,12 @@ fn render_phase_list(
                     .map(|t| format_duration(t.elapsed()))
                     .unwrap_or_default();
 
+                let turn_info = if phase.current_turn > 0 {
+                    format!("turn {}", phase.current_turn)
+                } else {
+                    "Running...".to_string()
+                };
+
                 let detail = if phase.detail.is_empty() {
                     String::new()
                 } else {
@@ -591,7 +615,7 @@ fn render_phase_list(
                         Style::default().fg(Color::Yellow).bold(),
                     ),
                     Span::styled(
-                        format!("{elapsed:>8}  Running..."),
+                        format!("{elapsed:>8}  {turn_info}"),
                         Style::default().fg(Color::Yellow),
                     ),
                     Span::styled(detail, Style::default().fg(Color::DarkGray)),
