@@ -62,7 +62,9 @@ impl App {
         // Pre-flight: fail fast before launching TUI
         let project_root = self.engine.project_root();
         if project_root.join(".coda").exists() {
-            anyhow::bail!("Project already initialized. .coda/ directory exists.");
+            println!("Project already initialized. .coda/ directory exists.");
+            println!("Run `coda plan <feature-slug>` to start planning a feature.");
+            return Ok(());
         }
 
         let project_root_display = project_root.display().to_string();
