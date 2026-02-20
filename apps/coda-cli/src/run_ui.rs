@@ -270,6 +270,15 @@ impl RunUi {
                 }
             }
             RunEvent::PhaseStarting { index, .. } => {
+                // Skip if this phase was already pre-populated as completed
+                // (replay events from resume should not revert it to Running).
+                if self
+                    .phases
+                    .get(index)
+                    .is_some_and(|p| matches!(p.status, PhaseDisplayStatus::Completed { .. }))
+                {
+                    return;
+                }
                 if let Some(phase) = self.phases.get_mut(index) {
                     phase.status = PhaseDisplayStatus::Running;
                     phase.started_at = Some(Instant::now());
