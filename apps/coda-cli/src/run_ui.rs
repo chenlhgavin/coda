@@ -54,6 +54,8 @@ pub struct RunSummary {
     pub total_cost: f64,
     /// PR URL if created.
     pub pr_url: Option<String>,
+    /// Whether the run finished successfully (all phases + PR creation).
+    pub success: bool,
 }
 
 /// Interactive TUI for displaying `coda run` progress.
@@ -456,6 +458,7 @@ impl RunUi {
                 PrDisplayStatus::Created { url } => Some(url.clone()),
                 _ => None,
             },
+            success: self.success,
         }
     }
 

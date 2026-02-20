@@ -540,7 +540,11 @@ impl App {
         match (engine_result, ui_result) {
             (Some(Ok(_results)), Ok(summary)) => {
                 println!();
-                println!("  CODA Run: {feature_slug}");
+                if summary.success {
+                    println!("  CODA Run: {feature_slug}");
+                } else {
+                    println!("  CODA Run: {feature_slug} — COMPLETED (PR failed)");
+                }
                 println!("  ═══════════════════════════════════════");
                 println!(
                     "  Total: {} elapsed, {} turns, ${:.4} USD",
@@ -550,6 +554,9 @@ impl App {
                 );
                 if let Some(url) = &summary.pr_url {
                     println!("  PR: {url}");
+                } else if !summary.success {
+                    println!("  PR creation failed. Create manually:");
+                    println!("    gh pr create --base main --head feature/{feature_slug}");
                 }
                 println!("  ═══════════════════════════════════════");
                 println!();
@@ -695,10 +702,16 @@ impl App {
                 let total_elapsed = run_start.elapsed();
                 let mut total_turns = 0u32;
                 let mut total_cost = 0.0f64;
+                let mut pr_failed = false;
 
                 for result in &results {
                     total_turns += result.turns;
                     total_cost += result.cost_usd;
+                    if matches!(&result.task, coda_core::Task::CreatePr { .. })
+                        && !matches!(&result.status, coda_core::TaskStatus::Completed)
+                    {
+                        pr_failed = true;
+                    }
                 }
 
                 println!();
@@ -707,6 +720,10 @@ impl App {
                     "  Total: {} elapsed, {total_turns} turns, ${total_cost:.4} USD",
                     format_duration(total_elapsed)
                 );
+                if pr_failed {
+                    println!("  PR creation failed. Create manually:");
+                    println!("    gh pr create --base main --head feature/{feature_slug}");
+                }
                 println!("  ═══════════════════════════════════════");
                 println!();
 

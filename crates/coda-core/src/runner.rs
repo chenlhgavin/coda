@@ -799,6 +799,7 @@ impl Runner {
         }
 
         if start_phase > 0 {
+            self.restore_summaries_from_state();
             info!(
                 start_phase = start_phase,
                 total = total_phases,
@@ -1016,7 +1017,7 @@ impl Runner {
             ),
         )?;
 
-        let resp = self.send_and_collect(&prompt).await?;
+        let resp = self.send_and_collect(&prompt, None).await?;
         let incremental = self.metrics.record(&resp.result);
         if let Some(logger) = &mut self.run_logger {
             logger.log_interaction(&prompt, &resp, &incremental);
@@ -1088,7 +1089,7 @@ impl Runner {
                 ),
             )?;
 
-            let resp = self.send_and_collect(&review_prompt).await?;
+            let resp = self.send_and_collect(&review_prompt, None).await?;
             let m = self.metrics.record(&resp.result);
             if let Some(logger) = &mut self.run_logger {
                 logger.log_interaction(&review_prompt, &resp, &m);
@@ -1132,7 +1133,7 @@ impl Runner {
                  Refer to the design specification provided earlier for the intended behavior.",
             );
 
-            let fix_resp = self.send_and_collect(&fix_prompt).await?;
+            let fix_resp = self.send_and_collect(&fix_prompt, None).await?;
             let fm = self.metrics.record(&fix_resp.result);
             if let Some(logger) = &mut self.run_logger {
                 logger.log_interaction(&fix_prompt, &fix_resp, &fm);
@@ -1189,7 +1190,7 @@ impl Runner {
                 ),
             )?;
 
-            let resp = self.send_and_collect(&verify_prompt).await?;
+            let resp = self.send_and_collect(&verify_prompt, None).await?;
             let m = self.metrics.record(&resp.result);
             if let Some(logger) = &mut self.run_logger {
                 logger.log_interaction(&verify_prompt, &resp, &m);
@@ -1236,7 +1237,7 @@ impl Runner {
                  Refer to the design specification and verification plan provided earlier.",
             );
 
-            let fix_resp = self.send_and_collect(&fix_prompt).await?;
+            let fix_resp = self.send_and_collect(&fix_prompt, None).await?;
             let fm = self.metrics.record(&fix_resp.result);
             if let Some(logger) = &mut self.run_logger {
                 logger.log_interaction(&fix_prompt, &fix_resp, &fm);
@@ -1301,7 +1302,7 @@ impl Runner {
             ),
         )?;
 
-        let resp = self.send_and_collect(&pr_prompt).await?;
+        let resp = self.send_and_collect(&pr_prompt, Some("create-pr")).await?;
         let pr_metrics = self.metrics.record(&resp.result);
         if let Some(logger) = &mut self.run_logger {
             logger.log_interaction(&pr_prompt, &resp, &pr_metrics);
@@ -1393,15 +1394,26 @@ impl Runner {
     /// [`RunEvent::AgentTextDelta`] for streaming text deltas and
     /// [`RunEvent::ToolActivity`] for tool invocations observed in the stream.
     ///
+    /// When `session_id` is `Some`, sends the prompt on an isolated session
+    /// (via [`ClaudeClient::query_with_session`]) so the conversation history
+    /// of the main session is not included. Use this for operations like PR
+    /// creation that don't need prior context and would otherwise overflow
+    /// the prompt size limit after a long run.
+    ///
     /// # Errors
     ///
     /// Returns `CoreError::AgentError` if the agent returns an empty response
     /// (no text and no tool output), which indicates a broken session.
-    async fn send_and_collect(&mut self, prompt: &str) -> Result<AgentResponse, CoreError> {
-        self.client
-            .query(prompt)
-            .await
-            .map_err(|e| CoreError::AgentError(e.to_string()))?;
+    async fn send_and_collect(
+        &mut self,
+        prompt: &str,
+        session_id: Option<&str>,
+    ) -> Result<AgentResponse, CoreError> {
+        match session_id {
+            Some(id) => self.client.query_with_session(prompt, id).await,
+            None => self.client.query(prompt).await,
+        }
+        .map_err(|e| CoreError::AgentError(e.to_string()))?;
 
         let mut resp = AgentResponse::default();
         let mut turn_count: u32 = 0;
@@ -1686,6 +1698,34 @@ impl Runner {
                 ),
             )
             .map_err(CoreError::from)
+    }
+
+    /// Rebuilds `review_summary` and `verification_summary` from persisted
+    /// phase details so that resumed runs have accurate summaries for PR
+    /// creation and final display.
+    fn restore_summaries_from_state(&mut self) {
+        for phase in &self.state.phases {
+            if phase.status != PhaseStatus::Completed {
+                continue;
+            }
+            match phase.name.as_str() {
+                "review" => {
+                    self.review_summary = ReviewSummary {
+                        rounds: phase.details["rounds"].as_u64().unwrap_or(0) as u32,
+                        issues_found: phase.details["issues_found"].as_u64().unwrap_or(0) as u32,
+                        issues_resolved: phase.details["issues_resolved"].as_u64().unwrap_or(0)
+                            as u32,
+                    };
+                }
+                "verify" => {
+                    self.verification_summary = VerificationSummary {
+                        checks_passed: phase.details["checks_passed"].as_u64().unwrap_or(0) as u32,
+                        checks_total: phase.details["checks_total"].as_u64().unwrap_or(0) as u32,
+                    };
+                }
+                _ => {}
+            }
+        }
     }
 
     /// Updates cumulative totals from all phase records.
