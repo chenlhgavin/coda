@@ -354,7 +354,7 @@ impl Engine {
 
         // 5. Auto-commit init artifacts unless --no-commit
         if !no_commit {
-            self.commit_init_artifacts()?;
+            self.commit_init_artifacts().await?;
         }
 
         emit(&progress_tx, InitEvent::InitFinished { success: true });
@@ -365,18 +365,23 @@ impl Engine {
     /// Commits init artifacts (`.coda/`, `.coda.md`, `CLAUDE.md`, `.gitignore`)
     /// to the current branch so that `coda plan` worktrees inherit them.
     ///
+    /// Uses [`commit_with_hooks()`] to handle pre-commit hook failures
+    /// with automatic re-staging and LLM-based fixing.
+    ///
     /// # Errors
     ///
-    /// Returns `CoreError::GitError` if git add or commit fails.
-    fn commit_init_artifacts(&self) -> Result<(), CoreError> {
+    /// Returns `CoreError` if committing fails after all retry attempts.
+    async fn commit_init_artifacts(&self) -> Result<(), CoreError> {
         let paths: &[&str] = &[".coda/", ".coda.md", "CLAUDE.md", ".gitignore"];
-        self.git.add(&self.project_root, paths)?;
-        if self.git.has_staged_changes(&self.project_root) {
-            self.git
-                .commit(&self.project_root, "chore: initialize CODA project")?;
-            info!("Auto-committed init artifacts");
-        }
-        Ok(())
+        commit_with_hooks(
+            self.git.as_ref(),
+            &self.project_root,
+            paths,
+            "chore: initialize CODA project",
+            &self.pm,
+            &self.config,
+        )
+        .await
     }
 
     /// Runs the analyze-repo phase: streams the AI analysis and collects text.
@@ -866,6 +871,104 @@ pub fn emit(tx: &Option<UnboundedSender<InitEvent>>, event: InitEvent) {
     if let Some(tx) = tx {
         let _ = tx.send(event);
     }
+}
+
+/// Stages files, commits, and handles pre-commit hook failures automatically.
+///
+/// Implements a three-layer retry strategy:
+///
+/// 1. **Try commit** — runs pre-commit hooks normally.
+/// 2. **Re-stage & retry** — fixer hooks (e.g. `end-of-file-fixer`, `prettier`)
+///    modify files on the first run and pass on the second. Re-staging picks up
+///    their modifications.
+/// 3. **LLM fix & retry** — if hooks still fail, the error output is sent to a
+///    Claude agent that reads and fixes the affected files, then a final commit
+///    is attempted.
+///
+/// # Errors
+///
+/// Returns `CoreError` if the commit fails after all three attempts.
+pub async fn commit_with_hooks(
+    git: &dyn GitOps,
+    cwd: &Path,
+    paths: &[&str],
+    message: &str,
+    pm: &PromptManager,
+    config: &CodaConfig,
+) -> Result<(), CoreError> {
+    git.add(cwd, paths)?;
+    if !git.has_staged_changes(cwd) {
+        return Ok(());
+    }
+
+    // Attempt 1: normal commit
+    match git.commit(cwd, message) {
+        Ok(()) => return Ok(()),
+        Err(_first_err) => {
+            info!("Commit failed (hooks may have modified files), retrying");
+        }
+    }
+
+    // Attempt 2: re-stage (picks up fixer-hook modifications) and retry
+    git.add(cwd, paths)?;
+    if !git.has_staged_changes(cwd) {
+        info!("Hooks fixed all files, nothing left to commit");
+        return Ok(());
+    }
+    match git.commit(cwd, message) {
+        Ok(()) => return Ok(()),
+        Err(second_err) => {
+            info!("Retry failed, invoking LLM to fix hook errors");
+            let hook_errors = second_err.to_string();
+            if let Err(e) = fix_hook_errors_with_llm(&hook_errors, cwd, pm, config).await {
+                warn!(error = %e, "LLM hook-fix failed, proceeding with final commit attempt");
+            }
+        }
+    }
+
+    // Attempt 3: re-stage LLM fixes and commit
+    git.add(cwd, paths)?;
+    if !git.has_staged_changes(cwd) {
+        info!("LLM fixes resolved all issues, nothing left to commit");
+        return Ok(());
+    }
+    git.commit(cwd, message)
+}
+
+/// Invokes a Claude agent to fix files based on pre-commit hook error output.
+///
+/// Uses `AgentProfile::Coder` with a low turn limit so the agent can read
+/// the affected files and write fixes. The agent works directly in `cwd`.
+async fn fix_hook_errors_with_llm(
+    hook_errors: &str,
+    cwd: &Path,
+    pm: &PromptManager,
+    config: &CodaConfig,
+) -> Result<(), CoreError> {
+    let fix_prompt = pm.render(
+        "commit/fix_hook_errors",
+        minijinja::context!(hook_errors => hook_errors),
+    )?;
+
+    let options = AgentProfile::Coder.to_options(
+        "You are a code formatter. Fix only the issues reported by pre-commit hooks. \
+         Do not change semantic content.",
+        cwd.to_path_buf(),
+        3,
+        config.agent.max_budget_usd,
+        &config.agent.model,
+    );
+
+    let mut stream = claude_agent_sdk_rs::query_stream(fix_prompt, Some(options))
+        .await
+        .map_err(|e| CoreError::AgentError(e.to_string()))?;
+
+    while let Some(result) = stream.next().await {
+        let _ = result.map_err(|e| CoreError::AgentError(e.to_string()))?;
+    }
+
+    info!("LLM hook-fix agent completed");
+    Ok(())
 }
 
 /// Maximum length for a feature slug (keeps branch names and paths manageable).

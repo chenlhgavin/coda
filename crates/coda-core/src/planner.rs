@@ -14,6 +14,7 @@ use tracing::{debug, info, warn};
 
 use crate::CoreError;
 use crate::config::CodaConfig;
+use crate::engine::commit_with_hooks;
 use crate::git::GitOps;
 use crate::profile::AgentProfile;
 use crate::state::{
@@ -302,12 +303,15 @@ impl PlanSession {
                 "CODA init files not committed, auto-committing before worktree creation"
             );
             let paths: &[&str] = &[".coda/", ".coda.md", "CLAUDE.md", ".gitignore"];
-            self.git.add(&self.project_root, paths)?;
-            if self.git.has_staged_changes(&self.project_root) {
-                self.git
-                    .commit(&self.project_root, "chore: initialize CODA project")?;
-                info!("Auto-committed CODA init artifacts before worktree creation");
-            }
+            commit_with_hooks(
+                self.git.as_ref(),
+                &self.project_root,
+                paths,
+                "chore: initialize CODA project",
+                &self.pm,
+                &self.config,
+            )
+            .await?;
 
             // Re-check: if still missing, the files don't exist at all
             if !self
@@ -373,14 +377,15 @@ impl PlanSession {
         debug!(path = %state_path.display(), "Wrote state.yml");
 
         // 4. Initial commit so planning artifacts are version-controlled
-        self.git.add(&worktree_abs, &[".coda/"])?;
-        if self.git.has_staged_changes(&worktree_abs) {
-            self.git.commit(
-                &worktree_abs,
-                &format!("feat({slug}): initialize planning artifacts"),
-            )?;
-            info!("Committed initial planning artifacts");
-        }
+        commit_with_hooks(
+            self.git.as_ref(),
+            &worktree_abs,
+            &[".coda/"],
+            &format!("feat({slug}): initialize planning artifacts"),
+            &self.pm,
+            &self.config,
+        )
+        .await?;
 
         // 5. Clear approved state only after everything succeeded
         self.approved_design = None;

@@ -20,6 +20,7 @@ use tracing::{debug, error, info, warn};
 
 use crate::CoreError;
 use crate::config::CodaConfig;
+use crate::engine::commit_with_hooks;
 use crate::gh::GhOps;
 use crate::git::GitOps;
 use crate::parser::{
@@ -712,7 +713,7 @@ impl Runner {
         // (excludes create_pr phase itself, which is a meta-operation)
         self.update_totals();
         self.save_state()?;
-        self.commit_coda_state()?;
+        self.commit_coda_state().await?;
 
         // All phases complete — create PR
         info!("All phases complete, creating PR...");
@@ -739,7 +740,7 @@ impl Runner {
 
         // Commit and push final state (PR info, status, log) so the PR
         // branch includes all execution metadata.
-        self.commit_coda_state()?;
+        self.commit_coda_state().await?;
         let branch = &self.state.git.branch.clone();
         self.git.push(&self.worktree_path, branch)?;
 
@@ -1167,18 +1168,17 @@ impl Runner {
     /// is tracked in git alongside the feature code.
     ///
     /// Silently succeeds if there are no changes to commit.
-    fn commit_coda_state(&self) -> Result<(), CoreError> {
-        self.git.add(&self.worktree_path, &[".coda/"])?;
-
-        if self.git.has_staged_changes(&self.worktree_path) {
-            let msg = format!("chore({}): update execution state", self.state.feature.slug);
-            self.git.commit(&self.worktree_path, &msg)?;
-            info!("Committed .coda/ state updates");
-        } else {
-            debug!("No .coda/ changes to commit");
-        }
-
-        Ok(())
+    async fn commit_coda_state(&self) -> Result<(), CoreError> {
+        let msg = format!("chore({}): update execution state", self.state.feature.slug);
+        commit_with_hooks(
+            self.git.as_ref(),
+            &self.worktree_path,
+            &[".coda/"],
+            &msg,
+            &self.pm,
+            &self.config,
+        )
+        .await
     }
 
     /// Sends a prompt and collects the full response text, tool output, and `ResultMessage`.

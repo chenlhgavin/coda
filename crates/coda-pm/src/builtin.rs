@@ -13,7 +13,7 @@ use crate::PromptTemplate;
 ///
 /// Used for verification in tests. Update this constant when adding or
 /// removing template files.
-pub const BUILTIN_TEMPLATE_COUNT: usize = 12;
+pub const BUILTIN_TEMPLATE_COUNT: usize = 13;
 
 /// Returns all built-in prompt templates, compiled into the binary.
 ///
@@ -26,7 +26,7 @@ pub const BUILTIN_TEMPLATE_COUNT: usize = 12;
 /// use coda_pm::builtin::builtin_templates;
 ///
 /// let templates = builtin_templates();
-/// assert_eq!(templates.len(), 12);
+/// assert_eq!(templates.len(), 13);
 /// assert!(templates.iter().any(|t| t.name == "init/system"));
 /// ```
 pub fn builtin_templates() -> Vec<PromptTemplate> {
@@ -57,6 +57,10 @@ pub fn builtin_templates() -> Vec<PromptTemplate> {
         PromptTemplate::new(
             "run/create_pr",
             include_str!("../templates/run/create_pr.j2"),
+        ),
+        PromptTemplate::new(
+            "commit/fix_hook_errors",
+            include_str!("../templates/commit/fix_hook_errors.j2"),
         ),
     ]
 }
@@ -89,6 +93,7 @@ mod tests {
             "run/verify",
             "run/resume",
             "run/create_pr",
+            "commit/fix_hook_errors",
         ];
 
         for name in &expected {
