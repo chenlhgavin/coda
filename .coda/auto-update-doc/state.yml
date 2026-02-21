@@ -2,7 +2,7 @@ feature:
   slug: auto-update-doc
   created_at: 2026-02-21T10:40:30.755902Z
   updated_at: 2026-02-21T10:40:30.755902Z
-status: planned
+status: in_progress
 current_phase: 0
 git:
   worktree_path: .trees/auto-update-doc
@@ -11,7 +11,8 @@ git:
 phases:
 - name: core-pipeline-wiring
   kind: dev
-  status: pending
+  status: running
+  started_at: 2026-02-21T10:42:47.362945Z
   turns: 0
   cost_usd: 0.0
   cost:

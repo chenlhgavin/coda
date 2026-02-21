@@ -881,6 +881,7 @@ impl Runner {
                 PhaseKind::Quality => match phase_name.as_str() {
                     "review" => self.run_review(phase_idx).await,
                     "verify" => self.run_verify(phase_idx).await,
+                    "update-docs" => self.run_update_docs(phase_idx).await,
                     _ => Err(CoreError::AgentError(format!(
                         "Unknown quality phase: {phase_name}"
                     ))),
@@ -1485,6 +1486,42 @@ impl Runner {
             turns: outcome.turns,
             cost_usd: outcome.cost_usd,
             duration: outcome.duration,
+            artifacts: vec![],
+        };
+        self.complete_phase(phase_idx, outcome);
+
+        Ok(task_result)
+    }
+
+    /// Regenerates `.coda.md` and updates `README.md` in the worktree.
+    ///
+    /// This is a stub implementation that immediately returns
+    /// `TaskStatus::Completed`. The full implementation with retry logic
+    /// and prompt rendering will be added in a later phase.
+    ///
+    /// # Errors
+    ///
+    /// Returns `CoreError::AgentError` if all retry attempts fail.
+    async fn run_update_docs(&mut self, phase_idx: usize) -> Result<TaskResult, CoreError> {
+        self.mark_phase_running(phase_idx);
+        info!("update-docs phase starting (stub)");
+
+        let outcome = PhaseOutcome {
+            turns: 0,
+            cost_usd: 0.0,
+            input_tokens: 0,
+            output_tokens: 0,
+            duration: Duration::from_secs(0),
+            details: serde_json::json!({}),
+        };
+        let task_result = TaskResult {
+            task: Task::UpdateDocs {
+                feature_slug: self.state.feature.slug.clone(),
+            },
+            status: TaskStatus::Completed,
+            turns: 0,
+            cost_usd: 0.0,
+            duration: Duration::from_secs(0),
             artifacts: vec![],
         };
         self.complete_phase(phase_idx, outcome);

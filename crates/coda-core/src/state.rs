@@ -68,15 +68,16 @@ pub struct FeatureState {
     pub total: TotalStats,
 }
 
-/// Minimum number of phases: at least 1 dev phase + review + verify.
-const MIN_PHASE_COUNT: usize = 3;
+/// Minimum number of phases: at least 1 dev phase + review + verify + update-docs.
+const MIN_PHASE_COUNT: usize = 4;
 
 impl FeatureState {
     /// Validates structural invariants after deserialization.
     ///
     /// Checks that `phases` has at least [`MIN_PHASE_COUNT`] entries
-    /// (1+ dev phases + review + verify), `current_phase` is within bounds,
-    /// and `worktree_path` does not contain parent-directory references.
+    /// (1+ dev phases + review + verify + update-docs), `current_phase`
+    /// is within bounds, and `worktree_path` does not contain
+    /// parent-directory references.
     ///
     /// # Errors
     ///
@@ -84,7 +85,8 @@ impl FeatureState {
     pub fn validate(&self) -> Result<(), String> {
         if self.phases.len() < MIN_PHASE_COUNT {
             return Err(format!(
-                "expected at least {MIN_PHASE_COUNT} phases (dev + review + verify), found {}",
+                "expected at least {MIN_PHASE_COUNT} phases \
+                 (dev + review + verify + update-docs), found {}",
                 self.phases.len(),
             ));
         }
@@ -447,6 +449,18 @@ mod tests {
     #[test]
     fn test_should_validate_correct_state() {
         let now = chrono::Utc::now();
+        let make_phase = |name: &str, kind: PhaseKind| PhaseRecord {
+            name: name.to_string(),
+            kind,
+            status: PhaseStatus::Pending,
+            started_at: None,
+            completed_at: None,
+            turns: 0,
+            cost_usd: 0.0,
+            cost: TokenCost::default(),
+            duration_secs: 0,
+            details: serde_json::json!({}),
+        };
         let state = FeatureState {
             feature: FeatureInfo {
                 slug: "test".to_string(),
@@ -461,42 +475,10 @@ mod tests {
                 base_branch: "main".to_string(),
             },
             phases: vec![
-                PhaseRecord {
-                    name: "dev-phase-1".to_string(),
-                    kind: PhaseKind::Dev,
-                    status: PhaseStatus::Pending,
-                    started_at: None,
-                    completed_at: None,
-                    turns: 0,
-                    cost_usd: 0.0,
-                    cost: TokenCost::default(),
-                    duration_secs: 0,
-                    details: serde_json::json!({}),
-                },
-                PhaseRecord {
-                    name: "review".to_string(),
-                    kind: PhaseKind::Quality,
-                    status: PhaseStatus::Pending,
-                    started_at: None,
-                    completed_at: None,
-                    turns: 0,
-                    cost_usd: 0.0,
-                    cost: TokenCost::default(),
-                    duration_secs: 0,
-                    details: serde_json::json!({}),
-                },
-                PhaseRecord {
-                    name: "verify".to_string(),
-                    kind: PhaseKind::Quality,
-                    status: PhaseStatus::Pending,
-                    started_at: None,
-                    completed_at: None,
-                    turns: 0,
-                    cost_usd: 0.0,
-                    cost: TokenCost::default(),
-                    duration_secs: 0,
-                    details: serde_json::json!({}),
-                },
+                make_phase("dev-phase-1", PhaseKind::Dev),
+                make_phase("review", PhaseKind::Quality),
+                make_phase("verify", PhaseKind::Quality),
+                make_phase("update-docs", PhaseKind::Quality),
             ],
             pr: None,
             total: TotalStats::default(),
@@ -520,12 +502,12 @@ mod tests {
                 branch: "feature/test".to_string(),
                 base_branch: "main".to_string(),
             },
-            phases: vec![], // wrong: need at least 3
+            phases: vec![], // wrong: need at least 4
             pr: None,
             total: TotalStats::default(),
         };
         let err = state.validate().unwrap_err();
-        assert!(err.contains("at least 3 phases"));
+        assert!(err.contains("at least 4 phases"));
     }
 
     #[test]
@@ -560,6 +542,7 @@ mod tests {
                 make_phase("dev-1", PhaseKind::Dev),
                 make_phase("review", PhaseKind::Quality),
                 make_phase("verify", PhaseKind::Quality),
+                make_phase("update-docs", PhaseKind::Quality),
             ],
             pr: None,
             total: TotalStats::default(),
