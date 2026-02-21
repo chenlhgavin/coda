@@ -1495,33 +1495,112 @@ impl Runner {
 
     /// Regenerates `.coda.md` and updates `README.md` in the worktree.
     ///
-    /// This is a stub implementation that immediately returns
-    /// `TaskStatus::Completed`. The full implementation with retry logic
-    /// and prompt rendering will be added in a later phase.
+    /// Sends the `run/update_docs` prompt to the agent and validates that
+    /// both `.coda.md` and `README.md` exist and are non-empty afterwards.
+    /// Retries up to `config.agent.max_retries` times on validation failure.
     ///
     /// # Errors
     ///
-    /// Returns `CoreError::AgentError` if all retry attempts fail.
+    /// Returns `CoreError::AgentError` if all retry attempts fail to produce
+    /// valid documentation files.
     async fn run_update_docs(&mut self, phase_idx: usize) -> Result<TaskResult, CoreError> {
         self.mark_phase_running(phase_idx);
-        info!("update-docs phase starting (stub)");
 
-        let outcome = PhaseOutcome {
-            turns: 0,
-            cost_usd: 0.0,
-            input_tokens: 0,
-            output_tokens: 0,
-            duration: Duration::from_secs(0),
-            details: serde_json::json!({}),
-        };
+        let design_spec = self.load_spec("design.md")?;
+        let max_retries = self.config.agent.max_retries;
+        let mut acc = PhaseMetricsAccumulator::new();
+        let mut docs_valid = false;
+
+        for attempt in 0..=max_retries {
+            info!(
+                attempt = attempt + 1,
+                max = max_retries + 1,
+                "update-docs attempt"
+            );
+
+            let prompt = self.pm.render(
+                "run/update_docs",
+                minijinja::context!(
+                    design_spec => design_spec,
+                    state => &self.state,
+                ),
+            )?;
+
+            let resp = self.send_and_collect(&prompt, None).await?;
+            let m = self.metrics.record(&resp.result);
+            if let Some(logger) = &mut self.run_logger {
+                logger.log_interaction(&prompt, &resp, &m);
+            }
+            acc.record(&resp, m);
+
+            // Validate that both doc files exist and are non-empty
+            let coda_md = self.worktree_path.join(".coda.md");
+            let readme = self.worktree_path.join("README.md");
+
+            let coda_ok =
+                coda_md.is_file() && fs::metadata(&coda_md).is_ok_and(|m| m.len() > 0);
+            let readme_ok =
+                readme.is_file() && fs::metadata(&readme).is_ok_and(|m| m.len() > 0);
+
+            if coda_ok && readme_ok {
+                info!("Documentation files validated successfully");
+                docs_valid = true;
+                break;
+            }
+
+            if attempt == max_retries {
+                warn!("Max update-docs attempts reached, documentation validation failed");
+                break;
+            }
+
+            let mut missing = Vec::new();
+            if !coda_ok {
+                missing.push(".coda.md");
+            }
+            if !readme_ok {
+                missing.push("README.md");
+            }
+
+            info!(
+                missing = ?missing,
+                "Documentation validation failed, asking agent to fix"
+            );
+
+            let fix_prompt = format!(
+                "Documentation update validation failed. The following files are missing or empty:\n\n\
+                 {}\n\n\
+                 Please create or fix these files and ensure they contain valid, non-empty Markdown content.\n\
+                 Refer to the instructions from the previous prompt.",
+                missing.join(", "),
+            );
+
+            let fix_resp = self.send_and_collect(&fix_prompt, None).await?;
+            let fm = self.metrics.record(&fix_resp.result);
+            if let Some(logger) = &mut self.run_logger {
+                logger.log_interaction(&fix_prompt, &fix_resp, &fm);
+            }
+            acc.record(&fix_resp, fm);
+        }
+
+        if !docs_valid {
+            return Err(CoreError::AgentError(
+                "update-docs phase failed: .coda.md and/or README.md missing or empty after all retries".to_string(),
+            ));
+        }
+
+        self.commit_doc_updates()?;
+
+        let outcome = acc.into_outcome(serde_json::json!({
+            "docs_updated": true,
+        }));
         let task_result = TaskResult {
             task: Task::UpdateDocs {
                 feature_slug: self.state.feature.slug.clone(),
             },
             status: TaskStatus::Completed,
-            turns: 0,
-            cost_usd: 0.0,
-            duration: Duration::from_secs(0),
+            turns: outcome.turns,
+            cost_usd: outcome.cost_usd,
+            duration: outcome.duration,
             artifacts: vec![],
         };
         self.complete_phase(phase_idx, outcome);
@@ -1646,6 +1725,23 @@ impl Runner {
     fn commit_coda_state(&self) -> Result<(), CoreError> {
         let msg = format!("chore({}): update execution state", self.state.feature.slug);
         commit_coda_artifacts(self.git.as_ref(), &self.worktree_path, &[".coda/"], &msg)
+    }
+
+    /// Commits documentation file updates (`.coda.md` and `README.md`).
+    ///
+    /// Stages both files and creates a commit. Silently succeeds if
+    /// neither file has changes (e.g., the agent already committed them).
+    fn commit_doc_updates(&self) -> Result<(), CoreError> {
+        let msg = format!(
+            "docs({}): update .coda.md and README.md",
+            self.state.feature.slug
+        );
+        commit_coda_artifacts(
+            self.git.as_ref(),
+            &self.worktree_path,
+            &[".coda.md", "README.md"],
+            &msg,
+        )
     }
 
     /// Sends a prompt and collects the full response text, tool output, and `ResultMessage`.
