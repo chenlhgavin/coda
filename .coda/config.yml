@@ -29,6 +29,6 @@ git:
 review:
   enabled: true
   max_review_rounds: 5
-  engine: claude
+  engine: codex
   codex_model: "gpt-5.3-codex"
   codex_reasoning_effort: "high"
