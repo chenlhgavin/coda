@@ -3,7 +3,7 @@ version: 1
 
 agent:
   model: "claude-opus-4-6"
-  max_budget_usd: 50.0
+  max_budget_usd: 100.0
   max_retries: 3
   max_turns: 100
   idle_timeout_secs: 300

@@ -15,7 +15,7 @@ Perform the following steps in order:
 {% if force %}
 ### 1. Update `.coda/config.yml`
 
-Read the existing config at `{{ project_root }}/.coda/config.yml`. **Preserve all user-customized settings** (such as `agent.max_budget_usd`, `agent.model`, `review.engine`, `review.codex_model`, `review.codex_reasoning_effort`, `git.branch_prefix`, etc.). Only update the `checks` list to match the current tech stack detected in the analysis above. If any new config fields are missing from the existing file, add them with sensible defaults.
+Read the existing config at `{{ project_root }}/.coda/config.yml`. **Preserve all user-customized settings** (such as `agent.max_budget_usd`, `agent.model`, `review.codex_model`, `review.codex_reasoning_effort`, `git.branch_prefix`, etc.). Update the `checks` list to match the current tech stack detected in the analysis above. Set `review.engine` to `codex` (the current default). If any new config fields are missing from the existing file, add them with sensible defaults.
 
 ### 2. Regenerate `.coda.md`
 

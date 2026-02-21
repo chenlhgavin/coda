@@ -166,7 +166,7 @@ impl Default for AgentConfig {
     fn default() -> Self {
         Self {
             model: "claude-opus-4-6".to_string(),
-            max_budget_usd: 50.0,
+            max_budget_usd: 100.0,
             max_retries: 3,
             max_turns: 100,
             idle_timeout_secs: 300,
@@ -213,7 +213,7 @@ mod tests {
     fn test_should_create_default_config() {
         let config = CodaConfig::default();
         assert_eq!(config.version, 1);
-        assert_eq!(config.agent.max_budget_usd, 50.0);
+        assert_eq!(config.agent.max_budget_usd, 100.0);
         assert_eq!(config.agent.max_retries, 3);
         assert_eq!(config.checks.len(), 3);
         assert!(config.git.auto_commit);
@@ -236,7 +236,7 @@ mod tests {
 version: 2
 agent:
   model: "claude-opus-4-20250514"
-  max_budget_usd: 50.0
+  max_budget_usd: 100.0
   max_retries: 5
 checks:
   - "npm run build"
@@ -259,7 +259,7 @@ review:
         let config: CodaConfig = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(config.version, 2);
         assert_eq!(config.agent.model, "claude-opus-4-20250514");
-        assert!((config.agent.max_budget_usd - 50.0).abs() < f64::EPSILON);
+        assert!((config.agent.max_budget_usd - 100.0).abs() < f64::EPSILON);
         assert_eq!(config.agent.max_retries, 5);
         assert_eq!(config.checks.len(), 2);
         assert_eq!(config.checks[0], "npm run build");
@@ -297,8 +297,8 @@ review:
 
         let config: CodaConfig = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(config.version, 1);
-        // max_budget_usd missing → should use default 20.0
-        assert!((config.agent.max_budget_usd - 50.0).abs() < f64::EPSILON);
+        // max_budget_usd missing → should use default 100.0
+        assert!((config.agent.max_budget_usd - 100.0).abs() < f64::EPSILON);
         assert_eq!(config.agent.max_retries, 3);
         // top-level checks missing → should use default
         assert!(!config.checks.is_empty());
@@ -311,7 +311,7 @@ review:
         let config: CodaConfig = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(config.version, 1);
         assert_eq!(config.agent.model, "claude-opus-4-6");
-        assert!((config.agent.max_budget_usd - 50.0).abs() < f64::EPSILON);
+        assert!((config.agent.max_budget_usd - 100.0).abs() < f64::EPSILON);
         assert!(config.git.auto_commit);
         // Review engine defaults
         assert_eq!(config.review.engine, ReviewEngine::Codex);
