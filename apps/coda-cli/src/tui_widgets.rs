@@ -128,8 +128,12 @@ pub fn render_header(
 
 /// Renders the horizontal phase pipeline with status indicators.
 ///
-/// Shows each phase as `icon name` connected by `→` arrows. When
-/// `pr_status` is not `NotApplicable`, a PR step is appended at the end.
+/// Uses adaptive three-tier degradation to fit within available width:
+/// - **Tier 1**: Full phase names when space allows.
+/// - **Tier 2**: Equally truncated names (min 3 chars) when full names overflow.
+/// - **Tier 3**: Icon-only mode (`● → ⠋ → ○`) for extremely narrow terminals.
+///
+/// When `pr_status` is not `NotApplicable`, a PR step is appended at the end.
 pub fn render_pipeline(
     frame: &mut Frame,
     area: Rect,
@@ -146,62 +150,196 @@ pub fn render_pipeline(
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    let mut spans: Vec<Span> = Vec::new();
+    let available = inner.width as usize;
+    let has_pr = !matches!(pr_status, PrDisplayStatus::NotApplicable);
 
-    for (i, phase) in phases.iter().enumerate() {
-        if i > 0 {
-            spans.push(Span::styled(" → ", Style::default().fg(Color::DarkGray)));
-        }
-
-        let (icon, style) = match &phase.status {
-            PhaseDisplayStatus::Pending => ("○", Style::default().fg(Color::DarkGray)),
-            PhaseDisplayStatus::Running => {
-                let frame_char = SPINNER_FRAMES[spinner_tick % SPINNER_FRAMES.len()];
-                spans.push(Span::styled(
-                    format!("{frame_char} "),
-                    Style::default().fg(Color::Yellow),
-                ));
-                spans.push(Span::styled(
-                    phase.name.clone(),
-                    Style::default().fg(Color::Yellow).bold(),
-                ));
-                continue;
-            }
-            PhaseDisplayStatus::Completed { .. } => ("●", Style::default().fg(Color::Green)),
-            PhaseDisplayStatus::Failed { .. } => ("✗", Style::default().fg(Color::Red)),
-        };
-
-        spans.push(Span::styled(format!("{icon} "), style));
-        spans.push(Span::styled(phase.name.clone(), style));
+    // Collect pipeline entries: (name, icon, style, bold_name)
+    let mut entries: Vec<PipelineEntry> = phases
+        .iter()
+        .map(|p| pipeline_entry_for_phase(p, spinner_tick))
+        .collect();
+    if has_pr {
+        entries.push(pipeline_entry_for_pr(pr_status, spinner_tick));
     }
 
-    // PR step (only when applicable)
-    if !matches!(pr_status, PrDisplayStatus::NotApplicable) {
-        spans.push(Span::styled(" → ", Style::default().fg(Color::DarkGray)));
-        match pr_status {
-            PrDisplayStatus::Pending => {
-                spans.push(Span::styled("○ PR", Style::default().fg(Color::DarkGray)));
-            }
-            PrDisplayStatus::Creating => {
-                let frame_char = SPINNER_FRAMES[spinner_tick % SPINNER_FRAMES.len()];
-                spans.push(Span::styled(
-                    format!("{frame_char} PR"),
-                    Style::default().fg(Color::Yellow).bold(),
-                ));
-            }
-            PrDisplayStatus::Created { .. } => {
-                spans.push(Span::styled("● PR", Style::default().fg(Color::Green)));
-            }
-            PrDisplayStatus::Failed => {
-                spans.push(Span::styled("✗ PR", Style::default().fg(Color::Red)));
-            }
-            PrDisplayStatus::NotApplicable => {}
-        }
-    }
+    let tier = choose_pipeline_tier(&entries, available);
+    let spans = build_pipeline_spans(&entries, tier);
 
     let line = Line::from(spans);
     let paragraph = Paragraph::new(line);
     frame.render_widget(paragraph, inner);
+}
+
+/// Minimum name length for Tier 2 truncation before falling back to Tier 3.
+const PIPELINE_MIN_NAME_LEN: usize = 3;
+
+/// A single entry in the pipeline bar.
+struct PipelineEntry {
+    name: String,
+    icon: String,
+    style: Style,
+    bold_name: bool,
+}
+
+/// Builds a [`PipelineEntry`] from a phase display.
+fn pipeline_entry_for_phase(phase: &PhaseDisplay, spinner_tick: usize) -> PipelineEntry {
+    match &phase.status {
+        PhaseDisplayStatus::Pending => PipelineEntry {
+            name: phase.name.clone(),
+            icon: "○".to_owned(),
+            style: Style::default().fg(Color::DarkGray),
+            bold_name: false,
+        },
+        PhaseDisplayStatus::Running => {
+            let frame_char = SPINNER_FRAMES[spinner_tick % SPINNER_FRAMES.len()];
+            PipelineEntry {
+                name: phase.name.clone(),
+                icon: frame_char.to_owned(),
+                style: Style::default().fg(Color::Yellow),
+                bold_name: true,
+            }
+        }
+        PhaseDisplayStatus::Completed { .. } => PipelineEntry {
+            name: phase.name.clone(),
+            icon: "●".to_owned(),
+            style: Style::default().fg(Color::Green),
+            bold_name: false,
+        },
+        PhaseDisplayStatus::Failed { .. } => PipelineEntry {
+            name: phase.name.clone(),
+            icon: "✗".to_owned(),
+            style: Style::default().fg(Color::Red),
+            bold_name: false,
+        },
+    }
+}
+
+/// Builds a [`PipelineEntry`] from a PR display status.
+fn pipeline_entry_for_pr(pr_status: &PrDisplayStatus, spinner_tick: usize) -> PipelineEntry {
+    match pr_status {
+        PrDisplayStatus::Pending => PipelineEntry {
+            name: "PR".to_owned(),
+            icon: "○".to_owned(),
+            style: Style::default().fg(Color::DarkGray),
+            bold_name: false,
+        },
+        PrDisplayStatus::Creating => {
+            let frame_char = SPINNER_FRAMES[spinner_tick % SPINNER_FRAMES.len()];
+            PipelineEntry {
+                name: "PR".to_owned(),
+                icon: frame_char.to_owned(),
+                style: Style::default().fg(Color::Yellow),
+                bold_name: true,
+            }
+        }
+        PrDisplayStatus::Created { .. } => PipelineEntry {
+            name: "PR".to_owned(),
+            icon: "●".to_owned(),
+            style: Style::default().fg(Color::Green),
+            bold_name: false,
+        },
+        PrDisplayStatus::Failed => PipelineEntry {
+            name: "PR".to_owned(),
+            icon: "✗".to_owned(),
+            style: Style::default().fg(Color::Red),
+            bold_name: false,
+        },
+        PrDisplayStatus::NotApplicable => PipelineEntry {
+            name: String::new(),
+            icon: String::new(),
+            style: Style::default(),
+            bold_name: false,
+        },
+    }
+}
+
+/// The rendering tier for the pipeline bar.
+enum PipelineTier {
+    /// Full phase names.
+    Full,
+    /// Truncated names with a maximum character budget per name.
+    Truncated { max_name_len: usize },
+    /// Icon-only mode (no names).
+    IconOnly,
+}
+
+/// Chooses the best rendering tier for the given available width.
+///
+/// Each entry occupies: `icon(1) + space(1) + name_len` characters.
+/// Separators between entries: ` → ` (3 characters each).
+///
+/// - Tier 1 (Full): all names fit at full length.
+/// - Tier 2 (Truncated): names shortened equally so everything fits (min 3 chars).
+/// - Tier 3 (IconOnly): only icons + separators, no names.
+fn choose_pipeline_tier(entries: &[PipelineEntry], available: usize) -> PipelineTier {
+    if entries.is_empty() {
+        return PipelineTier::Full;
+    }
+
+    let n = entries.len();
+    // Separator overhead: (n-1) × 3 for " → "
+    let separator_total = (n - 1) * 3;
+    // Icon overhead per entry: "icon " = 2 chars (icon + space)
+    let icon_overhead = n * 2;
+
+    // Tier 1: try full names
+    let full_name_total: usize = entries.iter().map(|e| e.name.chars().count()).sum();
+    let full_width = separator_total + icon_overhead + full_name_total;
+    if full_width <= available {
+        return PipelineTier::Full;
+    }
+
+    // Tier 2: compute max_name_len so everything fits
+    // total = separator_total + n * (2 + max_name_len) <= available
+    let fixed_overhead = separator_total + icon_overhead;
+    if available > fixed_overhead {
+        let budget_for_names = available - fixed_overhead;
+        let max_name_len = budget_for_names / n;
+        if max_name_len >= PIPELINE_MIN_NAME_LEN {
+            return PipelineTier::Truncated { max_name_len };
+        }
+    }
+
+    // Tier 3: icon-only
+    PipelineTier::IconOnly
+}
+
+/// Builds the styled spans for the pipeline bar according to the chosen tier.
+fn build_pipeline_spans(entries: &[PipelineEntry], tier: PipelineTier) -> Vec<Span<'static>> {
+    let mut spans: Vec<Span> = Vec::new();
+
+    for (i, entry) in entries.iter().enumerate() {
+        if i > 0 {
+            spans.push(Span::styled(" → ", Style::default().fg(Color::DarkGray)));
+        }
+
+        match &tier {
+            PipelineTier::IconOnly => {
+                spans.push(Span::styled(entry.icon.clone(), entry.style));
+            }
+            PipelineTier::Full => {
+                spans.push(Span::styled(format!("{} ", entry.icon), entry.style));
+                let name_style = if entry.bold_name {
+                    entry.style.bold()
+                } else {
+                    entry.style
+                };
+                spans.push(Span::styled(entry.name.clone(), name_style));
+            }
+            PipelineTier::Truncated { max_name_len } => {
+                spans.push(Span::styled(format!("{} ", entry.icon), entry.style));
+                let name_style = if entry.bold_name {
+                    entry.style.bold()
+                } else {
+                    entry.style
+                };
+                let name = truncate_str(&entry.name, *max_name_len);
+                spans.push(Span::styled(name, name_style));
+            }
+        }
+    }
+
+    spans
 }
 
 /// Renders the compact phase sidebar in the left panel.
@@ -243,8 +381,12 @@ pub fn render_sidebar(
 
 /// Renders a single phase entry for the sidebar.
 ///
-/// Returns one or two lines: the main status line (`[icon] name elapsed`)
-/// plus an optional detail sub-line for running phases with review/verify
+/// Uses a two-line layout for non-pending phases:
+/// - Line 1: `[icon] phase-name`
+/// - Line 2: `    T:count  duration  $cost` (indented metadata)
+///
+/// Pending phases use a single line (`[○] name`).
+/// Running phases may show an additional detail sub-line for review/verify
 /// round information (e.g., "round 2/3: 5 issue(s), fixing...").
 fn render_sidebar_phase(
     phase: &PhaseDisplay,
@@ -253,6 +395,8 @@ fn render_sidebar_phase(
 ) -> Vec<Line<'static>> {
     // Icon prefix "[X] " takes 4 characters
     let name_budget = (width as usize).saturating_sub(4);
+    // Sub-line indent "    " takes 4 characters
+    let meta_budget = (width as usize).saturating_sub(4);
 
     match &phase.status {
         PhaseDisplayStatus::Pending => {
@@ -264,32 +408,33 @@ fn render_sidebar_phase(
         }
         PhaseDisplayStatus::Running => {
             let spinner = SPINNER_FRAMES[spinner_tick % SPINNER_FRAMES.len()];
+            let name = truncate_str(&phase.name, name_budget);
+
+            // Line 1: icon + name
+            let mut result = vec![Line::from(Span::styled(
+                format!("[{spinner}] {name}"),
+                Style::default().fg(Color::Yellow).bold(),
+            ))];
+
+            // Line 2: indented metadata (turns + elapsed)
             let elapsed = phase
                 .started_at
                 .map(|t| format_duration(t.elapsed()))
                 .unwrap_or_default();
-            let turns_str = if phase.current_turn > 0 {
-                format!(" T:{}", phase.current_turn)
+            let meta = if phase.current_turn > 0 {
+                format!("T:{}  {elapsed}", phase.current_turn)
             } else {
-                String::new()
+                elapsed
             };
-            // Reserve space for " T:N elapsed" suffix
-            let suffix_len = turns_str.len() + elapsed.len() + 1;
-            let avail = name_budget.saturating_sub(suffix_len);
-            let name = truncate_str(&phase.name, avail);
-            let mut result = vec![Line::from(vec![
-                Span::styled(
-                    format!("[{spinner}] {name}"),
-                    Style::default().fg(Color::Yellow).bold(),
-                ),
-                Span::styled(
-                    format!("{turns_str} {elapsed}"),
-                    Style::default().fg(Color::Yellow),
-                ),
-            ])];
-            // Show review/verify detail text as a sub-line when available
+            let meta = truncate_str(&meta, meta_budget);
+            result.push(Line::from(Span::styled(
+                format!("    {meta}"),
+                Style::default().fg(Color::Yellow),
+            )));
+
+            // Optional line 3: review/verify detail text
             if !phase.detail.is_empty() {
-                let detail = truncate_str(&phase.detail, name_budget);
+                let detail = truncate_str(&phase.detail, meta_budget);
                 result.push(Line::from(Span::styled(
                     format!("    {detail}"),
                     Style::default().fg(Color::Yellow),
@@ -298,25 +443,32 @@ fn render_sidebar_phase(
             result
         }
         PhaseDisplayStatus::Completed { duration, cost_usd } => {
+            let name = truncate_str(&phase.name, name_budget);
+
+            // Line 1: icon + name
+            let name_line = Line::from(Span::styled(
+                format!("[●] {name}"),
+                Style::default().fg(Color::Green),
+            ));
+
+            // Line 2: indented metadata (turns + duration + cost)
             let dur = format_duration(*duration);
-            let turns_str = if phase.current_turn > 0 {
-                format!(" T:{}", phase.current_turn)
-            } else {
-                String::new()
-            };
-            // If cost is available, show it after duration
-            let suffix = if let Some(cost) = cost_usd {
-                format!("{turns_str} {dur} ${cost:.4}")
-            } else {
-                format!("{turns_str} {dur}")
-            };
-            let suffix_len = suffix.len();
-            let avail = name_budget.saturating_sub(suffix_len);
-            let name = truncate_str(&phase.name, avail);
-            vec![Line::from(vec![
-                Span::styled(format!("[●] {name}"), Style::default().fg(Color::Green)),
-                Span::styled(format!(" {suffix}"), Style::default().fg(Color::White)),
-            ])]
+            let mut parts = Vec::new();
+            if phase.current_turn > 0 {
+                parts.push(format!("T:{}", phase.current_turn));
+            }
+            parts.push(dur);
+            if let Some(cost) = cost_usd {
+                parts.push(format!("${cost:.2}"));
+            }
+            let meta = parts.join("  ");
+            let meta = truncate_str(&meta, meta_budget);
+            let meta_line = Line::from(Span::styled(
+                format!("    {meta}"),
+                Style::default().fg(Color::White),
+            ));
+
+            vec![name_line, meta_line]
         }
         PhaseDisplayStatus::Failed { error } => {
             let name = truncate_str(&phase.name, name_budget);
@@ -326,7 +478,7 @@ fn render_sidebar_phase(
                     Style::default().fg(Color::Red),
                 ))]
             } else {
-                let err_display = truncate_str(error, name_budget);
+                let err_display = truncate_str(error, meta_budget);
                 vec![
                     Line::from(Span::styled(
                         format!("[✗] {name}"),
