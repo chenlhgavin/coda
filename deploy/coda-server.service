@@ -5,10 +5,10 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-User=coda
-Group=coda
-WorkingDirectory=/opt/coda
-ExecStart=/opt/coda/bin/coda-server
+User=chenlh
+Group=chenlh
+WorkingDirectory=/home/chenlh/workspace/coda
+ExecStart=/home/chenlh/workspace/coda/target/release/coda-server
 Restart=on-failure
 RestartSec=5
 
@@ -25,7 +25,7 @@ NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=read-only
 PrivateTmp=true
-ReadWritePaths=/opt/coda /home/coda/.coda-server
+ReadWritePaths=/home/chenlh/workspace/coda /home/chenlh/.coda-server
 
 [Install]
 WantedBy=multi-user.target

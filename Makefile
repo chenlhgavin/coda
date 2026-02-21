@@ -32,6 +32,22 @@ install-service:
 	sudo systemctl daemon-reload
 	@echo "Done. Run 'sudo systemctl enable --now coda-server' to start."
 
+deploy: build-release install-service
+	@echo "Restarting coda-server..."
+	sudo systemctl restart coda-server
+	@echo "Deploy complete."
+	@systemctl status coda-server --no-pager
+
+build-release:
+	@echo "Building coda-server in release mode..."
+	cargo build --release --bin coda-server
+
+restart-service:
+	sudo systemctl restart coda-server
+
+status-service:
+	@systemctl status coda-server --no-pager
+
 uninstall-service:
 	@echo "Removing coda-server systemd service..."
 	-sudo systemctl disable --now coda-server
@@ -39,4 +55,4 @@ uninstall-service:
 	sudo systemctl daemon-reload
 	@echo "Done."
 
-.PHONY: build test release update-submodule publish-dry-run publish install-service uninstall-service
+.PHONY: build test release update-submodule publish-dry-run publish install-service uninstall-service deploy build-release restart-service status-service
