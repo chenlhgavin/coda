@@ -3,23 +3,31 @@ version: 1
 
 agent:
   model: "claude-opus-4-6"
-  permission_mode: "auto"
+  max_budget_usd: 50.0
   max_retries: 3
+  max_turns: 100
+  idle_timeout_secs: 300
+  idle_retries: 2
+
+checks:
+  - "cargo build"
+  - "cargo +nightly fmt -- --check"
+  - "cargo clippy -- -D warnings"
+  - "cargo test"
+  - "cargo deny check"
 
 prompts:
-  extra_dirs: []
+  extra_dirs:
+    - ".coda/prompts"
 
 git:
   auto_commit: true
   branch_prefix: "feature"
-  commit_prefix: "feat"
+  base_branch: "auto"
 
 review:
   enabled: true
-  checks:
-    - "cargo build"
-    - "cargo +nightly fmt -- --check"
-    - "cargo clippy -- -D warnings"
-    - "cargo test"
-    - "cargo deny check"
   max_review_rounds: 5
+  engine: claude
+  codex_model: "gpt-5.3-codex"
+  codex_reasoning_effort: "high"
