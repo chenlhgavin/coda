@@ -76,6 +76,43 @@ const MIN_PHASE_COUNT: usize = 4;
 const TERMINAL_QUALITY_PHASES: &[&str] = &["review", "verify", "update-docs"];
 
 impl FeatureState {
+    /// Migrates legacy state files to the current schema.
+    ///
+    /// Detects states created before the `update-docs` phase was introduced
+    /// and appends missing terminal quality phases so they pass validation.
+    /// This allows in-progress features to be resumed without manual edits.
+    pub fn migrate(&mut self) {
+        // Collect the names of existing terminal quality phases (owned to avoid borrow conflict).
+        let existing_quality: Vec<String> = self
+            .phases
+            .iter()
+            .rev()
+            .take_while(|p| p.kind == PhaseKind::Quality)
+            .map(|p| p.name.clone())
+            .collect();
+
+        for &expected in TERMINAL_QUALITY_PHASES {
+            if !existing_quality.iter().any(|n| n == expected) {
+                tracing::info!(
+                    phase = expected,
+                    "Migrating legacy state: appending missing quality phase"
+                );
+                self.phases.push(PhaseRecord {
+                    name: expected.to_string(),
+                    kind: PhaseKind::Quality,
+                    status: PhaseStatus::Pending,
+                    started_at: None,
+                    completed_at: None,
+                    turns: 0,
+                    cost_usd: 0.0,
+                    cost: TokenCost::default(),
+                    duration_secs: 0,
+                    details: serde_json::Value::Object(serde_json::Map::new()),
+                });
+            }
+        }
+    }
+
     /// Validates structural invariants after deserialization.
     ///
     /// Checks that `phases` has at least [`MIN_PHASE_COUNT`] entries
@@ -653,6 +690,101 @@ mod tests {
         let err = state.validate().unwrap_err();
         assert!(err.contains("expected terminal quality phase"));
         assert!(err.contains("review"));
+    }
+
+    #[test]
+    fn test_should_migrate_legacy_state_missing_update_docs() {
+        let now = chrono::Utc::now();
+        let make_phase = |name: &str, kind: PhaseKind| PhaseRecord {
+            name: name.to_string(),
+            kind,
+            status: PhaseStatus::Pending,
+            started_at: None,
+            completed_at: None,
+            turns: 0,
+            cost_usd: 0.0,
+            cost: TokenCost::default(),
+            duration_secs: 0,
+            details: serde_json::json!({}),
+        };
+        // Legacy state: review + verify but no update-docs
+        let mut state = FeatureState {
+            feature: FeatureInfo {
+                slug: "test".to_string(),
+                created_at: now,
+                updated_at: now,
+            },
+            status: FeatureStatus::Planned,
+            current_phase: 0,
+            git: GitInfo {
+                worktree_path: PathBuf::from(".trees/test"),
+                branch: "feature/test".to_string(),
+                base_branch: "main".to_string(),
+            },
+            phases: vec![
+                make_phase("dev-1", PhaseKind::Dev),
+                make_phase("review", PhaseKind::Quality),
+                make_phase("verify", PhaseKind::Quality),
+            ],
+            pr: None,
+            total: TotalStats::default(),
+        };
+        // Before migration: fails validation (too few phases)
+        assert!(state.validate().is_err());
+
+        state.migrate();
+
+        // After migration: update-docs appended, passes validation
+        assert_eq!(state.phases.len(), 4);
+        assert_eq!(state.phases[3].name, "update-docs");
+        assert_eq!(state.phases[3].kind, PhaseKind::Quality);
+        assert_eq!(state.phases[3].status, PhaseStatus::Pending);
+        assert!(state.validate().is_ok());
+    }
+
+    #[test]
+    fn test_should_not_duplicate_phases_on_migrate() {
+        let now = chrono::Utc::now();
+        let make_phase = |name: &str, kind: PhaseKind| PhaseRecord {
+            name: name.to_string(),
+            kind,
+            status: PhaseStatus::Pending,
+            started_at: None,
+            completed_at: None,
+            turns: 0,
+            cost_usd: 0.0,
+            cost: TokenCost::default(),
+            duration_secs: 0,
+            details: serde_json::json!({}),
+        };
+        // Already has all quality phases
+        let mut state = FeatureState {
+            feature: FeatureInfo {
+                slug: "test".to_string(),
+                created_at: now,
+                updated_at: now,
+            },
+            status: FeatureStatus::Planned,
+            current_phase: 0,
+            git: GitInfo {
+                worktree_path: PathBuf::from(".trees/test"),
+                branch: "feature/test".to_string(),
+                base_branch: "main".to_string(),
+            },
+            phases: vec![
+                make_phase("dev-1", PhaseKind::Dev),
+                make_phase("review", PhaseKind::Quality),
+                make_phase("verify", PhaseKind::Quality),
+                make_phase("update-docs", PhaseKind::Quality),
+            ],
+            pr: None,
+            total: TotalStats::default(),
+        };
+        state.migrate();
+
+        // Should not add duplicates
+        assert_eq!(state.phases.len(), 4);
+        assert!(state.validate().is_ok());
     }
 
     #[test]

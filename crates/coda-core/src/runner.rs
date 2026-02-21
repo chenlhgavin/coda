@@ -706,10 +706,13 @@ impl Runner {
         let feature_dir = find_feature_dir(&project_root, feature_slug)?;
         let state_path = feature_dir.join("state.yml");
 
-        // Load and validate state
+        // Load, migrate, and validate state
         let state_content = std::fs::read_to_string(&state_path)
             .map_err(|e| CoreError::StateError(format!("Cannot read state.yml: {e}")))?;
-        let state: FeatureState = serde_yaml::from_str(&state_content)?;
+        let mut state: FeatureState = serde_yaml::from_str(&state_content)?;
+
+        // Migrate legacy states (e.g. missing update-docs phase) before validation.
+        state.migrate();
 
         state.validate().map_err(|e| {
             CoreError::StateError(format!(
