@@ -30,6 +30,10 @@ pub enum Commands {
         /// Skip auto-committing init artifacts (user must commit manually).
         #[arg(long)]
         no_commit: bool,
+
+        /// Re-initialize: update `.coda/config.yml` and regenerate `.coda.md`.
+        #[arg(long, short = 'f')]
+        force: bool,
     },
 
     /// Interactive feature planning.
@@ -79,7 +83,7 @@ impl Cli {
         let app = App::new().await?;
 
         match self.command {
-            Commands::Init { no_commit } => app.init(no_commit).await,
+            Commands::Init { no_commit, force } => app.init(no_commit, force).await,
             Commands::Plan { feature_slug } => app.plan(&feature_slug).await,
             Commands::Run {
                 feature_slug,

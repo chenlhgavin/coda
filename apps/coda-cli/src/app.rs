@@ -59,11 +59,12 @@ impl App {
     ///
     /// Returns an error if initialization fails (e.g., already initialized,
     /// agent SDK errors) or the user cancels with Ctrl+C.
-    pub async fn init(&self, no_commit: bool) -> Result<()> {
+    pub async fn init(&self, no_commit: bool, force: bool) -> Result<()> {
         // Pre-flight: fail fast before launching TUI
         let project_root = self.engine.project_root();
-        if project_root.join(".coda").exists() {
+        if project_root.join(".coda").exists() && !force {
             println!("Project already initialized. .coda/ directory exists.");
+            println!("Run `coda init --force` to reinitialize.");
             println!("Run `coda plan <feature-slug>` to start planning a feature.");
             return Ok(());
         }
@@ -74,7 +75,7 @@ impl App {
 
         let mut ui = crate::init_ui::InitUi::new(&project_root_display)?;
 
-        let engine_future = self.engine.init(no_commit, Some(tx));
+        let engine_future = self.engine.init(no_commit, force, Some(tx));
 
         tokio::pin!(engine_future);
 
@@ -127,9 +128,14 @@ impl App {
                 );
                 println!("  ═══════════════════════════════════════");
                 println!();
-                println!("  Created .coda/ directory with config.yml");
-                println!("  Created .trees/ directory for worktrees");
-                println!("  Generated .coda.md repository overview");
+                if force {
+                    println!("  Updated .coda/config.yml");
+                    println!("  Regenerated .coda.md repository overview");
+                } else {
+                    println!("  Created .coda/ directory with config.yml");
+                    println!("  Created .trees/ directory for worktrees");
+                    println!("  Generated .coda.md repository overview");
+                }
                 println!();
                 if no_commit {
                     println!("  Commit the init artifacts before running `coda plan`:");
@@ -631,6 +637,16 @@ impl App {
                     RunEvent::PhaseFailed { name, error, .. } => {
                         println!("  [✗] {name:<24} Failed");
                         println!("      Error: {error}");
+                    }
+                    RunEvent::ReviewerCompleted {
+                        reviewer,
+                        issues_found,
+                    } => {
+                        if issues_found == 0 {
+                            println!("      [{reviewer}] review: passed");
+                        } else {
+                            println!("      [{reviewer}] review: {issues_found} issue(s)");
+                        }
                     }
                     RunEvent::ReviewRound {
                         round,

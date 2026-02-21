@@ -161,24 +161,6 @@ impl BindingStore {
         self.persist()
     }
 
-    /// Removes a channel binding.
-    ///
-    /// Returns `true` if a binding was removed, `false` if the channel had
-    /// no binding. Persists the change to the config file when a binding
-    /// was removed.
-    ///
-    /// # Errors
-    ///
-    /// Returns `ServerError::Config` if persistence fails.
-    pub fn remove(&self, channel_id: &str) -> Result<bool, ServerError> {
-        let removed = self.bindings.remove(channel_id).is_some();
-        if removed {
-            info!(channel_id, "Removed channel binding");
-            self.persist()?;
-        }
-        Ok(removed)
-    }
-
     /// Returns the number of active bindings.
     #[allow(dead_code)] // Used in tests; standard collection API
     pub fn len(&self) -> usize {
@@ -425,32 +407,6 @@ mod tests {
         let result = store.set("C123", PathBuf::from("/nonexistent/path"));
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("does not exist"));
-    }
-
-    #[test]
-    fn test_should_remove_existing_binding() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let config_path = tmp.path().join("config.yml");
-        write_test_config(&config_path);
-
-        let repo_path = tmp.path().to_path_buf();
-        let store = BindingStore::new(config_path, HashMap::new());
-        store.set("C123", repo_path).expect("set");
-
-        let removed = store.remove("C123").expect("remove");
-        assert!(removed);
-        assert!(store.get("C123").is_none());
-    }
-
-    #[test]
-    fn test_should_return_false_when_removing_nonexistent() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let config_path = tmp.path().join("config.yml");
-        write_test_config(&config_path);
-
-        let store = BindingStore::new(config_path, HashMap::new());
-        let removed = store.remove("C999").expect("remove");
-        assert!(!removed);
     }
 
     #[test]

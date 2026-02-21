@@ -20,17 +20,13 @@ const HELP_TEXT: &str = "\
 *CODA — AI-Driven Development Agent*
 
 *Channel Setup*
-  `/coda bind <path>` — Bind this channel to a local repository
-  `/coda unbind` — Remove the channel binding
+  `/coda repos` — List your GitHub repos, select one to clone and bind
+  `/coda switch <branch>` — Switch the bound repository to a different branch
 
 *Workflow Commands*
-  `/coda init` — Initialize the bound repo as a CODA project
+  `/coda init [--force]` — Initialize (or reinitialize) the bound repo as a CODA project
   `/coda plan <slug>` — Start an interactive planning session in a thread
   `/coda run <slug>` — Execute a feature development run with live progress
-
-*GitHub Integration*
-  `/coda repos [org]` — List GitHub repos and clone one to the workspace
-  `/coda switch <branch>` — Switch the bound repository to a different branch
 
 *Query Commands*
   `/coda list` — List all features in the bound repository
@@ -174,8 +170,6 @@ mod tests {
 
     #[test]
     fn test_should_contain_all_commands_in_help_text() {
-        assert!(HELP_TEXT.contains("/coda bind"));
-        assert!(HELP_TEXT.contains("/coda unbind"));
         assert!(HELP_TEXT.contains("/coda init"));
         assert!(HELP_TEXT.contains("/coda plan"));
         assert!(HELP_TEXT.contains("/coda run"));

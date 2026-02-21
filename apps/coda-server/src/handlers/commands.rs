@@ -20,25 +20,19 @@ use crate::state::AppState;
 /// ```
 /// use coda_server::handlers::commands::CodaCommand;
 ///
-/// let cmd = CodaCommand::parse("bind /path/to/repo").unwrap();
-/// assert!(matches!(cmd, CodaCommand::Bind { .. }));
+/// let cmd = CodaCommand::parse("repos").unwrap();
+/// assert!(matches!(cmd, CodaCommand::Repos));
 ///
 /// let cmd = CodaCommand::parse("").unwrap();
 /// assert!(matches!(cmd, CodaCommand::Help));
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CodaCommand {
-    /// Bind this channel to a repository path.
-    Bind {
-        /// Absolute path to the repository.
-        repo_path: String,
-    },
-
-    /// Unbind this channel from its current repository.
-    Unbind,
-
     /// Initialize the bound repository as a CODA project.
-    Init,
+    Init {
+        /// Whether to reinitialize (update config and regenerate docs).
+        force: bool,
+    },
 
     /// Start an interactive planning session for a feature.
     Plan {
@@ -65,10 +59,7 @@ pub enum CodaCommand {
     Clean,
 
     /// List GitHub repos and select one to clone and bind.
-    Repos {
-        /// Optional GitHub org/user to list repos from.
-        org: Option<String>,
-    },
+    Repos,
 
     /// Switch the bound repository to a different branch.
     Switch {
@@ -96,8 +87,7 @@ impl CodaCommand {
     ///
     /// assert!(matches!(CodaCommand::parse("help"), Ok(CodaCommand::Help)));
     /// assert!(matches!(CodaCommand::parse("list"), Ok(CodaCommand::List)));
-    /// assert!(matches!(CodaCommand::parse("bind /repo"), Ok(CodaCommand::Bind { .. })));
-    /// assert!(CodaCommand::parse("bind").is_err()); // missing path
+    /// assert!(matches!(CodaCommand::parse("repos"), Ok(CodaCommand::Repos)));
     /// ```
     pub fn parse(text: &str) -> Result<Self, ServerError> {
         let text = text.trim();
@@ -110,18 +100,10 @@ impl CodaCommand {
         let rest = parts.next().unwrap_or("").trim();
 
         match subcommand {
-            "bind" => {
-                if rest.is_empty() {
-                    return Err(ServerError::Dispatch(
-                        "Usage: `/coda bind <repo_path>` — provide the absolute path to your repository".into(),
-                    ));
-                }
-                Ok(Self::Bind {
-                    repo_path: rest.to_string(),
-                })
+            "init" => {
+                let force = rest == "--force" || rest == "-f";
+                Ok(Self::Init { force })
             }
-            "unbind" => Ok(Self::Unbind),
-            "init" => Ok(Self::Init),
             "plan" => {
                 if rest.is_empty() {
                     return Err(ServerError::Dispatch(
@@ -154,13 +136,7 @@ impl CodaCommand {
                 })
             }
             "clean" => Ok(Self::Clean),
-            "repos" => Ok(Self::Repos {
-                org: if rest.is_empty() {
-                    None
-                } else {
-                    Some(rest.to_string())
-                },
-            }),
+            "repos" => Ok(Self::Repos),
             "switch" => {
                 if rest.is_empty() {
                     return Err(ServerError::Dispatch(
@@ -239,13 +215,9 @@ pub async fn handle_slash_command(state: Arc<AppState>, payload: serde_json::Val
     };
 
     let result = match command {
-        CodaCommand::Bind { repo_path } => {
-            commands::bind::handle_bind(Arc::clone(&state), &cmd_payload, &repo_path).await
+        CodaCommand::Init { force } => {
+            commands::init::handle_init(Arc::clone(&state), &cmd_payload, force).await
         }
-        CodaCommand::Unbind => {
-            commands::bind::handle_unbind(Arc::clone(&state), &cmd_payload).await
-        }
-        CodaCommand::Init => commands::init::handle_init(Arc::clone(&state), &cmd_payload).await,
         CodaCommand::Plan { feature_slug } => {
             commands::plan::handle_plan(Arc::clone(&state), &cmd_payload, &feature_slug).await
         }
@@ -258,9 +230,7 @@ pub async fn handle_slash_command(state: Arc<AppState>, payload: serde_json::Val
             commands::query::handle_status(Arc::clone(&state), &cmd_payload, &feature_slug).await
         }
         CodaCommand::Clean => commands::query::handle_clean(Arc::clone(&state), &cmd_payload).await,
-        CodaCommand::Repos { org } => {
-            commands::repos::handle_repos(Arc::clone(&state), &cmd_payload, org.as_deref()).await
-        }
+        CodaCommand::Repos => commands::repos::handle_repos(Arc::clone(&state), &cmd_payload).await,
         CodaCommand::Switch { branch } => {
             commands::repos::handle_switch(Arc::clone(&state), &cmd_payload, &branch).await
         }
@@ -292,44 +262,21 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_should_parse_bind_command() {
-        let cmd = CodaCommand::parse("bind /path/to/repo").expect("parse");
-        assert_eq!(
-            cmd,
-            CodaCommand::Bind {
-                repo_path: "/path/to/repo".into()
-            }
-        );
-    }
-
-    #[test]
-    fn test_should_parse_bind_with_spaces_in_path() {
-        let cmd = CodaCommand::parse("bind /path/to/my repo").expect("parse");
-        assert_eq!(
-            cmd,
-            CodaCommand::Bind {
-                repo_path: "/path/to/my repo".into()
-            }
-        );
-    }
-
-    #[test]
-    fn test_should_error_on_bind_without_path() {
-        let result = CodaCommand::parse("bind");
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("repo_path"));
-    }
-
-    #[test]
-    fn test_should_parse_unbind() {
-        let cmd = CodaCommand::parse("unbind").expect("parse");
-        assert_eq!(cmd, CodaCommand::Unbind);
-    }
-
-    #[test]
     fn test_should_parse_init() {
         let cmd = CodaCommand::parse("init").expect("parse");
-        assert_eq!(cmd, CodaCommand::Init);
+        assert_eq!(cmd, CodaCommand::Init { force: false });
+    }
+
+    #[test]
+    fn test_should_parse_init_force() {
+        let cmd = CodaCommand::parse("init --force").expect("parse");
+        assert_eq!(cmd, CodaCommand::Init { force: true });
+    }
+
+    #[test]
+    fn test_should_parse_init_force_short() {
+        let cmd = CodaCommand::parse("init -f").expect("parse");
+        assert_eq!(cmd, CodaCommand::Init { force: true });
     }
 
     #[test]
@@ -422,13 +369,8 @@ mod tests {
 
     #[test]
     fn test_should_trim_whitespace() {
-        let cmd = CodaCommand::parse("  bind  /repo  ").expect("parse");
-        assert_eq!(
-            cmd,
-            CodaCommand::Bind {
-                repo_path: "/repo".into()
-            }
-        );
+        let cmd = CodaCommand::parse("  list  ").expect("parse");
+        assert_eq!(cmd, CodaCommand::List);
     }
 
     #[test]
@@ -448,20 +390,15 @@ mod tests {
     }
 
     #[test]
-    fn test_should_parse_repos_without_org() {
+    fn test_should_parse_repos() {
         let cmd = CodaCommand::parse("repos").expect("parse");
-        assert_eq!(cmd, CodaCommand::Repos { org: None });
+        assert_eq!(cmd, CodaCommand::Repos);
     }
 
     #[test]
-    fn test_should_parse_repos_with_org() {
+    fn test_should_parse_repos_ignoring_extra_text() {
         let cmd = CodaCommand::parse("repos my-org").expect("parse");
-        assert_eq!(
-            cmd,
-            CodaCommand::Repos {
-                org: Some("my-org".into())
-            }
-        );
+        assert_eq!(cmd, CodaCommand::Repos);
     }
 
     #[test]

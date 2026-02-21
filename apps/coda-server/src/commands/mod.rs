@@ -1,7 +1,6 @@
 //! Command implementations for CODA slash commands.
 //!
 //! Each submodule implements one or more related commands:
-//! - [`bind`] — `/coda bind` and `/coda unbind`
 //! - [`init`] — `/coda init` with live progress updates
 //! - [`plan`] — `/coda plan` with interactive Slack thread sessions
 //! - [`query`] — `/coda help`, `/coda list`, `/coda status`, `/coda clean`
@@ -19,12 +18,12 @@ use crate::error::ServerError;
 use crate::formatter;
 use crate::state::AppState;
 
-pub mod bind;
 pub mod init;
 pub mod plan;
 pub mod query;
 pub mod repos;
 pub mod run;
+pub mod streaming;
 
 /// Resolves the channel binding and creates an Engine for the bound repository.
 ///
@@ -41,8 +40,9 @@ pub(crate) async fn resolve_engine(
     channel_id: &str,
 ) -> Result<Option<(PathBuf, Engine)>, ServerError> {
     let Some(repo_path) = state.bindings().get(channel_id) else {
-        let blocks =
-            formatter::error("No repository bound to this channel. Use `/coda bind <path>` first.");
+        let blocks = formatter::error(
+            "No repository bound to this channel. Use `/coda repos` to clone and bind a repository first.",
+        );
         state.slack().post_message(channel_id, blocks).await?;
         return Ok(None);
     };

@@ -154,10 +154,9 @@ async fn execute_clean(
         return Err("No candidates to clean".to_string());
     }
 
-    let repo_path = state
-        .bindings()
-        .get(channel_id)
-        .ok_or("Channel binding was removed. Use `/coda bind <path>` first.")?;
+    let repo_path = state.bindings().get(channel_id).ok_or(
+        "Channel binding was removed. Use `/coda repos` to clone and bind a repository first.",
+    )?;
 
     // Acquire repo lock for worktree removal
     state

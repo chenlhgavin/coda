@@ -1,6 +1,6 @@
 //! GitHub repository integration and branch switching.
 //!
-//! - [`handle_repos`] — `/coda repos [org]`: lists GitHub repos via `gh` CLI
+//! - [`handle_repos`] — `/coda repos`: lists GitHub repos via `gh` CLI
 //!   and posts a Block Kit select menu. When a repo is selected, the
 //!   interaction handler clones it and auto-binds the channel.
 //! - [`handle_switch`] — `/coda switch <branch>`: switches the bound
@@ -9,6 +9,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use chrono::Local;
 use serde::Deserialize;
 use tracing::{info, warn};
 
@@ -17,10 +18,11 @@ use crate::formatter::{self, RepoListEntry};
 use crate::handlers::commands::SlashCommandPayload;
 use crate::state::AppState;
 
-/// Handles `/coda repos [org]`.
+/// Handles `/coda repos`.
 ///
-/// Runs `gh repo list` to fetch repositories and posts a Block Kit select
-/// menu to the channel. Requires the `workspace` config to be set.
+/// Runs `gh repo list` to fetch repositories owned by the authenticated
+/// user and posts a Block Kit select menu to the channel. Requires the
+/// `workspace` config to be set.
 ///
 /// # Errors
 ///
@@ -29,7 +31,6 @@ use crate::state::AppState;
 pub async fn handle_repos(
     state: Arc<AppState>,
     payload: &SlashCommandPayload,
-    org: Option<&str>,
 ) -> Result<(), ServerError> {
     let channel = &payload.channel_id;
 
@@ -41,13 +42,9 @@ pub async fn handle_repos(
         return Ok(());
     };
 
-    info!(
-        channel,
-        org = org.unwrap_or("(none)"),
-        "Listing GitHub repos"
-    );
+    info!(channel, "Listing GitHub repos");
 
-    let repos = match list_github_repos(org).await {
+    let repos = match list_github_repos().await {
         Ok(repos) => repos,
         Err(e) => {
             let blocks = formatter::error(&format!("Failed to list repos: {e}"));
@@ -98,8 +95,9 @@ pub async fn handle_switch(
     let channel = &payload.channel_id;
 
     let Some(repo_path) = state.bindings().get(channel) else {
-        let blocks =
-            formatter::error("No repository bound to this channel. Use `/coda bind <path>` first.");
+        let blocks = formatter::error(
+            "No repository bound to this channel. Use `/coda repos` to clone and bind a repository first.",
+        );
         state.slack().post_message(channel, blocks).await?;
         return Ok(());
     };
@@ -170,62 +168,52 @@ pub async fn handle_repo_clone(
         "Cloning repository"
     );
 
-    // If the directory already exists, skip clone
-    let needs_clone = !clone_path.is_dir();
+    // Ensure parent directory exists
+    if let Some(parent) = clone_path.parent()
+        && let Err(e) = std::fs::create_dir_all(parent)
+    {
+        let blocks = formatter::error(&format!("Failed to create directory: {e}"));
+        let _ = state
+            .slack()
+            .update_message(channel_id, message_ts, blocks)
+            .await;
+        return;
+    }
 
-    if needs_clone {
-        // Ensure parent directory exists
-        if let Some(parent) = clone_path.parent()
-            && let Err(e) = std::fs::create_dir_all(parent)
-        {
-            let blocks = formatter::error(&format!("Failed to create directory: {e}"));
+    match clone_repo(repo_name, &clone_path).await {
+        Ok(()) => {
+            info!(
+                channel_id,
+                repo_name,
+                path = %clone_path.display(),
+                "Repository cloned"
+            );
+        }
+        Err(e) => {
+            warn!(
+                channel_id,
+                repo_name,
+                error = %e,
+                "Failed to clone repository"
+            );
+            let blocks = formatter::error(&format!("Clone failed: {e}"));
             let _ = state
                 .slack()
                 .update_message(channel_id, message_ts, blocks)
                 .await;
             return;
         }
-
-        match clone_repo(repo_name, &clone_path).await {
-            Ok(()) => {
-                info!(
-                    channel_id,
-                    repo_name,
-                    path = %clone_path.display(),
-                    "Repository cloned"
-                );
-            }
-            Err(e) => {
-                warn!(
-                    channel_id,
-                    repo_name,
-                    error = %e,
-                    "Failed to clone repository"
-                );
-                let blocks = formatter::error(&format!("Clone failed: {e}"));
-                let _ = state
-                    .slack()
-                    .update_message(channel_id, message_ts, blocks)
-                    .await;
-                return;
-            }
-        }
     }
 
     // Auto-bind the channel
     match state.bindings().set(channel_id, clone_path.clone()) {
         Ok(()) => {
-            let status = if needs_clone {
-                "Cloned and bound"
-            } else {
-                "Already cloned, bound"
-            };
             let blocks = vec![serde_json::json!({
                 "type": "section",
                 "text": {
                     "type": "mrkdwn",
                     "text": format!(
-                        ":white_check_mark: {status} `{repo_name}` to `{}`",
+                        ":white_check_mark: Cloned and bound `{repo_name}` to `{}`",
                         clone_path.display()
                     )
                 }
@@ -254,15 +242,10 @@ struct RepoInfo {
     description: Option<String>,
 }
 
-/// Lists GitHub repositories using the `gh` CLI.
-async fn list_github_repos(org: Option<&str>) -> Result<Vec<RepoInfo>, String> {
+/// Lists GitHub repositories owned by the authenticated `gh` CLI user.
+async fn list_github_repos() -> Result<Vec<RepoInfo>, String> {
     let mut cmd = tokio::process::Command::new("gh");
     cmd.args(["repo", "list"]);
-
-    if let Some(org) = org {
-        cmd.arg(org);
-    }
-
     cmd.args(["--json", "nameWithOwner,description", "--limit", "30"]);
 
     let output = cmd
@@ -281,9 +264,16 @@ async fn list_github_repos(org: Option<&str>) -> Result<Vec<RepoInfo>, String> {
     Ok(repos)
 }
 
-/// Builds the clone path: `<workspace>/github.com/<owner>/<repo>`.
+/// Builds the clone path: `<workspace>/<repo>-<YYYYMMDD-HHMMSS>`.
+///
+/// Extracts the repo name from `owner/repo` format and appends a
+/// timestamp to ensure unique clone directories.
 fn build_clone_path(workspace: &Path, repo_name: &str) -> PathBuf {
-    workspace.join("github.com").join(repo_name)
+    let short_name = repo_name
+        .rsplit_once('/')
+        .map_or(repo_name, |(_, repo)| repo);
+    let timestamp = Local::now().format("%Y%m%d-%H%M%S");
+    workspace.join(format!("{short_name}-{timestamp}"))
 }
 
 /// Clones a GitHub repository using the `gh` CLI.
@@ -387,20 +377,37 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_should_build_clone_path() {
+    fn test_should_build_clone_path_with_timestamp() {
         let workspace = Path::new("/home/user/workspace");
         let path = build_clone_path(workspace, "org/my-repo");
-        assert_eq!(
-            path,
-            PathBuf::from("/home/user/workspace/github.com/org/my-repo")
+        let name = path.file_name().unwrap().to_str().unwrap();
+        assert!(name.starts_with("my-repo-"), "got: {name}");
+        // Verify timestamp format: YYYYMMDD-HHMMSS (15 chars)
+        let suffix = &name["my-repo-".len()..];
+        assert_eq!(suffix.len(), 15, "timestamp should be YYYYMMDD-HHMMSS");
+        assert_eq!(path.parent().unwrap(), Path::new("/home/user/workspace"));
+    }
+
+    #[test]
+    fn test_should_build_clone_path_without_owner_prefix() {
+        let workspace = Path::new("/ws");
+        let path = build_clone_path(workspace, "deep-org/sub-repo");
+        let name = path.file_name().unwrap().to_str().unwrap();
+        assert!(
+            name.starts_with("sub-repo-"),
+            "should strip owner prefix, got: {name}"
         );
     }
 
     #[test]
-    fn test_should_build_clone_path_nested_org() {
+    fn test_should_build_clone_path_plain_name() {
         let workspace = Path::new("/ws");
-        let path = build_clone_path(workspace, "deep-org/sub-repo");
-        assert_eq!(path, PathBuf::from("/ws/github.com/deep-org/sub-repo"));
+        let path = build_clone_path(workspace, "my-repo");
+        let name = path.file_name().unwrap().to_str().unwrap();
+        assert!(
+            name.starts_with("my-repo-"),
+            "should handle plain repo names, got: {name}"
+        );
     }
 
     #[test]

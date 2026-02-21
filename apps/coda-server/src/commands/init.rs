@@ -39,6 +39,7 @@ const UPDATE_DEBOUNCE: Duration = Duration::from_secs(3);
 pub async fn handle_init(
     state: Arc<AppState>,
     payload: &SlashCommandPayload,
+    force: bool,
 ) -> Result<(), ServerError> {
     let channel = payload.channel_id.clone();
 
@@ -82,6 +83,7 @@ pub async fn handle_init(
             channel_clone,
             message_ts,
             repo_path_clone,
+            force,
         )
         .await;
     });
@@ -98,6 +100,7 @@ async fn run_init_task(
     channel: String,
     message_ts: String,
     repo_path: std::path::PathBuf,
+    force: bool,
 ) {
     let (tx, rx) = mpsc::unbounded_channel();
     let slack = state.slack().clone();
@@ -110,7 +113,7 @@ async fn run_init_task(
         rx,
     ));
 
-    let result = engine.init(false, Some(tx)).await;
+    let result = engine.init(false, force, Some(tx)).await;
 
     // Wait for event consumer to finish processing remaining events
     if let Err(e) = event_handle.await {

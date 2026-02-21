@@ -19,7 +19,11 @@ use tokio::sync::mpsc::UnboundedSender;
 use tracing::{debug, error, info, trace, warn};
 
 use crate::CoreError;
-use crate::config::CodaConfig;
+use crate::codex::{
+    ReviewSource, deduplicate_issues, format_issues, is_codex_available,
+    parse_review_issues_structured, run_codex_review,
+};
+use crate::config::{CodaConfig, ReviewEngine};
 use crate::engine::commit_coda_artifacts;
 use crate::gh::GhOps;
 use crate::git::GitOps;
@@ -80,6 +84,13 @@ pub enum RunEvent {
         /// Maximum allowed rounds.
         max_rounds: u32,
         /// Number of issues found in this round.
+        issues_found: u32,
+    },
+    /// A specific reviewer (Claude or Codex) completed its review within a round.
+    ReviewerCompleted {
+        /// Reviewer name (`"claude"` or `"codex"`).
+        reviewer: String,
+        /// Number of issues this reviewer found.
         issues_found: u32,
     },
     /// A verification attempt has completed.
@@ -1043,9 +1054,15 @@ impl Runner {
 
     /// Executes the review phase with fix loop.
     ///
-    /// Sends the diff for review, parses the YAML response for issues,
-    /// and if critical/major issues are found, asks the agent to fix them
-    /// and re-reviews. Loops up to `max_review_rounds`.
+    /// Dispatches to the appropriate review engine based on
+    /// [`ReviewEngine`] configuration:
+    ///
+    /// - **Claude**: Self-review using the existing Claude session (default)
+    /// - **Codex**: Independent review via `codex exec`, then Claude fixes
+    /// - **Hybrid**: Both Codex and Claude review, issues merged/deduplicated
+    ///
+    /// When `Codex` or `Hybrid` engine is selected but the `codex` binary
+    /// is not installed, falls back to `Claude` mode with a warning.
     async fn run_review(&mut self, phase_idx: usize) -> Result<TaskResult, CoreError> {
         self.mark_phase_running(phase_idx);
 
@@ -1073,6 +1090,40 @@ impl Runner {
             return Ok(task_result);
         }
 
+        // Determine effective engine, falling back if codex is unavailable
+        let effective_engine = self.resolve_review_engine();
+
+        info!(engine = %effective_engine, "Starting review phase");
+
+        match effective_engine {
+            ReviewEngine::Claude => self.run_review_claude(phase_idx).await,
+            ReviewEngine::Codex => self.run_review_codex(phase_idx).await,
+            ReviewEngine::Hybrid => self.run_review_hybrid(phase_idx).await,
+        }
+    }
+
+    /// Resolves the effective review engine, falling back to Claude if
+    /// `codex` is not installed.
+    fn resolve_review_engine(&self) -> ReviewEngine {
+        let configured = &self.config.review.engine;
+        match configured {
+            ReviewEngine::Claude => ReviewEngine::Claude,
+            ReviewEngine::Codex | ReviewEngine::Hybrid => {
+                if is_codex_available() {
+                    configured.clone()
+                } else {
+                    warn!(
+                        configured = %configured,
+                        "Codex CLI not found on PATH, falling back to Claude review",
+                    );
+                    ReviewEngine::Claude
+                }
+            }
+        }
+    }
+
+    /// Runs review using only Claude (original behavior).
+    async fn run_review_claude(&mut self, phase_idx: usize) -> Result<TaskResult, CoreError> {
         let design_spec = self.load_spec("design.md")?;
         let max_rounds = self.config.review.max_review_rounds;
         let mut acc = PhaseMetricsAccumulator::new();
@@ -1098,11 +1149,14 @@ impl Runner {
 
             self.review_summary.rounds += 1;
 
-            // Parse review issues from response
             let issues = parse_review_issues(&resp.text);
             let issue_count = issues.len() as u32;
             self.review_summary.issues_found += issue_count;
 
+            self.emit_event(RunEvent::ReviewerCompleted {
+                reviewer: "claude".to_string(),
+                issues_found: issue_count,
+            });
             self.emit_event(RunEvent::ReviewRound {
                 round: round + 1,
                 max_rounds,
@@ -1115,34 +1169,207 @@ impl Runner {
             }
 
             info!(issues = issue_count, "Found issues, asking agent to fix");
-
-            // Ask agent to fix the issues with design spec context
-            let issues_list = issues
-                .iter()
-                .enumerate()
-                .map(|(i, issue)| format!("{}. {}", i + 1, issue))
-                .collect::<Vec<_>>()
-                .join("\n");
-            let fix_prompt = format!(
-                "The code review found {issue_count} critical/major issues that must be fixed.\n\n\
-                 ## Issues\n\n{issues_list}\n\n\
-                 ## Instructions\n\n\
-                 1. Fix each issue listed above\n\
-                 2. Run the configured checks to ensure nothing is broken\n\
-                 3. Commit the fixes with a descriptive message\n\n\
-                 Refer to the design specification provided earlier for the intended behavior.",
-            );
-
-            let fix_resp = self.send_and_collect(&fix_prompt, None).await?;
-            let fm = self.metrics.record(&fix_resp.result);
-            if let Some(logger) = &mut self.run_logger {
-                logger.log_interaction(&fix_prompt, &fix_resp, &fm);
-            }
-            acc.record(&fix_resp, fm);
-
+            self.ask_claude_to_fix(&issues, issue_count, &mut acc)
+                .await?;
             self.review_summary.issues_resolved += issue_count;
         }
 
+        self.finalize_review_phase(phase_idx, acc)
+    }
+
+    /// Runs review using only Codex, then asks Claude to fix.
+    async fn run_review_codex(&mut self, phase_idx: usize) -> Result<TaskResult, CoreError> {
+        let design_spec = self.load_spec("design.md")?;
+        let max_rounds = self.config.review.max_review_rounds;
+        let codex_model = self.config.review.codex_model.clone();
+        let codex_effort = self.config.review.codex_reasoning_effort.clone();
+        let mut acc = PhaseMetricsAccumulator::new();
+
+        for round in 0..max_rounds {
+            info!(round = round + 1, max = max_rounds, "Review round (codex)");
+
+            let diff = self.get_diff()?;
+            let codex_issues = run_codex_review(
+                &self.worktree_path,
+                &diff,
+                &design_spec,
+                &codex_model,
+                &codex_effort,
+            )
+            .await?;
+            let issue_count = codex_issues.len() as u32;
+
+            self.emit_event(RunEvent::ReviewerCompleted {
+                reviewer: "codex".to_string(),
+                issues_found: issue_count,
+            });
+
+            self.review_summary.rounds += 1;
+            self.review_summary.issues_found += issue_count;
+
+            self.emit_event(RunEvent::ReviewRound {
+                round: round + 1,
+                max_rounds,
+                issues_found: issue_count,
+            });
+
+            if codex_issues.is_empty() {
+                info!("No critical/major issues found, review passed");
+                break;
+            }
+
+            info!(
+                issues = issue_count,
+                "Codex found issues, asking Claude to fix"
+            );
+            let formatted = format_issues(&codex_issues);
+            self.ask_claude_to_fix(&formatted, issue_count, &mut acc)
+                .await?;
+            self.review_summary.issues_resolved += issue_count;
+        }
+
+        self.finalize_review_phase(phase_idx, acc)
+    }
+
+    /// Runs hybrid review: Codex first, then Claude, merge and deduplicate.
+    async fn run_review_hybrid(&mut self, phase_idx: usize) -> Result<TaskResult, CoreError> {
+        let design_spec = self.load_spec("design.md")?;
+        let max_rounds = self.config.review.max_review_rounds;
+        let codex_model = self.config.review.codex_model.clone();
+        let codex_effort = self.config.review.codex_reasoning_effort.clone();
+        let mut acc = PhaseMetricsAccumulator::new();
+
+        for round in 0..max_rounds {
+            info!(round = round + 1, max = max_rounds, "Review round (hybrid)",);
+
+            let diff = self.get_diff()?;
+
+            // 1. Run Codex review
+            let codex_issues = match run_codex_review(
+                &self.worktree_path,
+                &diff,
+                &design_spec,
+                &codex_model,
+                &codex_effort,
+            )
+            .await
+            {
+                Ok(issues) => {
+                    self.emit_event(RunEvent::ReviewerCompleted {
+                        reviewer: "codex".to_string(),
+                        issues_found: issues.len() as u32,
+                    });
+                    issues
+                }
+                Err(e) => {
+                    warn!(error = %e, "Codex review failed, continuing with Claude only");
+                    self.emit_event(RunEvent::ReviewerCompleted {
+                        reviewer: "codex".to_string(),
+                        issues_found: 0,
+                    });
+                    Vec::new()
+                }
+            };
+
+            // 2. Run Claude review
+            let review_prompt = self.pm.render(
+                "run/review",
+                minijinja::context!(
+                    design_spec => design_spec,
+                    diff => diff,
+                ),
+            )?;
+
+            let resp = self.send_and_collect(&review_prompt, None).await?;
+            let m = self.metrics.record(&resp.result);
+            if let Some(logger) = &mut self.run_logger {
+                logger.log_interaction(&review_prompt, &resp, &m);
+            }
+            acc.record(&resp, m);
+
+            let claude_issues = parse_review_issues_structured(&resp.text, ReviewSource::Claude);
+
+            self.emit_event(RunEvent::ReviewerCompleted {
+                reviewer: "claude".to_string(),
+                issues_found: claude_issues.len() as u32,
+            });
+
+            // 3. Merge and deduplicate
+            let mut all_issues = codex_issues;
+            all_issues.extend(claude_issues);
+            let combined = deduplicate_issues(all_issues);
+            let issue_count = combined.len() as u32;
+
+            self.review_summary.rounds += 1;
+            self.review_summary.issues_found += issue_count;
+
+            self.emit_event(RunEvent::ReviewRound {
+                round: round + 1,
+                max_rounds,
+                issues_found: issue_count,
+            });
+
+            if combined.is_empty() {
+                info!("No critical/major issues found, review passed");
+                break;
+            }
+
+            // 4. Ask Claude to fix combined issues
+            info!(
+                issues = issue_count,
+                "Hybrid review found issues, asking Claude to fix",
+            );
+            let formatted = format_issues(&combined);
+            self.ask_claude_to_fix(&formatted, issue_count, &mut acc)
+                .await?;
+            self.review_summary.issues_resolved += issue_count;
+        }
+
+        self.finalize_review_phase(phase_idx, acc)
+    }
+
+    /// Asks Claude to fix a list of review issues.
+    ///
+    /// Shared helper used by all review engine modes.
+    async fn ask_claude_to_fix(
+        &mut self,
+        issues: &[String],
+        issue_count: u32,
+        acc: &mut PhaseMetricsAccumulator,
+    ) -> Result<(), CoreError> {
+        let issues_list = issues
+            .iter()
+            .enumerate()
+            .map(|(i, issue)| format!("{}. {}", i + 1, issue))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let fix_prompt = format!(
+            "The code review found {issue_count} critical/major issues that must be fixed.\n\n\
+             ## Issues\n\n{issues_list}\n\n\
+             ## Instructions\n\n\
+             1. Fix each issue listed above\n\
+             2. Run the configured checks to ensure nothing is broken\n\
+             3. Commit the fixes with a descriptive message\n\n\
+             Refer to the design specification provided earlier for the intended behavior.",
+        );
+
+        let fix_resp = self.send_and_collect(&fix_prompt, None).await?;
+        let fm = self.metrics.record(&fix_resp.result);
+        if let Some(logger) = &mut self.run_logger {
+            logger.log_interaction(&fix_prompt, &fix_resp, &fm);
+        }
+        acc.record(&fix_resp, fm);
+        Ok(())
+    }
+
+    /// Finalizes the review phase with accumulated metrics.
+    ///
+    /// Shared helper used by all review engine modes.
+    fn finalize_review_phase(
+        &mut self,
+        phase_idx: usize,
+        acc: PhaseMetricsAccumulator,
+    ) -> Result<TaskResult, CoreError> {
         let outcome = acc.into_outcome(serde_json::json!({
             "rounds": self.review_summary.rounds,
             "issues_found": self.review_summary.issues_found,

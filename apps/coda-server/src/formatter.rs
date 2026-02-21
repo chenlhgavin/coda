@@ -293,7 +293,12 @@ pub fn init_progress(phases: &[InitPhaseDisplay]) -> Vec<serde_json::Value> {
         lines.push(line);
     }
 
-    blocks.push(section(&lines.join("\n")));
+    let text = if lines.is_empty() {
+        "Starting\u{2026}".to_string()
+    } else {
+        lines.join("\n")
+    };
+    blocks.push(section(&text));
     blocks
 }
 
@@ -370,7 +375,12 @@ pub fn run_progress(feature_slug: &str, phases: &[RunPhaseDisplay]) -> Vec<serde
         lines.push(line);
     }
 
-    blocks.push(section(&lines.join("\n")));
+    let text = if lines.is_empty() {
+        "Starting\u{2026}".to_string()
+    } else {
+        lines.join("\n")
+    };
+    blocks.push(section(&text));
     blocks
 }
 
@@ -611,6 +621,81 @@ pub fn plan_thread_header(feature_slug: &str, phase: &str) -> Vec<serde_json::Va
     ]
 }
 
+/// Builds a Block Kit notification message posted after a run finishes.
+///
+/// This is posted as a **new** channel message (not an update) so that
+/// Slack delivers a notification to users. The existing progress message
+/// is still updated in-place separately.
+///
+/// # Examples
+///
+/// ```
+/// use std::time::Duration;
+/// use coda_server::formatter::{self, RunPhaseDisplay, PhaseDisplayStatus};
+///
+/// let phases = vec![
+///     RunPhaseDisplay {
+///         name: "setup".to_string(),
+///         status: PhaseDisplayStatus::Completed,
+///         duration: Some(Duration::from_secs(60)),
+///         turns: Some(3),
+///         cost_usd: Some(0.25),
+///     },
+///     RunPhaseDisplay {
+///         name: "implement".to_string(),
+///         status: PhaseDisplayStatus::Completed,
+///         duration: Some(Duration::from_secs(120)),
+///         turns: Some(10),
+///         cost_usd: Some(0.98),
+///     },
+/// ];
+/// let blocks = formatter::run_completion_notification("add-auth", true, &phases, None);
+/// assert!(!blocks.is_empty());
+/// ```
+pub fn run_completion_notification(
+    slug: &str,
+    success: bool,
+    phases: &[RunPhaseDisplay],
+    pr_url: Option<&str>,
+) -> Vec<serde_json::Value> {
+    if success {
+        let total_turns: u32 = phases.iter().filter_map(|p| p.turns).sum();
+        let total_cost: f64 = phases.iter().filter_map(|p| p.cost_usd).sum();
+        let total_secs: u64 = phases
+            .iter()
+            .filter_map(|p| p.duration.map(|d| d.as_secs()))
+            .sum();
+        let duration = format_duration(total_secs);
+
+        let mut text = format!(
+            ":white_check_mark: Run `{slug}` completed \u{2014} \
+             {total_turns} turns \u{00b7} ${total_cost:.2} \u{00b7} {duration}"
+        );
+
+        if let Some(url) = pr_url {
+            text.push_str(&format!("\n:link: PR: <{url}>"));
+        }
+
+        vec![section(&text)]
+    } else {
+        let failed: Vec<&str> = phases
+            .iter()
+            .filter(|p| p.status == PhaseDisplayStatus::Failed)
+            .map(|p| p.name.as_str())
+            .collect();
+
+        let failed_list = if failed.is_empty() {
+            "unknown".to_string()
+        } else {
+            failed.join(", ")
+        };
+
+        vec![section(&format!(
+            ":x: Run `{slug}` failed \u{2014} failed phase(s): {failed_list}"
+        ))]
+    }
+}
+
 /// Builds a Block Kit error message with a warning icon.
 ///
 /// # Examples
@@ -709,7 +794,7 @@ fn format_phase_stats(turns: u32, cost_usd: f64, duration_secs: u64) -> String {
     format!("{turns} turns \u{00b7} ${cost_usd:.2} \u{00b7} {duration}")
 }
 
-fn format_duration(secs: u64) -> String {
+pub(crate) fn format_duration(secs: u64) -> String {
     if secs == 0 {
         return "\u{2014}".to_string();
     }
@@ -1325,5 +1410,86 @@ mod tests {
         assert_eq!(truncate_str("hello world", 5), "hello");
         // Multi-byte: "你好" = 6 bytes, truncate at 4 should give "你" (3 bytes)
         assert_eq!(truncate_str("你好", 4), "你");
+    }
+
+    #[test]
+    fn test_should_build_success_completion_notification() {
+        let phases = vec![
+            RunPhaseDisplay {
+                name: "setup".to_string(),
+                status: PhaseDisplayStatus::Completed,
+                duration: Some(Duration::from_secs(60)),
+                turns: Some(3),
+                cost_usd: Some(0.25),
+            },
+            RunPhaseDisplay {
+                name: "implement".to_string(),
+                status: PhaseDisplayStatus::Completed,
+                duration: Some(Duration::from_secs(120)),
+                turns: Some(10),
+                cost_usd: Some(0.98),
+            },
+        ];
+        let blocks = run_completion_notification("add-auth", true, &phases, None);
+        assert_eq!(blocks.len(), 1);
+        let text = blocks[0]["text"]["text"].as_str().unwrap_or("");
+        assert!(text.contains(":white_check_mark:"));
+        assert!(text.contains("add-auth"));
+        assert!(text.contains("13 turns"));
+        assert!(text.contains("$1.23"));
+        assert!(text.contains("3m"));
+    }
+
+    #[test]
+    fn test_should_build_success_completion_notification_with_pr() {
+        let phases = vec![RunPhaseDisplay {
+            name: "setup".to_string(),
+            status: PhaseDisplayStatus::Completed,
+            duration: Some(Duration::from_secs(60)),
+            turns: Some(3),
+            cost_usd: Some(0.25),
+        }];
+        let blocks = run_completion_notification(
+            "add-auth",
+            true,
+            &phases,
+            Some("https://github.com/org/repo/pull/42"),
+        );
+        let text = blocks[0]["text"]["text"].as_str().unwrap_or("");
+        assert!(text.contains(":link:"));
+        assert!(text.contains("pull/42"));
+    }
+
+    #[test]
+    fn test_should_build_failure_completion_notification() {
+        let phases = vec![
+            RunPhaseDisplay {
+                name: "setup".to_string(),
+                status: PhaseDisplayStatus::Completed,
+                duration: Some(Duration::from_secs(60)),
+                turns: Some(3),
+                cost_usd: Some(0.25),
+            },
+            RunPhaseDisplay {
+                name: "review".to_string(),
+                status: PhaseDisplayStatus::Failed,
+                duration: Some(Duration::from_secs(30)),
+                turns: Some(2),
+                cost_usd: Some(0.10),
+            },
+        ];
+        let blocks = run_completion_notification("add-auth", false, &phases, None);
+        assert_eq!(blocks.len(), 1);
+        let text = blocks[0]["text"]["text"].as_str().unwrap_or("");
+        assert!(text.contains(":x:"));
+        assert!(text.contains("add-auth"));
+        assert!(text.contains("review"));
+    }
+
+    #[test]
+    fn test_should_build_failure_notification_with_no_failed_phases() {
+        let blocks = run_completion_notification("add-auth", false, &[], None);
+        let text = blocks[0]["text"]["text"].as_str().unwrap_or("");
+        assert!(text.contains("unknown"));
     }
 }

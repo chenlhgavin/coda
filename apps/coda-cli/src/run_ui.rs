@@ -354,6 +354,20 @@ impl RunUi {
                 }
                 self.active_phase = None;
             }
+            RunEvent::ReviewerCompleted {
+                reviewer,
+                issues_found,
+            } => {
+                let msg = if issues_found == 0 {
+                    format!("{reviewer} review: passed")
+                } else {
+                    format!("{reviewer} review: {issues_found} issue(s)")
+                };
+                tui_widgets::append_tool_activity(&mut self.content_lines, "[review]", &msg);
+                if self.auto_scroll {
+                    self.scroll_offset = self.max_scroll_offset();
+                }
+            }
             RunEvent::ReviewRound {
                 round,
                 max_rounds,

@@ -97,6 +97,32 @@ pub struct GitConfig {
     pub base_branch: String,
 }
 
+/// Which review engine to use for code review.
+///
+/// Controls whether reviews are performed by Claude (self-review),
+/// Codex CLI (independent review), or both (hybrid).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ReviewEngine {
+    /// Claude reviews its own code (default, backward-compatible).
+    #[default]
+    Claude,
+    /// Codex CLI performs an independent read-only review.
+    Codex,
+    /// Both Codex and Claude review; issues are merged and deduplicated.
+    Hybrid,
+}
+
+impl std::fmt::Display for ReviewEngine {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Claude => write!(f, "claude"),
+            Self::Codex => write!(f, "codex"),
+            Self::Hybrid => write!(f, "hybrid"),
+        }
+    }
+}
+
 /// Code review configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -106,6 +132,17 @@ pub struct ReviewConfig {
 
     /// Maximum number of review rounds to prevent infinite loops.
     pub max_review_rounds: u32,
+
+    /// Which review engine to use.
+    pub engine: ReviewEngine,
+
+    /// Model to use for Codex CLI reviews (e.g., `"gpt-5.3-codex"`).
+    pub codex_model: String,
+
+    /// Reasoning effort level for Codex CLI reviews.
+    ///
+    /// Valid values: `"minimal"`, `"low"`, `"medium"`, `"high"`, `"xhigh"`.
+    pub codex_reasoning_effort: String,
 }
 
 impl Default for CodaConfig {
@@ -161,6 +198,9 @@ impl Default for ReviewConfig {
         Self {
             enabled: true,
             max_review_rounds: 5,
+            engine: ReviewEngine::default(),
+            codex_model: "gpt-5.3-codex".to_string(),
+            codex_reasoning_effort: "high".to_string(),
         }
     }
 }
@@ -211,6 +251,9 @@ git:
 review:
   enabled: false
   max_review_rounds: 10
+  engine: hybrid
+  codex_model: "o4-mini"
+  codex_reasoning_effort: "medium"
 "#;
 
         let config: CodaConfig = serde_yaml::from_str(yaml).unwrap();
@@ -225,6 +268,9 @@ review:
         assert_eq!(config.git.branch_prefix, "dev");
         assert!(!config.review.enabled);
         assert_eq!(config.review.max_review_rounds, 10);
+        assert_eq!(config.review.engine, ReviewEngine::Hybrid);
+        assert_eq!(config.review.codex_model, "o4-mini");
+        assert_eq!(config.review.codex_reasoning_effort, "medium");
     }
 
     #[test]
@@ -267,5 +313,22 @@ review:
         assert_eq!(config.agent.model, "claude-opus-4-6");
         assert!((config.agent.max_budget_usd - 50.0).abs() < f64::EPSILON);
         assert!(config.git.auto_commit);
+        // Review engine defaults
+        assert_eq!(config.review.engine, ReviewEngine::Claude);
+        assert_eq!(config.review.codex_model, "gpt-5.3-codex");
+        assert_eq!(config.review.codex_reasoning_effort, "high");
+    }
+
+    #[test]
+    fn test_should_deserialize_all_review_engine_variants() {
+        for (yaml_val, expected) in [
+            ("claude", ReviewEngine::Claude),
+            ("codex", ReviewEngine::Codex),
+            ("hybrid", ReviewEngine::Hybrid),
+        ] {
+            let yaml = format!("version: 1\nreview:\n  engine: {yaml_val}\n");
+            let config: CodaConfig = serde_yaml::from_str(&yaml).unwrap();
+            assert_eq!(config.review.engine, expected);
+        }
     }
 }

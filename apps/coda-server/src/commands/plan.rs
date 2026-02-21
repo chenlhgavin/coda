@@ -12,7 +12,7 @@
 //! - `quit` — disconnects the session without finalizing
 
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use tracing::{info, warn};
 
@@ -22,18 +22,10 @@ use crate::handlers::commands::SlashCommandPayload;
 use crate::state::AppState;
 
 use super::resolve_engine;
-
-/// Minimum interval between debounced `chat.update` calls for streaming
-/// plan replies.
-const STREAM_UPDATE_DEBOUNCE: Duration = Duration::from_secs(3);
-
-/// Maximum length of inline content in a Slack section block.
-/// Content exceeding this is uploaded as a file snippet.
-const SLACK_SECTION_CHAR_LIMIT: usize = 3000;
-
-/// Interval between heartbeat updates when the stream is idle or
-/// text has exceeded the inline limit.
-const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(15);
+use super::streaming::{
+    HEARTBEAT_INTERVAL, SLACK_SECTION_CHAR_LIMIT, STREAM_UPDATE_DEBOUNCE, format_tool_activity,
+    split_into_chunks, truncated_preview,
+};
 
 /// Handles `/coda plan <feature_slug>`.
 ///
@@ -292,11 +284,7 @@ async fn consume_streaming_updates(
                         tool_name,
                         summary,
                     } => {
-                        let activity = if summary.is_empty() {
-                            format!("_:mag: {tool_name}_")
-                        } else {
-                            format!("_:mag: {tool_name} {summary}_")
-                        };
+                        let activity = format_tool_activity(&tool_name, &summary);
                         let display = if exceeded_limit {
                             let preview = truncated_preview(&latest_text);
                             format!("{preview}\n\n{activity}")
@@ -332,16 +320,6 @@ async fn consume_streaming_updates(
     if pending && !exceeded_limit {
         let _ = slack.update_message_text(&channel, &ts, &latest_text).await;
     }
-}
-
-/// Returns a UTF-8-safe truncated preview of `text` at
-/// [`SLACK_SECTION_CHAR_LIMIT`].
-fn truncated_preview(text: &str) -> &str {
-    let mut end = SLACK_SECTION_CHAR_LIMIT.min(text.len());
-    while end > 0 && !text.is_char_boundary(end) {
-        end -= 1;
-    }
-    &text[..end]
 }
 
 /// Handles the `approve` keyword: formalizes design and verification.
@@ -622,55 +600,8 @@ async fn post_content_or_file(
     }
 }
 
-/// Splits text into chunks of at most `max_len` bytes, preferring to
-/// break at newline boundaries for cleaner output. Handles multi-byte
-/// character boundaries safely.
-fn split_into_chunks(text: &str, max_len: usize) -> Vec<&str> {
-    if text.len() <= max_len {
-        return vec![text];
-    }
-
-    let mut chunks = Vec::new();
-    let mut start = 0;
-
-    while start < text.len() {
-        let remaining = &text[start..];
-        if remaining.len() <= max_len {
-            chunks.push(remaining);
-            break;
-        }
-
-        // Find the largest valid byte offset within max_len
-        let mut end = start + max_len;
-        while end > start && !text.is_char_boundary(end) {
-            end -= 1;
-        }
-
-        let chunk = &text[start..end];
-
-        // Prefer splitting at the last newline for cleaner breaks
-        if let Some(last_newline) = chunk.rfind('\n') {
-            let split_at = start + last_newline + 1;
-            chunks.push(&text[start..split_at]);
-            start = split_at;
-        } else {
-            chunks.push(chunk);
-            start = end;
-        }
-    }
-
-    chunks
-}
-
 #[cfg(test)]
 mod tests {
-    use super::*;
-
-    #[test]
-    fn test_should_define_slack_section_char_limit() {
-        assert_eq!(SLACK_SECTION_CHAR_LIMIT, 3000);
-    }
-
     #[test]
     fn test_should_recognize_approve_keyword() {
         let trimmed = "approve".trim().to_lowercase();
@@ -705,52 +636,5 @@ mod tests {
     fn test_should_route_regular_text_to_conversation() {
         let trimmed = "design a REST API for auth".trim().to_lowercase();
         assert!(trimmed != "approve" && trimmed != "done" && trimmed != "quit");
-    }
-
-    #[test]
-    fn test_should_return_single_chunk_for_short_text() {
-        let chunks = split_into_chunks("hello world", 100);
-        assert_eq!(chunks, vec!["hello world"]);
-    }
-
-    #[test]
-    fn test_should_split_at_newline_boundary() {
-        let text = "line1\nline2\nline3\nline4\n";
-        let chunks = split_into_chunks(text, 12);
-        assert_eq!(chunks[0], "line1\nline2\n");
-        assert_eq!(chunks[1], "line3\nline4\n");
-    }
-
-    #[test]
-    fn test_should_split_without_newline() {
-        let text = "abcdefghij";
-        let chunks = split_into_chunks(text, 4);
-        assert_eq!(chunks, vec!["abcd", "efgh", "ij"]);
-    }
-
-    #[test]
-    fn test_should_handle_exact_boundary() {
-        let text = "abc";
-        let chunks = split_into_chunks(text, 3);
-        assert_eq!(chunks, vec!["abc"]);
-    }
-
-    #[test]
-    fn test_should_handle_multibyte_chars() {
-        // Each CJK char is 3 bytes in UTF-8
-        let text = "你好世界测试";
-        // max_len=9 fits exactly 3 CJK chars (9 bytes)
-        let chunks = split_into_chunks(text, 9);
-        assert_eq!(chunks.len(), 2);
-        assert_eq!(chunks[0], "你好世");
-        assert_eq!(chunks[1], "界测试");
-    }
-
-    #[test]
-    fn test_should_reassemble_to_original() {
-        let text = "aaa\nbbb\nccc\nddd\neee\n";
-        let chunks = split_into_chunks(text, 8);
-        let reassembled: String = chunks.concat();
-        assert_eq!(reassembled, text);
     }
 }

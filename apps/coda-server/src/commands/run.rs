@@ -9,6 +9,11 @@
 //! `PrCreated`) trigger an immediate `chat.update`. High-frequency events
 //! (`AgentTextDelta`, `TurnCompleted`, `ToolActivity`) are batched with
 //! updates at most every 3 seconds.
+//!
+//! Each phase also gets a dedicated thread reply under the progress
+//! message, streaming live agent text and tool activity. A completion
+//! notification is posted as a new channel message when the run finishes
+//! so that Slack delivers a notification to users.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -20,12 +25,14 @@ use tracing::{info, warn};
 use crate::error::ServerError;
 use crate::formatter::{self, PhaseDisplayStatus, RunPhaseDisplay};
 use crate::handlers::commands::SlashCommandPayload;
+use crate::slack_client::SlackClient;
 use crate::state::AppState;
 
 use super::resolve_engine;
-
-/// Minimum interval between debounced `chat.update` calls (3 seconds).
-const UPDATE_DEBOUNCE: Duration = Duration::from_secs(3);
+use super::streaming::{
+    HEARTBEAT_INTERVAL, SLACK_SECTION_CHAR_LIMIT, STREAM_UPDATE_DEBOUNCE, format_tool_activity,
+    split_into_chunks, truncated_preview,
+};
 
 /// Handles `/coda run <feature_slug>`.
 ///
@@ -114,28 +121,47 @@ async fn run_feature_task(
     let result = engine.run(&slug, Some(tx)).await;
 
     // Wait for event consumer to finish processing remaining events
-    if let Err(e) = event_handle.await {
-        warn!(error = %e, "Run event consumer task panicked");
-    }
-
-    // Post final summary
-    let final_blocks = match result {
-        Ok(results) => {
-            info!(channel, slug, "Run completed successfully");
-            build_run_summary(&slug, &results)
-        }
+    let pr_url = match event_handle.await {
+        Ok(url) => url,
         Err(e) => {
-            warn!(channel, slug, error = %e, "Run failed");
-            formatter::error(&format!("Run `{slug}` failed: {e}"))
+            warn!(error = %e, "Run event consumer task panicked");
+            None
         }
     };
 
+    // Build final summary and completion notification
+    let (final_blocks, success, phases) = match result {
+        Ok(ref results) => {
+            info!(channel, slug, "Run completed successfully");
+            let phases = results_to_phases(results);
+            let blocks = formatter::run_progress(&slug, &phases);
+            (blocks, true, phases)
+        }
+        Err(ref e) => {
+            warn!(channel, slug, error = %e, "Run failed");
+            let blocks = formatter::error(&format!("Run `{slug}` failed: {e}"));
+            (blocks, false, Vec::new())
+        }
+    };
+
+    // Update the progress message with final state
     if let Err(e) = state
         .slack()
         .update_message(&channel, &message_ts, final_blocks)
         .await
     {
         warn!(error = %e, channel, "Failed to post run final update");
+    }
+
+    // Post a new channel message as completion notification (triggers Slack notification)
+    let notification_blocks =
+        formatter::run_completion_notification(&slug, success, &phases, pr_url.as_deref());
+    if let Err(e) = state
+        .slack()
+        .post_message(&channel, notification_blocks)
+        .await
+    {
+        warn!(error = %e, channel, "Failed to post run completion notification");
     }
 
     // Clean up running task entry
@@ -156,9 +182,9 @@ fn task_display_name(task: &coda_core::Task) -> String {
     }
 }
 
-/// Builds a final summary message from the run results.
-fn build_run_summary(slug: &str, results: &[coda_core::TaskResult]) -> Vec<serde_json::Value> {
-    let phases: Vec<RunPhaseDisplay> = results
+/// Converts engine [`TaskResult`](coda_core::TaskResult)s into display phases.
+fn results_to_phases(results: &[coda_core::TaskResult]) -> Vec<RunPhaseDisplay> {
+    results
         .iter()
         .map(|r| {
             let status = match r.status {
@@ -174,8 +200,13 @@ fn build_run_summary(slug: &str, results: &[coda_core::TaskResult]) -> Vec<serde
                 cost_usd: Some(r.cost_usd),
             }
         })
-        .collect();
+        .collect()
+}
 
+/// Builds a final summary message from the run results.
+#[cfg(test)]
+fn build_run_summary(slug: &str, results: &[coda_core::TaskResult]) -> Vec<serde_json::Value> {
+    let phases = results_to_phases(results);
     formatter::run_progress(slug, &phases)
 }
 
@@ -213,121 +244,423 @@ impl RunTracker {
     }
 }
 
-/// Consumes [`RunEvent`]s from the channel and debounces Slack updates.
+/// Manages per-phase thread replies with live agent output streaming.
 ///
-/// Phase transitions and sub-events trigger immediate updates.
-/// High-frequency events are batched, with updates at most every
-/// [`UPDATE_DEBOUNCE`] interval.
-async fn consume_run_events(
-    slack: crate::slack_client::SlackClient,
+/// When each phase starts, a new thread reply is posted under the
+/// progress message. `AgentTextDelta` and `ToolActivity` events are
+/// streamed into the current reply using the same debounced update
+/// pattern from the plan command. Each phase gets its own reply to
+/// prevent exceeding Slack message limits on long runs.
+struct PhaseThreadStreamer {
+    slack: SlackClient,
     channel: String,
-    message_ts: String,
-    slug: String,
-    mut rx: mpsc::UnboundedReceiver<RunEvent>,
-) {
-    let mut tracker = RunTracker::new(slug);
-    let mut last_update = Instant::now() - UPDATE_DEBOUNCE;
-    let mut pending_update = false;
+    /// Progress message ts, used as thread parent.
+    thread_ts: String,
+    /// Current phase reply being streamed to.
+    current_reply_ts: Option<String>,
+    /// Name of the current phase.
+    current_phase: Option<String>,
+    /// Accumulated text for the current phase.
+    text: String,
+    /// Whether accumulated text has exceeded the inline limit.
+    exceeded_limit: bool,
+    /// Last time a Slack update was sent for the phase reply.
+    last_update: Instant,
+    /// Whether there are pending text changes to flush.
+    pending: bool,
+    /// When the current phase started (for heartbeat elapsed time).
+    started: Instant,
+}
 
-    while let Some(event) = rx.recv().await {
-        let immediate = match event {
-            RunEvent::RunStarting { ref phases } => {
-                tracker.phases = phases
-                    .iter()
-                    .map(|name| RunPhaseDisplay {
-                        name: name.clone(),
-                        status: PhaseDisplayStatus::Pending,
-                        duration: None,
-                        turns: None,
-                        cost_usd: None,
-                    })
-                    .collect();
-                true
-            }
-            RunEvent::PhaseStarting {
-                ref name, index, ..
-            } => {
-                if let Some(p) = tracker.phases.get_mut(index) {
-                    p.status = PhaseDisplayStatus::Running;
-                } else {
-                    tracker.phases.push(RunPhaseDisplay {
-                        name: name.clone(),
-                        status: PhaseDisplayStatus::Running,
-                        duration: None,
-                        turns: None,
-                        cost_usd: None,
-                    });
-                }
-                true
-            }
-            RunEvent::PhaseCompleted {
-                index,
-                duration,
-                turns,
-                cost_usd,
-                ..
-            } => {
-                if let Some(p) = tracker.phases.get_mut(index) {
-                    p.status = PhaseDisplayStatus::Completed;
-                    p.duration = Some(duration);
-                    p.turns = Some(turns);
-                    p.cost_usd = Some(cost_usd);
-                }
-                true
-            }
-            RunEvent::PhaseFailed { index, .. } => {
-                if let Some(p) = tracker.phases.get_mut(index) {
-                    p.status = PhaseDisplayStatus::Failed;
-                }
-                true
-            }
-            RunEvent::ReviewRound { .. } | RunEvent::VerifyAttempt { .. } => true,
-            RunEvent::CreatingPr => true,
-            RunEvent::PrCreated { ref url } => {
-                tracker.pr_url = url.clone();
-                true
-            }
-            RunEvent::RunFinished { .. } => true,
-            RunEvent::TurnCompleted { current_turn } => {
-                // Update turn count on the currently running phase
-                for p in &mut tracker.phases {
-                    if p.status == PhaseDisplayStatus::Running {
-                        p.turns = Some(current_turn);
-                    }
-                }
-                false
-            }
-            RunEvent::AgentTextDelta { .. } | RunEvent::ToolActivity { .. } => false,
-            _ => false,
-        };
+impl PhaseThreadStreamer {
+    fn new(slack: SlackClient, channel: String, thread_ts: String) -> Self {
+        Self {
+            slack,
+            channel,
+            thread_ts,
+            current_reply_ts: None,
+            current_phase: None,
+            text: String::new(),
+            exceeded_limit: false,
+            last_update: Instant::now(),
+            pending: false,
+            started: Instant::now(),
+        }
+    }
 
-        if immediate {
-            send_update(&slack, &channel, &message_ts, &tracker).await;
-            last_update = Instant::now();
-            pending_update = false;
-        } else {
-            pending_update = true;
-            if last_update.elapsed() >= UPDATE_DEBOUNCE {
-                send_update(&slack, &channel, &message_ts, &tracker).await;
-                last_update = Instant::now();
-                pending_update = false;
+    /// Starts a new phase: finalizes the previous reply and posts a new
+    /// thread reply for the incoming phase.
+    async fn start_phase(&mut self, name: &str) {
+        self.finalize_current().await;
+
+        self.current_phase = Some(name.to_string());
+        self.text.clear();
+        self.exceeded_limit = false;
+        self.pending = false;
+        self.started = Instant::now();
+
+        let msg = format!("*Phase: `{name}`*\n_Starting..._");
+        match self
+            .slack
+            .post_thread_reply(&self.channel, &self.thread_ts, &msg)
+            .await
+        {
+            Ok(ts) => {
+                self.current_reply_ts = Some(ts);
+                self.last_update = Instant::now();
+            }
+            Err(e) => {
+                warn!(error = %e, phase = name, "Failed to post phase thread reply");
+                self.current_reply_ts = None;
             }
         }
     }
 
-    // Flush any remaining pending update
-    if pending_update {
-        send_update(&slack, &channel, &message_ts, &tracker).await;
+    /// Appends a text delta to the buffer and debounces the Slack update.
+    async fn on_text_delta(&mut self, delta: &str) {
+        self.text.push_str(delta);
+
+        let Some(ref ts) = self.current_reply_ts else {
+            return;
+        };
+
+        // Once text exceeds the inline limit, post a truncated preview
+        // once and stop further text updates until finalize.
+        if !self.exceeded_limit && self.text.len() > SLACK_SECTION_CHAR_LIMIT {
+            self.exceeded_limit = true;
+            let preview = truncated_preview(&self.text);
+            let phase_header = self.phase_header();
+            let msg = format!("{phase_header}\n{preview}\n\n_:hourglass: generating..._");
+            let _ = self
+                .slack
+                .update_message_text(&self.channel, ts, &msg)
+                .await;
+            self.last_update = Instant::now();
+            self.pending = false;
+            return;
+        }
+
+        if self.exceeded_limit {
+            return;
+        }
+
+        self.pending = true;
+        if self.last_update.elapsed() >= STREAM_UPDATE_DEBOUNCE {
+            let phase_header = self.phase_header();
+            let msg = format!("{phase_header}\n{}", self.text);
+            let _ = self
+                .slack
+                .update_message_text(&self.channel, ts, &msg)
+                .await;
+            self.last_update = Instant::now();
+            self.pending = false;
+        }
+    }
+
+    /// Appends a tool activity line and updates the reply immediately.
+    async fn on_tool_activity(&mut self, tool_name: &str, summary: &str) {
+        let Some(ref ts) = self.current_reply_ts else {
+            return;
+        };
+
+        let activity = format_tool_activity(tool_name, summary);
+        let phase_header = self.phase_header();
+        let display = if self.exceeded_limit {
+            let preview = truncated_preview(&self.text);
+            format!("{phase_header}\n{preview}\n\n{activity}")
+        } else {
+            format!("{phase_header}\n{}\n\n{activity}", self.text)
+        };
+        let _ = self
+            .slack
+            .update_message_text(&self.channel, ts, &display)
+            .await;
+        self.last_update = Instant::now();
+        self.pending = false;
+    }
+
+    /// Finalizes the current phase reply with a completion stats footer.
+    async fn on_phase_completed(&mut self, duration: Duration, turns: u32, cost_usd: f64) {
+        let dur = formatter::format_duration(duration.as_secs());
+        let footer = format!(
+            "_:white_check_mark: Completed \u{2014} {turns} turns \u{00b7} ${cost_usd:.2} \u{00b7} {dur}_"
+        );
+        self.finalize_with_footer(&footer).await;
+    }
+
+    /// Finalizes the current phase reply with a failure footer.
+    async fn on_phase_failed(&mut self, error: &str) {
+        let footer = format!("_:x: Failed: {error}_");
+        self.finalize_with_footer(&footer).await;
+    }
+
+    /// Shows a heartbeat indicator during idle periods.
+    async fn heartbeat(&mut self) {
+        let Some(ref ts) = self.current_reply_ts else {
+            return;
+        };
+
+        let elapsed = self.started.elapsed().as_secs();
+        let phase_header = self.phase_header();
+        let msg = if self.exceeded_limit {
+            let preview = truncated_preview(&self.text);
+            format!("{phase_header}\n{preview}\n\n_:hourglass: working... ({elapsed}s)_")
+        } else if self.text.is_empty() {
+            format!("{phase_header}\n_:hourglass: working... ({elapsed}s)_")
+        } else {
+            format!(
+                "{phase_header}\n{}\n\n_:hourglass: working... ({elapsed}s)_",
+                self.text
+            )
+        };
+        let _ = self
+            .slack
+            .update_message_text(&self.channel, ts, &msg)
+            .await;
+        self.last_update = Instant::now();
+    }
+
+    /// Finalizes the current phase reply, splitting into multiple replies
+    /// if the text exceeds the Slack limit.
+    async fn finalize_current(&mut self) {
+        if self.current_reply_ts.is_none() {
+            return;
+        }
+
+        if self.text.is_empty() {
+            return;
+        }
+
+        let phase_header = self.phase_header();
+        let chunks = split_into_chunks(&self.text, SLACK_SECTION_CHAR_LIMIT);
+
+        // First chunk updates the existing reply
+        if let Some(first) = chunks.first() {
+            let msg = format!("{phase_header}\n{first}");
+            if let Some(ref ts) = self.current_reply_ts {
+                let _ = self
+                    .slack
+                    .update_message_text(&self.channel, ts, &msg)
+                    .await;
+            }
+        }
+
+        // Remaining chunks are posted as new thread replies
+        for chunk in chunks.iter().skip(1) {
+            let _ = self
+                .slack
+                .post_thread_reply(&self.channel, &self.thread_ts, chunk)
+                .await;
+        }
+
+        self.pending = false;
+    }
+
+    /// Finalizes the current reply with a footer line appended.
+    async fn finalize_with_footer(&mut self, footer: &str) {
+        let Some(ref ts) = self.current_reply_ts else {
+            return;
+        };
+
+        let phase_header = self.phase_header();
+
+        if self.text.len() <= SLACK_SECTION_CHAR_LIMIT {
+            // Everything fits in one message
+            let msg = if self.text.is_empty() {
+                format!("{phase_header}\n{footer}")
+            } else {
+                format!("{phase_header}\n{}\n\n{footer}", self.text)
+            };
+            let _ = self
+                .slack
+                .update_message_text(&self.channel, ts, &msg)
+                .await;
+        } else {
+            // Split the text and put footer in the last message
+            let chunks = split_into_chunks(&self.text, SLACK_SECTION_CHAR_LIMIT);
+
+            if let Some(first) = chunks.first() {
+                let msg = format!("{phase_header}\n{first}");
+                let _ = self
+                    .slack
+                    .update_message_text(&self.channel, ts, &msg)
+                    .await;
+            }
+
+            let last_idx = chunks.len().saturating_sub(1);
+            for (i, chunk) in chunks.iter().skip(1).enumerate() {
+                let msg = if i + 1 == last_idx {
+                    format!("{chunk}\n\n{footer}")
+                } else {
+                    (*chunk).to_string()
+                };
+                let _ = self
+                    .slack
+                    .post_thread_reply(&self.channel, &self.thread_ts, &msg)
+                    .await;
+            }
+
+            // If only one chunk, footer goes right after it
+            if chunks.len() == 1 {
+                let _ = self
+                    .slack
+                    .post_thread_reply(&self.channel, &self.thread_ts, footer)
+                    .await;
+            }
+        }
+
+        self.pending = false;
+        self.current_reply_ts = None;
+        self.current_phase = None;
+    }
+
+    /// Returns the phase header line for the current phase.
+    fn phase_header(&self) -> String {
+        match self.current_phase {
+            Some(ref name) => format!("*Phase: `{name}`*"),
+            None => "*Phase*".to_string(),
+        }
     }
 }
 
+/// Consumes [`RunEvent`]s from the channel, debounces Slack progress
+/// message updates, and streams per-phase agent output into thread replies.
+///
+/// Returns the PR URL if one was created, for use in the completion
+/// notification.
+async fn consume_run_events(
+    slack: SlackClient,
+    channel: String,
+    message_ts: String,
+    slug: String,
+    mut rx: mpsc::UnboundedReceiver<RunEvent>,
+) -> Option<String> {
+    let mut tracker = RunTracker::new(slug);
+    let mut streamer = PhaseThreadStreamer::new(slack.clone(), channel.clone(), message_ts.clone());
+    let mut last_update = Instant::now() - STREAM_UPDATE_DEBOUNCE;
+    let mut pending_update = false;
+
+    loop {
+        tokio::select! {
+            event = rx.recv() => {
+                let Some(event) = event else { break; };
+                let immediate = match event {
+                    RunEvent::RunStarting { ref phases } => {
+                        tracker.phases = phases
+                            .iter()
+                            .map(|name| RunPhaseDisplay {
+                                name: name.clone(),
+                                status: PhaseDisplayStatus::Pending,
+                                duration: None,
+                                turns: None,
+                                cost_usd: None,
+                            })
+                            .collect();
+                        true
+                    }
+                    RunEvent::PhaseStarting {
+                        ref name, index, ..
+                    } => {
+                        if let Some(p) = tracker.phases.get_mut(index) {
+                            p.status = PhaseDisplayStatus::Running;
+                        } else {
+                            tracker.phases.push(RunPhaseDisplay {
+                                name: name.clone(),
+                                status: PhaseDisplayStatus::Running,
+                                duration: None,
+                                turns: None,
+                                cost_usd: None,
+                            });
+                        }
+                        streamer.start_phase(name).await;
+                        true
+                    }
+                    RunEvent::PhaseCompleted {
+                        index,
+                        duration,
+                        turns,
+                        cost_usd,
+                        ..
+                    } => {
+                        if let Some(p) = tracker.phases.get_mut(index) {
+                            p.status = PhaseDisplayStatus::Completed;
+                            p.duration = Some(duration);
+                            p.turns = Some(turns);
+                            p.cost_usd = Some(cost_usd);
+                        }
+                        streamer.on_phase_completed(duration, turns, cost_usd).await;
+                        true
+                    }
+                    RunEvent::PhaseFailed { ref error, index, .. } => {
+                        if let Some(p) = tracker.phases.get_mut(index) {
+                            p.status = PhaseDisplayStatus::Failed;
+                        }
+                        streamer.on_phase_failed(error).await;
+                        true
+                    }
+                    RunEvent::ReviewRound { .. } | RunEvent::VerifyAttempt { .. } => true,
+                    RunEvent::CreatingPr => true,
+                    RunEvent::PrCreated { ref url } => {
+                        tracker.pr_url = url.clone();
+                        true
+                    }
+                    RunEvent::RunFinished { .. } => true,
+                    RunEvent::TurnCompleted { current_turn } => {
+                        // Update turn count on the currently running phase
+                        for p in &mut tracker.phases {
+                            if p.status == PhaseDisplayStatus::Running {
+                                p.turns = Some(current_turn);
+                            }
+                        }
+                        false
+                    }
+                    RunEvent::AgentTextDelta { ref text } => {
+                        streamer.on_text_delta(text).await;
+                        false
+                    }
+                    RunEvent::ToolActivity {
+                        ref tool_name,
+                        ref summary,
+                    } => {
+                        streamer.on_tool_activity(tool_name, summary).await;
+                        false
+                    }
+                    _ => false,
+                };
+
+                if immediate {
+                    send_update(&slack, &channel, &message_ts, &tracker).await;
+                    last_update = Instant::now();
+                    pending_update = false;
+                } else {
+                    pending_update = true;
+                    if last_update.elapsed() >= STREAM_UPDATE_DEBOUNCE {
+                        send_update(&slack, &channel, &message_ts, &tracker).await;
+                        last_update = Instant::now();
+                        pending_update = false;
+                    }
+                }
+            }
+            // Heartbeat: show progress when the stream is idle
+            () = tokio::time::sleep(HEARTBEAT_INTERVAL) => {
+                streamer.heartbeat().await;
+            }
+        }
+    }
+
+    // Flush any remaining pending progress update
+    if pending_update {
+        send_update(&slack, &channel, &message_ts, &tracker).await;
+    }
+
+    // Finalize any remaining phase thread reply
+    streamer.finalize_current().await;
+
+    tracker.pr_url
+}
+
 /// Sends a single `chat.update` with the current run tracker state.
-async fn send_update(
-    slack: &crate::slack_client::SlackClient,
-    channel: &str,
-    ts: &str,
-    tracker: &RunTracker,
-) {
+async fn send_update(slack: &SlackClient, channel: &str, ts: &str, tracker: &RunTracker) {
     let blocks = tracker.to_blocks();
     if let Err(e) = slack.update_message(channel, ts, blocks).await {
         warn!(error = %e, channel, "Failed to update run progress message");
@@ -342,11 +675,6 @@ mod tests {
     fn test_should_format_run_task_key_with_repo_path() {
         let key = format!("run:{}:{}", "/repos/myproject", "add-auth");
         assert_eq!(key, "run:/repos/myproject:add-auth");
-    }
-
-    #[test]
-    fn test_should_define_debounce_interval() {
-        assert_eq!(UPDATE_DEBOUNCE, Duration::from_secs(3));
     }
 
     #[test]
@@ -445,5 +773,67 @@ mod tests {
         }];
         let blocks = build_run_summary("add-auth", &results);
         assert!(!blocks.is_empty());
+    }
+
+    #[test]
+    fn test_should_create_phase_thread_streamer() {
+        let slack = SlackClient::new("xoxb-test".into());
+        let streamer = PhaseThreadStreamer::new(slack, "C123".to_string(), "1234.5678".to_string());
+        assert!(streamer.current_reply_ts.is_none());
+        assert!(streamer.current_phase.is_none());
+        assert!(streamer.text.is_empty());
+        assert!(!streamer.exceeded_limit);
+        assert!(!streamer.pending);
+    }
+
+    #[test]
+    fn test_should_format_phase_header_with_name() {
+        let slack = SlackClient::new("xoxb-test".into());
+        let mut streamer =
+            PhaseThreadStreamer::new(slack, "C123".to_string(), "1234.5678".to_string());
+        streamer.current_phase = Some("implement".to_string());
+        assert_eq!(streamer.phase_header(), "*Phase: `implement`*");
+    }
+
+    #[test]
+    fn test_should_format_phase_header_without_name() {
+        let slack = SlackClient::new("xoxb-test".into());
+        let streamer = PhaseThreadStreamer::new(slack, "C123".to_string(), "1234.5678".to_string());
+        assert_eq!(streamer.phase_header(), "*Phase*");
+    }
+
+    #[test]
+    fn test_should_convert_results_to_phases() {
+        let results = vec![
+            coda_core::TaskResult {
+                task: coda_core::Task::DevPhase {
+                    name: "setup".to_string(),
+                    feature_slug: "add-auth".to_string(),
+                },
+                status: coda_core::TaskStatus::Completed,
+                turns: 3,
+                cost_usd: 0.25,
+                duration: Duration::from_secs(60),
+                artifacts: vec![],
+            },
+            coda_core::TaskResult {
+                task: coda_core::Task::Review {
+                    feature_slug: "add-auth".to_string(),
+                },
+                status: coda_core::TaskStatus::Failed {
+                    error: "issues found".to_string(),
+                },
+                turns: 2,
+                cost_usd: 0.10,
+                duration: Duration::from_secs(30),
+                artifacts: vec![],
+            },
+        ];
+        let phases = results_to_phases(&results);
+        assert_eq!(phases.len(), 2);
+        assert_eq!(phases[0].name, "setup");
+        assert_eq!(phases[0].status, PhaseDisplayStatus::Completed);
+        assert_eq!(phases[1].name, "review");
+        assert_eq!(phases[1].status, PhaseDisplayStatus::Failed);
     }
 }

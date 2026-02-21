@@ -283,25 +283,27 @@ impl Engine {
     /// 2. `query_stream(Coder)` with `init/setup_project` to create `.coda/`,
     ///    `.trees/`, `config.yml`, `.coda.md`, and update `.gitignore`.
     ///
+    /// When `force` is `true`, skips the `.coda/` existence check and
+    /// reinitializes: updates `config.yml` (preserving user settings)
+    /// and regenerates `.coda.md`.
+    ///
     /// When `progress_tx` is provided, emits [`InitEvent`]s for real-time
     /// progress display. When `None`, the function behaves silently (useful
     /// for testing or CI).
     ///
-    /// The generated files are **not** auto-committed. The caller must
-    /// commit them before running `coda plan`, which requires init
-    /// artifacts to be present on the base branch.
-    ///
     /// # Errors
     ///
     /// Returns `CoreError::ConfigError` if the project is already initialized
-    /// (`.coda/` exists), or `CoreError::AgentError` if agent calls fail.
+    /// (`.coda/` exists) and `force` is `false`, or `CoreError::AgentError`
+    /// if agent calls fail.
     pub async fn init(
         &self,
         no_commit: bool,
+        force: bool,
         progress_tx: Option<UnboundedSender<InitEvent>>,
     ) -> Result<(), CoreError> {
-        // 1. Check if .coda/ already exists
-        if self.project_root.join(".coda").exists() {
+        // 1. Check if .coda/ already exists (skip when force=true)
+        if self.project_root.join(".coda").exists() && !force {
             return Err(CoreError::ConfigError(
                 "Project already initialized. .coda/ directory exists.".into(),
             ));
@@ -337,7 +339,7 @@ impl Engine {
 
         // 4. Setup project structure (phase 1)
         if let Err(e) = self
-            .run_setup_phase(&system_prompt, &analysis_result, &progress_tx)
+            .run_setup_phase(&system_prompt, &analysis_result, force, &progress_tx)
             .await
         {
             emit(
@@ -354,7 +356,7 @@ impl Engine {
 
         // 5. Auto-commit init artifacts unless --no-commit
         if !no_commit {
-            self.commit_init_artifacts()?;
+            self.commit_init_artifacts(force)?;
         }
 
         emit(&progress_tx, InitEvent::InitFinished { success: true });
@@ -368,17 +370,19 @@ impl Engine {
     /// Uses `--no-verify` because these are CODA-internal files that should
     /// not be gated by project-specific pre-commit hooks.
     ///
+    /// When `force` is `true`, the commit message reflects re-initialization.
+    ///
     /// # Errors
     ///
     /// Returns `CoreError` if staging or committing fails.
-    fn commit_init_artifacts(&self) -> Result<(), CoreError> {
+    fn commit_init_artifacts(&self, force: bool) -> Result<(), CoreError> {
         let paths: &[&str] = &[".coda/", ".coda.md", "CLAUDE.md", ".gitignore"];
-        commit_coda_artifacts(
-            self.git.as_ref(),
-            &self.project_root,
-            paths,
-            "chore: initialize CODA project",
-        )
+        let message = if force {
+            "chore: reinitialize CODA project"
+        } else {
+            "chore: initialize CODA project"
+        };
+        commit_coda_artifacts(self.git.as_ref(), &self.project_root, paths, message)
     }
 
     /// Runs the analyze-repo phase: streams the AI analysis and collects text.
@@ -477,6 +481,7 @@ impl Engine {
         &self,
         system_prompt: &str,
         analysis_result: &str,
+        force: bool,
         progress_tx: &Option<UnboundedSender<InitEvent>>,
     ) -> Result<(), CoreError> {
         let setup_prompt = self.pm.render(
@@ -484,6 +489,7 @@ impl Engine {
             minijinja::context!(
                 project_root => self.project_root.display().to_string(),
                 analysis_result => analysis_result,
+                force => force,
             ),
         )?;
 

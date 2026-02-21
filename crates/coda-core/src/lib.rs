@@ -14,6 +14,7 @@
 //! - [`CodaConfig`] holds project configuration from `.coda/config.yml`
 //! - [`FeatureState`](state::FeatureState) tracks execution progress in `state.yml`
 
+pub mod codex;
 pub mod config;
 mod engine;
 mod error;

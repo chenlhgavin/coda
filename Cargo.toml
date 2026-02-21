@@ -24,7 +24,7 @@ coda-core = { path = "crates/coda-core", version = "0.1.0" }
 coda-pm = { path = "crates/coda-pm", version = "0.1.0" }
 
 # Async runtime
-tokio = { version = "1.43", features = ["rt", "rt-multi-thread", "macros", "sync", "time", "fs"] }
+tokio = { version = "1.43", features = ["rt", "rt-multi-thread", "macros", "sync", "time", "fs", "process"] }
 
 # Claude Agent SDK
 claude-agent-sdk-rs = "0.6"
