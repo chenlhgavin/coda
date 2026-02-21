@@ -1511,42 +1511,37 @@ impl Runner {
         let mut acc = PhaseMetricsAccumulator::new();
         let mut docs_valid = false;
 
-        for attempt in 0..=max_retries {
+        // Send the initial full prompt.
+        let prompt = self.pm.render(
+            "run/update_docs",
+            minijinja::context!(
+                design_spec => design_spec,
+                state => &self.state,
+            ),
+        )?;
+
+        let resp = self.send_and_collect(&prompt, None).await?;
+        let m = self.metrics.record(&resp.result);
+        if let Some(logger) = &mut self.run_logger {
+            logger.log_interaction(&prompt, &resp, &m);
+        }
+        acc.record(&resp, m);
+
+        let mut missing = validate_doc_files(&self.worktree_path);
+        if missing.is_empty() {
+            info!("Documentation files validated successfully");
+            docs_valid = true;
+        }
+
+        // Retry with targeted fix prompts, validating after each response.
+        for attempt in 0..max_retries {
+            if docs_valid {
+                break;
+            }
+
             info!(
                 attempt = attempt + 1,
-                max = max_retries + 1,
-                "update-docs attempt"
-            );
-
-            let prompt = self.pm.render(
-                "run/update_docs",
-                minijinja::context!(
-                    design_spec => design_spec,
-                    state => &self.state,
-                ),
-            )?;
-
-            let resp = self.send_and_collect(&prompt, None).await?;
-            let m = self.metrics.record(&resp.result);
-            if let Some(logger) = &mut self.run_logger {
-                logger.log_interaction(&prompt, &resp, &m);
-            }
-            acc.record(&resp, m);
-
-            let missing = validate_doc_files(&self.worktree_path);
-
-            if missing.is_empty() {
-                info!("Documentation files validated successfully");
-                docs_valid = true;
-                break;
-            }
-
-            if attempt == max_retries {
-                warn!("Max update-docs attempts reached, documentation validation failed");
-                break;
-            }
-
-            info!(
+                max = max_retries,
                 missing = ?missing,
                 "Documentation validation failed, asking agent to fix"
             );
@@ -1559,6 +1554,12 @@ impl Runner {
                 logger.log_interaction(&fix_prompt, &fix_resp, &fm);
             }
             acc.record(&fix_resp, fm);
+
+            missing = validate_doc_files(&self.worktree_path);
+            if missing.is_empty() {
+                info!("Documentation files validated successfully");
+                docs_valid = true;
+            }
         }
 
         if !docs_valid {

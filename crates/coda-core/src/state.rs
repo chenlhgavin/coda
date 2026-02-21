@@ -71,6 +71,10 @@ pub struct FeatureState {
 /// Minimum number of phases: at least 1 dev phase + review + verify + update-docs.
 const MIN_PHASE_COUNT: usize = 4;
 
+/// Required terminal quality phases in order. The last 3 phases must always be
+/// `review -> verify -> update-docs`, all with [`PhaseKind::Quality`].
+const TERMINAL_QUALITY_PHASES: &[&str] = &["review", "verify", "update-docs"];
+
 impl FeatureState {
     /// Validates structural invariants after deserialization.
     ///
@@ -89,6 +93,20 @@ impl FeatureState {
                  (dev + review + verify + update-docs), found {}",
                 self.phases.len(),
             ));
+        }
+
+        // Enforce that the last 3 phases are the fixed quality sequence.
+        let n = self.phases.len();
+        for (offset, expected_name) in TERMINAL_QUALITY_PHASES.iter().enumerate() {
+            let idx = n - TERMINAL_QUALITY_PHASES.len() + offset;
+            let phase = &self.phases[idx];
+            if phase.name != *expected_name || phase.kind != PhaseKind::Quality {
+                return Err(format!(
+                    "expected terminal quality phase '{}' (Quality) at index {}, \
+                     found '{}' ({:?})",
+                    expected_name, idx, phase.name, phase.kind,
+                ));
+            }
         }
 
         if (self.current_phase as usize) > self.phases.len() {
@@ -549,6 +567,92 @@ mod tests {
         };
         let err = state.validate().unwrap_err();
         assert!(err.contains("parent directory traversal"));
+    }
+
+    #[test]
+    fn test_should_reject_missing_terminal_quality_phases() {
+        let now = chrono::Utc::now();
+        let make_phase = |name: &str, kind: PhaseKind| PhaseRecord {
+            name: name.to_string(),
+            kind,
+            status: PhaseStatus::Pending,
+            started_at: None,
+            completed_at: None,
+            turns: 0,
+            cost_usd: 0.0,
+            cost: TokenCost::default(),
+            duration_secs: 0,
+            details: serde_json::json!({}),
+        };
+        // 4 phases but missing update-docs (legacy state with extra dev phase)
+        let state = FeatureState {
+            feature: FeatureInfo {
+                slug: "test".to_string(),
+                created_at: now,
+                updated_at: now,
+            },
+            status: FeatureStatus::Planned,
+            current_phase: 0,
+            git: GitInfo {
+                worktree_path: PathBuf::from(".trees/test"),
+                branch: "feature/test".to_string(),
+                base_branch: "main".to_string(),
+            },
+            phases: vec![
+                make_phase("dev-1", PhaseKind::Dev),
+                make_phase("dev-2", PhaseKind::Dev),
+                make_phase("review", PhaseKind::Quality),
+                make_phase("verify", PhaseKind::Quality),
+            ],
+            pr: None,
+            total: TotalStats::default(),
+        };
+        let err = state.validate().unwrap_err();
+        assert!(err.contains("expected terminal quality phase"));
+        assert!(err.contains("review"));
+    }
+
+    #[test]
+    fn test_should_reject_wrong_quality_phase_order() {
+        let now = chrono::Utc::now();
+        let make_phase = |name: &str, kind: PhaseKind| PhaseRecord {
+            name: name.to_string(),
+            kind,
+            status: PhaseStatus::Pending,
+            started_at: None,
+            completed_at: None,
+            turns: 0,
+            cost_usd: 0.0,
+            cost: TokenCost::default(),
+            duration_secs: 0,
+            details: serde_json::json!({}),
+        };
+        // Quality phases in wrong order: verify before review
+        let state = FeatureState {
+            feature: FeatureInfo {
+                slug: "test".to_string(),
+                created_at: now,
+                updated_at: now,
+            },
+            status: FeatureStatus::Planned,
+            current_phase: 0,
+            git: GitInfo {
+                worktree_path: PathBuf::from(".trees/test"),
+                branch: "feature/test".to_string(),
+                base_branch: "main".to_string(),
+            },
+            phases: vec![
+                make_phase("dev-1", PhaseKind::Dev),
+                make_phase("verify", PhaseKind::Quality),
+                make_phase("review", PhaseKind::Quality),
+                make_phase("update-docs", PhaseKind::Quality),
+            ],
+            pr: None,
+            total: TotalStats::default(),
+        };
+        let err = state.validate().unwrap_err();
+        assert!(err.contains("expected terminal quality phase"));
+        assert!(err.contains("review"));
     }
 
     #[test]
