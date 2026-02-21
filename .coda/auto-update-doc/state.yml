@@ -2,7 +2,7 @@ feature:
   slug: auto-update-doc
   created_at: 2026-02-21T10:40:30.755902Z
   updated_at: 2026-02-21T11:35:51.130232Z
-status: in_progress
+status: completed
 current_phase: 5
 git:
   worktree_path: .trees/auto-update-doc
@@ -75,6 +75,10 @@ phases:
     attempts: 35
     checks_passed: 35
     checks_total: 35
+pr:
+  url: https://github.com/chenlhgavin/coda/pull/2
+  number: 2
+  title: 'feat(auto-update-doc): feature implementation'
 total:
   turns: 229
   cost_usd: 14.176236249999997
