@@ -104,10 +104,10 @@ pub struct GitConfig {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum ReviewEngine {
-    /// Claude reviews its own code (default, backward-compatible).
-    #[default]
+    /// Claude reviews its own code (self-review).
     Claude,
-    /// Codex CLI performs an independent read-only review.
+    /// Codex CLI performs an independent read-only review (default).
+    #[default]
     Codex,
     /// Both Codex and Claude review; issues are merged and deduplicated.
     Hybrid,
@@ -314,7 +314,7 @@ review:
         assert!((config.agent.max_budget_usd - 50.0).abs() < f64::EPSILON);
         assert!(config.git.auto_commit);
         // Review engine defaults
-        assert_eq!(config.review.engine, ReviewEngine::Claude);
+        assert_eq!(config.review.engine, ReviewEngine::Codex);
         assert_eq!(config.review.codex_model, "gpt-5.3-codex");
         assert_eq!(config.review.codex_reasoning_effort, "high");
     }

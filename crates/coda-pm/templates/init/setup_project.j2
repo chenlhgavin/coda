@@ -77,9 +77,6 @@ agent:
   permission_mode: "auto"
   max_retries: 3
 
-prompts:
-  extra_dirs: []
-
 git:
   auto_commit: true
   branch_prefix: "feature"
@@ -87,6 +84,7 @@ git:
 
 review:
   enabled: true
+  engine: codex
   checks:
     # Determine appropriate checks from the detected tech stack.
     # Examples:
