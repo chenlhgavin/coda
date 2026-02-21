@@ -151,13 +151,14 @@ pub async fn run_codex_review(
         // Drop stdin to signal EOF so codex starts processing.
     }
 
-    // Stream stdout line-by-line, extracting agent messages in real time.
+    // Stream stdout line-by-line, extracting agent messages and errors in real time.
     let stdout_pipe = child
         .stdout
         .take()
         .ok_or_else(|| CoreError::AgentError("Failed to capture codex stdout".to_string()))?;
     let mut lines = BufReader::new(stdout_pipe).lines();
     let mut agent_texts: Vec<String> = Vec::new();
+    let mut error_messages: Vec<String> = Vec::new();
 
     while let Some(line) = lines
         .next_line()
@@ -169,6 +170,9 @@ pub async fn run_codex_review(
                 let _ = tx.send(RunEvent::AgentTextDelta { text: text.clone() });
             }
             agent_texts.push(text);
+        }
+        if let Some(err) = extract_error_from_jsonl_event(&line) {
+            error_messages.push(err);
         }
     }
 
@@ -183,13 +187,21 @@ pub async fn run_codex_review(
             use tokio::io::AsyncReadExt;
             let _ = stderr.read_to_string(&mut stderr_buf).await;
         }
+        // Codex reports errors via JSONL stdout events, not stderr.
+        // Combine both sources for a complete error message.
+        let error_detail = if !error_messages.is_empty() {
+            error_messages.join("; ")
+        } else {
+            stderr_buf.clone()
+        };
         warn!(
             status = ?status,
             stderr = %stderr_buf,
+            jsonl_errors = %error_messages.join("; "),
             "Codex review failed",
         );
         return Err(CoreError::AgentError(format!(
-            "Codex exited with {status}: {stderr_buf}",
+            "Codex exited with {status}: {error_detail}",
         )));
     }
 
@@ -424,6 +436,39 @@ fn extract_agent_text_from_jsonl_event(line: &str) -> Option<String> {
         return None;
     }
     item.get("text")?.as_str().map(String::from)
+}
+
+/// Extracts error messages from JSONL event lines emitted by Codex.
+///
+/// Codex reports errors via two patterns on stdout:
+/// - Top-level error events: `{"type":"error","message":"..."}`
+/// - Item-level errors: `{"type":"item.completed","item":{"type":"error","message":"..."}}`
+/// - Turn failures: `{"type":"turn.failed","error":{"message":"..."}}`
+fn extract_error_from_jsonl_event(line: &str) -> Option<String> {
+    let line = line.trim();
+    if line.is_empty() {
+        return None;
+    }
+    let event: serde_json::Value = serde_json::from_str(line).ok()?;
+    let event_type = event.get("type")?.as_str()?;
+
+    match event_type {
+        "error" => event.get("message")?.as_str().map(String::from),
+        "turn.failed" => event
+            .get("error")
+            .and_then(|e| e.get("message"))
+            .and_then(|m| m.as_str())
+            .map(String::from),
+        "item.completed" => {
+            let item = event.get("item")?;
+            if item.get("type")?.as_str()? == "error" {
+                item.get("message")?.as_str().map(String::from)
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
 }
 
 /// Extracts agent message text from `codex exec --json` JSONL output.
@@ -727,5 +772,38 @@ issues:
     fn test_should_handle_empty_strings_in_jaccard() {
         assert!((jaccard_similarity("", "") - 1.0).abs() < f64::EPSILON);
         assert!((jaccard_similarity("hello", "") - 0.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_should_extract_top_level_error_event() {
+        let line = r#"{"type":"error","message":"Model not supported"}"#;
+        assert_eq!(
+            extract_error_from_jsonl_event(line),
+            Some("Model not supported".to_string()),
+        );
+    }
+
+    #[test]
+    fn test_should_extract_turn_failed_error() {
+        let line = r#"{"type":"turn.failed","error":{"message":"The model is not supported"}}"#;
+        assert_eq!(
+            extract_error_from_jsonl_event(line),
+            Some("The model is not supported".to_string()),
+        );
+    }
+
+    #[test]
+    fn test_should_extract_item_error() {
+        let line = r#"{"type":"item.completed","item":{"id":"item_0","type":"error","message":"Model metadata not found"}}"#;
+        assert_eq!(
+            extract_error_from_jsonl_event(line),
+            Some("Model metadata not found".to_string()),
+        );
+    }
+
+    #[test]
+    fn test_should_return_none_for_non_error_events() {
+        let line = r#"{"type":"thread.started","thread_id":"abc"}"#;
+        assert_eq!(extract_error_from_jsonl_event(line), None);
     }
 }
