@@ -16,10 +16,12 @@ use std::collections::HashSet;
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::sync::mpsc::UnboundedSender;
 use tracing::{debug, info, warn};
 
 use crate::CoreError;
+use crate::runner::RunEvent;
 
 /// Source of a review issue — which reviewer found it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -84,8 +86,9 @@ pub fn is_codex_available() -> bool {
 ///
 /// Spawns `codex exec --full-auto --sandbox read-only --json` with a review
 /// prompt piped via stdin. The `--json` flag suppresses TTY output and emits
-/// JSONL events on stdout. The agent message text is extracted from the
-/// `item.completed` events and parsed for YAML review issues.
+/// JSONL events on stdout. Agent message text is extracted from
+/// `item.completed` events in real time and streamed to the TUI via
+/// `progress_tx` as [`RunEvent::AgentTextDelta`] events.
 ///
 /// The `reasoning_effort` parameter controls the model's reasoning depth
 /// and is passed via `-c model_reasoning_effort=<value>`. Valid values:
@@ -103,6 +106,7 @@ pub async fn run_codex_review(
     design_spec: &str,
     model: &str,
     reasoning_effort: &str,
+    progress_tx: Option<&UnboundedSender<RunEvent>>,
 ) -> Result<Vec<ReviewIssue>, CoreError> {
     let prompt = build_codex_review_prompt(diff, design_spec);
 
@@ -147,30 +151,50 @@ pub async fn run_codex_review(
         // Drop stdin to signal EOF so codex starts processing.
     }
 
-    let output = child
-        .wait_with_output()
+    // Stream stdout line-by-line, extracting agent messages in real time.
+    let stdout_pipe = child
+        .stdout
+        .take()
+        .ok_or_else(|| CoreError::AgentError("Failed to capture codex stdout".to_string()))?;
+    let mut lines = BufReader::new(stdout_pipe).lines();
+    let mut agent_texts: Vec<String> = Vec::new();
+
+    while let Some(line) = lines
+        .next_line()
+        .await
+        .map_err(|e| CoreError::AgentError(format!("Failed to read codex output: {e}")))?
+    {
+        if let Some(text) = extract_agent_text_from_jsonl_event(&line) {
+            if let Some(tx) = progress_tx {
+                let _ = tx.send(RunEvent::AgentTextDelta { text: text.clone() });
+            }
+            agent_texts.push(text);
+        }
+    }
+
+    let status = child
+        .wait()
         .await
         .map_err(|e| CoreError::AgentError(format!("Failed to wait for codex: {e}")))?;
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
+    if !status.success() {
+        let mut stderr_buf = String::new();
+        if let Some(mut stderr) = child.stderr.take() {
+            use tokio::io::AsyncReadExt;
+            let _ = stderr.read_to_string(&mut stderr_buf).await;
+        }
         warn!(
-            status = ?output.status,
-            stderr = %stderr,
+            status = ?status,
+            stderr = %stderr_buf,
             "Codex review failed",
         );
         return Err(CoreError::AgentError(format!(
-            "Codex exited with {}: {stderr}",
-            output.status,
+            "Codex exited with {status}: {stderr_buf}",
         )));
     }
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    debug!(output_len = stdout.len(), "Codex review completed");
-
-    // Extract the agent message text from `--json` JSONL events.
-    let agent_text = extract_agent_message_from_jsonl(&stdout);
-    debug!(agent_text_len = agent_text.len(), "Extracted agent message");
+    let agent_text = agent_texts.join("\n");
+    debug!(agent_text_len = agent_text.len(), "Codex review completed");
 
     let issues = parse_review_issues_structured(&agent_text, ReviewSource::Codex);
 
@@ -382,6 +406,26 @@ fn jaccard_similarity(a: &str, b: &str) -> f64 {
     intersection as f64 / union as f64
 }
 
+/// Extracts agent message text from a single JSONL event line.
+///
+/// Returns `Some(text)` if the line is an `item.completed` event with
+/// `item.type == "agent_message"`, otherwise `None`.
+fn extract_agent_text_from_jsonl_event(line: &str) -> Option<String> {
+    let line = line.trim();
+    if line.is_empty() {
+        return None;
+    }
+    let event: serde_json::Value = serde_json::from_str(line).ok()?;
+    if event.get("type")?.as_str()? != "item.completed" {
+        return None;
+    }
+    let item = event.get("item")?;
+    if item.get("type")?.as_str()? != "agent_message" {
+        return None;
+    }
+    item.get("text")?.as_str().map(String::from)
+}
+
 /// Extracts agent message text from `codex exec --json` JSONL output.
 ///
 /// Scans for `item.completed` events where `item.type` is `"agent_message"`
@@ -399,29 +443,11 @@ fn jaccard_similarity(a: &str, b: &str) -> f64 {
 /// assert_eq!(extract_agent_message_from_jsonl(jsonl), "hello");
 /// ```
 pub fn extract_agent_message_from_jsonl(jsonl: &str) -> String {
-    let mut texts = Vec::new();
-    for line in jsonl.lines() {
-        let line = line.trim();
-        if line.is_empty() {
-            continue;
-        }
-        let Ok(event) = serde_json::from_str::<serde_json::Value>(line) else {
-            continue;
-        };
-        if event.get("type").and_then(|t| t.as_str()) != Some("item.completed") {
-            continue;
-        }
-        let Some(item) = event.get("item") else {
-            continue;
-        };
-        if item.get("type").and_then(|t| t.as_str()) != Some("agent_message") {
-            continue;
-        }
-        if let Some(text) = item.get("text").and_then(|t| t.as_str()) {
-            texts.push(text.to_string());
-        }
-    }
-    texts.join("\n")
+    jsonl
+        .lines()
+        .filter_map(extract_agent_text_from_jsonl_event)
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// Builds the review prompt for the Codex CLI.

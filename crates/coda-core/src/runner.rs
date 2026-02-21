@@ -1195,6 +1195,7 @@ impl Runner {
                 &design_spec,
                 &codex_model,
                 &codex_effort,
+                self.progress_tx.as_ref(),
             )
             .await?;
             let issue_count = codex_issues.len() as u32;
@@ -1251,6 +1252,7 @@ impl Runner {
                 &design_spec,
                 &codex_model,
                 &codex_effort,
+                self.progress_tx.as_ref(),
             )
             .await
             {
