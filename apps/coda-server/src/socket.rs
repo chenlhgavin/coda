@@ -84,17 +84,21 @@ impl SocketClient {
         Fut: Future<Output = ()> + Send + 'static,
     {
         let mut backoff = INITIAL_BACKOFF;
+        let mut tasks = tokio::task::JoinSet::new();
 
         loop {
             if *shutdown.borrow() {
                 info!("Shutdown requested, exiting socket loop");
-                return Ok(());
+                break;
             }
 
-            match self.connect_and_run(&handler, &mut shutdown).await {
+            match self
+                .connect_and_run(&handler, &mut shutdown, &mut tasks)
+                .await
+            {
                 Ok(ConnectionExit::Shutdown) => {
                     info!("Shutdown signal received, closing connection");
-                    return Ok(());
+                    break;
                 }
                 Ok(ConnectionExit::Disconnect) => {
                     info!(
@@ -119,7 +123,7 @@ impl SocketClient {
                 _ = shutdown.changed() => {
                     if *shutdown.borrow() {
                         info!("Shutdown during backoff, exiting");
-                        return Ok(());
+                        break;
                     }
                 }
             }
@@ -127,6 +131,16 @@ impl SocketClient {
             // Exponential backoff: double up to MAX_BACKOFF
             backoff = (backoff * 2).min(MAX_BACKOFF);
         }
+
+        // Abort all in-flight handler tasks so the runtime can exit
+        let task_count = tasks.len();
+        if task_count > 0 {
+            info!(task_count, "Aborting in-flight handler tasks");
+            tasks.abort_all();
+            while tasks.join_next().await.is_some() {}
+        }
+
+        Ok(())
     }
 
     /// Connects to Slack and runs the event loop for a single connection.
@@ -134,6 +148,7 @@ impl SocketClient {
         &self,
         handler: &F,
         shutdown: &mut tokio::sync::watch::Receiver<bool>,
+        tasks: &mut tokio::task::JoinSet<()>,
     ) -> Result<ConnectionExit, ServerError>
     where
         F: Fn(Envelope) -> Fut + Send + Sync + 'static,
@@ -185,9 +200,9 @@ impl SocketClient {
                                         ServerError::WebSocket(format!("Ack send failed: {e}"))
                                     })?;
 
-                                    // Spawn handler as background task
+                                    // Spawn handler as tracked task
                                     let fut = handler(envelope);
-                                    tokio::spawn(fut);
+                                    tasks.spawn(fut);
                                 }
                                 None => {
                                     // Unknown message type, already logged

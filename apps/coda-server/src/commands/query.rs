@@ -28,6 +28,10 @@ const HELP_TEXT: &str = "\
   `/coda plan <slug>` — Start an interactive planning session in a thread
   `/coda run <slug>` — Execute a feature development run with live progress
 
+*GitHub Integration*
+  `/coda repos [org]` — List GitHub repos and clone one to the workspace
+  `/coda switch <branch>` — Switch the bound repository to a different branch
+
 *Query Commands*
   `/coda list` — List all features in the bound repository
   `/coda status <slug>` — Show detailed status of a feature
@@ -175,6 +179,8 @@ mod tests {
         assert!(HELP_TEXT.contains("/coda init"));
         assert!(HELP_TEXT.contains("/coda plan"));
         assert!(HELP_TEXT.contains("/coda run"));
+        assert!(HELP_TEXT.contains("/coda repos"));
+        assert!(HELP_TEXT.contains("/coda switch"));
         assert!(HELP_TEXT.contains("/coda list"));
         assert!(HELP_TEXT.contains("/coda status"));
         assert!(HELP_TEXT.contains("/coda clean"));

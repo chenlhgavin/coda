@@ -15,11 +15,12 @@ mod slack_client;
 mod socket;
 mod state;
 
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Context;
-use tracing::info;
+use tracing::{info, warn};
 
 /// Interval between session reaper runs (5 minutes).
 const REAPER_INTERVAL: Duration = Duration::from_secs(300);
@@ -44,16 +45,27 @@ async fn main() -> anyhow::Result<()> {
 
     info!("Configuration loaded successfully");
 
+    // Ensure workspace directory exists if configured
+    let workspace = server_config.workspace.as_ref().map(PathBuf::from);
+    if let Some(ref ws) = workspace {
+        std::fs::create_dir_all(ws)
+            .with_context(|| format!("Failed to create workspace directory: {}", ws.display()))?;
+        info!(workspace = %ws.display(), "Workspace directory ready");
+    }
+
     // Build application state
     let slack = slack_client::SlackClient::new(server_config.slack.bot_token.clone());
     let bindings = state::BindingStore::new(config_path, server_config.bindings.clone());
     let running_tasks = state::RunningTasks::new();
     let sessions = session::SessionManager::new();
+    let repo_locks = state::RepoLocks::new();
     let app_state = Arc::new(state::AppState::new(
         slack.clone(),
         bindings,
         running_tasks,
         sessions,
+        workspace,
+        repo_locks,
     ));
 
     info!(
@@ -65,28 +77,15 @@ async fn main() -> anyhow::Result<()> {
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
 
     tokio::spawn(async move {
-        let ctrl_c = tokio::signal::ctrl_c();
-        #[cfg(unix)]
-        let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-            .expect("register SIGTERM handler");
-
-        #[cfg(unix)]
-        tokio::select! {
-            _ = ctrl_c => {
-                info!("Received SIGINT, shutting down...");
-            }
-            _ = sigterm.recv() => {
-                info!("Received SIGTERM, shutting down...");
-            }
-        }
-
-        #[cfg(not(unix))]
-        {
-            ctrl_c.await.ok();
-            info!("Received SIGINT, shutting down...");
-        }
-
+        // First signal: graceful shutdown
+        wait_for_shutdown_signal().await;
+        info!("Received shutdown signal, shutting down gracefully...");
         let _ = shutdown_tx.send(true);
+
+        // Second signal: force exit
+        wait_for_shutdown_signal().await;
+        warn!("Received second signal, forcing exit");
+        std::process::exit(1);
     });
 
     // Start background session reaper
@@ -127,6 +126,43 @@ async fn main() -> anyhow::Result<()> {
         .await
         .context("Socket Mode event loop failed")?;
 
+    // Clean up active plan sessions before exiting
+    let session_count = app_state.sessions().len();
+    if session_count > 0 {
+        info!(session_count, "Disconnecting active plan sessions");
+        match tokio::time::timeout(
+            Duration::from_secs(5),
+            app_state.sessions().disconnect_all(),
+        )
+        .await
+        {
+            Ok(disconnected) => {
+                info!(disconnected, "Plan sessions disconnected");
+            }
+            Err(_) => {
+                warn!("Session cleanup timed out after 5s");
+            }
+        }
+    }
+
     info!("Server shut down cleanly");
     Ok(())
+}
+
+/// Waits for either a SIGINT (Ctrl+C) or SIGTERM signal.
+async fn wait_for_shutdown_signal() {
+    #[cfg(unix)]
+    {
+        let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .expect("register SIGTERM handler");
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {}
+            _ = sigterm.recv() => {}
+        }
+    }
+
+    #[cfg(not(unix))]
+    {
+        tokio::signal::ctrl_c().await.ok();
+    }
 }

@@ -24,11 +24,13 @@ use crate::error::ServerError;
 ///   bot_token: "xoxb-test"
 /// bindings:
 ///   C123: "/path/to/repo"
+/// workspace: "/home/user/workspace"
 /// "#;
 ///
 /// let config: ServerConfig = serde_yaml::from_str(yaml).unwrap();
 /// assert_eq!(config.slack.app_token, "xapp-1-test");
 /// assert_eq!(config.bindings.len(), 1);
+/// assert_eq!(config.workspace.as_deref(), Some("/home/user/workspace"));
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ServerConfig {
@@ -38,6 +40,12 @@ pub struct ServerConfig {
     /// Channel-to-repository path bindings (channel_id → repo_path).
     #[serde(default)]
     pub bindings: HashMap<String, String>,
+
+    /// Base workspace directory for cloning GitHub repositories.
+    ///
+    /// When set, `/coda repos` clones into `<workspace>/github.com/<owner>/<repo>`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace: Option<String>,
 }
 
 /// Slack API token configuration.
@@ -171,6 +179,7 @@ slack:
                 bot_token: "xoxb-test".into(),
             },
             bindings: HashMap::new(),
+            workspace: None,
         };
         assert!(config.validate().is_ok());
     }
@@ -183,6 +192,7 @@ slack:
                 bot_token: "xoxb-test".into(),
             },
             bindings: HashMap::new(),
+            workspace: None,
         };
         let err = config.validate().unwrap_err().to_string();
         assert!(err.contains("app_token"));
@@ -196,6 +206,7 @@ slack:
                 bot_token: "xoxb-test".into(),
             },
             bindings: HashMap::new(),
+            workspace: None,
         };
         let err = config.validate().unwrap_err().to_string();
         assert!(err.contains("xapp-"));
@@ -209,6 +220,7 @@ slack:
                 bot_token: "wrong-prefix".into(),
             },
             bindings: HashMap::new(),
+            workspace: None,
         };
         let err = config.validate().unwrap_err().to_string();
         assert!(err.contains("xoxb-"));
@@ -248,10 +260,38 @@ bindings: {}
                 bot_token: "xoxb-test".into(),
             },
             bindings: HashMap::from([("C001".into(), "/repo".into())]),
+            workspace: Some("/home/user/workspace".into()),
         };
         let yaml = serde_yaml::to_string(&config).expect("serialize");
         let deserialized: ServerConfig = serde_yaml::from_str(&yaml).expect("deserialize");
         assert_eq!(deserialized.slack.app_token, config.slack.app_token);
         assert_eq!(deserialized.bindings.len(), 1);
+        assert_eq!(
+            deserialized.workspace.as_deref(),
+            Some("/home/user/workspace")
+        );
+    }
+
+    #[test]
+    fn test_should_deserialize_config_with_workspace() {
+        let yaml = r#"
+slack:
+  app_token: "xapp-1-test"
+  bot_token: "xoxb-test"
+workspace: "/home/user/workspace"
+"#;
+        let config: ServerConfig = serde_yaml::from_str(yaml).expect("deserialize");
+        assert_eq!(config.workspace.as_deref(), Some("/home/user/workspace"));
+    }
+
+    #[test]
+    fn test_should_deserialize_config_without_workspace() {
+        let yaml = r#"
+slack:
+  app_token: "xapp-1-test"
+  bot_token: "xoxb-test"
+"#;
+        let config: ServerConfig = serde_yaml::from_str(yaml).expect("deserialize");
+        assert!(config.workspace.is_none());
     }
 }

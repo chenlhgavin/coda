@@ -7,6 +7,7 @@
 
 use std::sync::Arc;
 
+use futures::FutureExt;
 use serde::Deserialize;
 use tracing::{debug, warn};
 
@@ -143,7 +144,62 @@ async fn handle_message_event(state: Arc<AppState>, msg: MessageEvent) {
         "Routing thread message to plan session"
     );
 
-    commands::plan::handle_thread_message(state, &msg.channel, thread_ts, &msg.ts, &msg.text).await;
+    // Run inline with catch_unwind as a panic boundary. Unlike
+    // tokio::spawn, this keeps the future in the caller's JoinSet task
+    // so that abort_all() on shutdown can cancel it.
+    let state_clone = state.clone();
+    let channel = msg.channel.clone();
+    let thread_ts = thread_ts.clone();
+    let user_ts = msg.ts.clone();
+    let text = msg.text.clone();
+
+    let result = std::panic::AssertUnwindSafe(commands::plan::handle_thread_message(
+        state_clone,
+        &channel,
+        &thread_ts,
+        &user_ts,
+        &text,
+    ))
+    .catch_unwind()
+    .await;
+
+    if let Err(panic_info) = result {
+        let panic_msg = panic_info
+            .downcast_ref::<String>()
+            .map(String::as_str)
+            .or_else(|| panic_info.downcast_ref::<&str>().copied())
+            .unwrap_or("unknown panic");
+
+        warn!(
+            error = panic_msg,
+            channel = msg.channel,
+            thread_ts = ?msg.thread_ts,
+            "Thread message handler panicked"
+        );
+
+        let thread_ts = msg.thread_ts.as_deref().unwrap_or(&msg.ts);
+
+        // Clean up hourglass reaction on the user's message (best-effort)
+        let _ = state
+            .slack()
+            .remove_reaction(&msg.channel, &msg.ts, "hourglass_flowing_sand")
+            .await;
+
+        // Disconnect and remove the leaked session to free the CLI subprocess
+        if let Some(mut session) = state.sessions().remove(&msg.channel, thread_ts) {
+            session.disconnect().await;
+        }
+
+        // Notify the user in the thread
+        let _ = state
+            .slack()
+            .post_thread_reply(
+                &msg.channel,
+                thread_ts,
+                ":x: An unexpected error occurred. Please try again.",
+            )
+            .await;
+    }
 }
 
 #[cfg(test)]

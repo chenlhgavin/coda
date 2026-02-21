@@ -42,17 +42,26 @@ pub async fn handle_init(
 ) -> Result<(), ServerError> {
     let channel = payload.channel_id.clone();
 
-    // Duplicate prevention
-    let task_key = format!("init:{channel}");
+    let Some((repo_path, engine)) = resolve_engine(state.as_ref(), &channel).await? else {
+        return Ok(());
+    };
+
+    // Duplicate prevention — keyed by repo path, not channel
+    let task_key = format!("init:{}", repo_path.display());
     if state.running_tasks().is_running(&task_key) {
-        let blocks = formatter::error("An init is already running in this channel.");
+        let blocks = formatter::error("An init is already running for this repository.");
         state.slack().post_message(&channel, blocks).await?;
         return Ok(());
     }
 
-    let Some((_repo_path, engine)) = resolve_engine(state.as_ref(), &channel).await? else {
+    // Acquire repo lock
+    if let Err(holder) = state.repo_locks().try_lock(&repo_path, "init") {
+        let blocks = formatter::error(&format!(
+            "Repository is busy (`{holder}`). Try again later."
+        ));
+        state.slack().post_message(&channel, blocks).await?;
         return Ok(());
-    };
+    }
 
     info!(channel, "Starting init command");
 
@@ -64,9 +73,17 @@ pub async fn handle_init(
     // Spawn background task
     let state_clone = Arc::clone(&state);
     let channel_clone = channel.clone();
+    let repo_path_clone = repo_path.clone();
 
     let handle = tokio::spawn(async move {
-        run_init_task(state_clone, engine, channel_clone, message_ts).await;
+        run_init_task(
+            state_clone,
+            engine,
+            channel_clone,
+            message_ts,
+            repo_path_clone,
+        )
+        .await;
     });
 
     state.running_tasks().insert(task_key, handle);
@@ -80,6 +97,7 @@ async fn run_init_task(
     engine: coda_core::Engine,
     channel: String,
     message_ts: String,
+    repo_path: std::path::PathBuf,
 ) {
     let (tx, rx) = mpsc::unbounded_channel();
     let slack = state.slack().clone();
@@ -132,9 +150,10 @@ async fn run_init_task(
         warn!(error = %e, channel, "Failed to post init final update");
     }
 
-    // Clean up running task entry
-    let task_key = format!("init:{channel}");
+    // Clean up running task entry and release repo lock
+    let task_key = format!("init:{}", repo_path.display());
     state.running_tasks().remove(&task_key);
+    state.repo_locks().unlock(&repo_path);
 }
 
 /// Consumes [`InitEvent`]s from the channel and debounces Slack updates.
@@ -242,9 +261,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_should_format_init_task_key() {
-        let key = format!("init:{}", "C123");
-        assert_eq!(key, "init:C123");
+    fn test_should_format_init_task_key_by_repo_path() {
+        let key = format!("init:{}", "/repos/myproject");
+        assert_eq!(key, "init:/repos/myproject");
     }
 
     #[test]

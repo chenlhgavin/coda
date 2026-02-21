@@ -22,6 +22,26 @@ use crate::state::{
     TokenCost, TotalStats,
 };
 
+/// Maximum characters for tool input summaries in streaming events.
+const TOOL_SUMMARY_MAX_LEN: usize = 60;
+
+/// Incremental update from a streaming plan conversation.
+///
+/// Sent through a channel by [`PlanSession::send_streaming`] so that the
+/// caller can display live progress while the agent is still generating.
+#[derive(Debug, Clone)]
+pub enum PlanStreamUpdate {
+    /// Accumulated AI response text so far.
+    Text(String),
+    /// The agent is invoking a tool (e.g., reading a file, running a command).
+    ToolActivity {
+        /// Tool name (e.g., "Read", "Grep", "Bash").
+        tool_name: String,
+        /// Brief description of the tool invocation (e.g., file path, command).
+        summary: String,
+    },
+}
+
 /// Output produced by finalizing a planning session.
 #[derive(Debug)]
 pub struct PlanOutput {
@@ -160,6 +180,40 @@ impl PlanSession {
     /// Returns `CoreError::AgentError` if the query or response
     /// streaming fails.
     pub async fn send(&mut self, message: &str) -> Result<String, CoreError> {
+        self.send_inner(message, None).await
+    }
+
+    /// Sends a user message and streams the agent's response as it generates.
+    ///
+    /// Similar to [`send`](Self::send), but sends [`PlanStreamUpdate`] events
+    /// via `update_tx` as the agent generates text and invokes tools. This
+    /// enables the caller to display partial responses and tool activity
+    /// while the agent is still working.
+    ///
+    /// Automatically connects on the first call.
+    ///
+    /// # Errors
+    ///
+    /// Returns `CoreError::AgentError` if the query or response
+    /// streaming fails.
+    pub async fn send_streaming(
+        &mut self,
+        message: &str,
+        update_tx: tokio::sync::mpsc::UnboundedSender<PlanStreamUpdate>,
+    ) -> Result<String, CoreError> {
+        self.send_inner(message, Some(update_tx)).await
+    }
+
+    /// Shared implementation for [`send`](Self::send) and
+    /// [`send_streaming`](Self::send_streaming).
+    ///
+    /// When `update_tx` is `Some`, accumulated response text and tool
+    /// activity events are sent as they arrive.
+    async fn send_inner(
+        &mut self,
+        message: &str,
+        update_tx: Option<tokio::sync::mpsc::UnboundedSender<PlanStreamUpdate>>,
+    ) -> Result<String, CoreError> {
         if !self.connected {
             self.connect().await?;
         }
@@ -177,8 +231,22 @@ impl PlanSession {
                 match msg {
                     Message::Assistant(assistant) => {
                         for block in &assistant.message.content {
-                            if let ContentBlock::Text(text) = block {
-                                response.push_str(&text.text);
+                            match block {
+                                ContentBlock::Text(text) => {
+                                    response.push_str(&text.text);
+                                    if let Some(ref tx) = update_tx {
+                                        let _ = tx.send(PlanStreamUpdate::Text(response.clone()));
+                                    }
+                                }
+                                ContentBlock::ToolUse(tu) => {
+                                    if let Some(ref tx) = update_tx {
+                                        let _ = tx.send(PlanStreamUpdate::ToolActivity {
+                                            tool_name: tu.name.clone(),
+                                            summary: summarize_plan_tool(&tu.name, &tu.input),
+                                        });
+                                    }
+                                }
+                                _ => {}
                             }
                         }
                     }
@@ -416,6 +484,28 @@ impl std::fmt::Debug for PlanSession {
             .field("project_root", &self.project_root)
             .field("connected", &self.connected)
             .finish_non_exhaustive()
+    }
+}
+
+/// Extracts a brief summary from a tool invocation for UI display.
+///
+/// Returns a human-readable string like the file path for Read/Write/Edit,
+/// the command for Bash, or the pattern for Grep/Glob. Truncates long
+/// values to [`TOOL_SUMMARY_MAX_LEN`] characters with an ellipsis.
+fn summarize_plan_tool(tool_name: &str, input: &serde_json::Value) -> String {
+    let detail = match tool_name {
+        "Bash" => input.get("command").and_then(|v| v.as_str()),
+        "Write" | "Read" | "Edit" => input.get("file_path").and_then(|v| v.as_str()),
+        "Grep" | "Glob" => input.get("pattern").and_then(|v| v.as_str()),
+        _ => None,
+    };
+    match detail {
+        Some(d) if d.chars().count() > TOOL_SUMMARY_MAX_LEN => {
+            let truncated: String = d.chars().take(TOOL_SUMMARY_MAX_LEN - 1).collect();
+            format!("{truncated}\u{2026}")
+        }
+        Some(d) => d.to_string(),
+        None => String::new(),
     }
 }
 

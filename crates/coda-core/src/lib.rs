@@ -37,7 +37,7 @@ pub use engine::{
 pub use error::CoreError;
 pub use gh::{DefaultGhOps, GhOps, PrStatus};
 pub use git::{DefaultGitOps, GitOps};
-pub use planner::{PlanOutput, PlanSession};
+pub use planner::{PlanOutput, PlanSession, PlanStreamUpdate};
 pub use profile::{AgentProfile, build_safety_hooks};
 pub use project::find_project_root;
 pub use reviewer::ReviewResult;

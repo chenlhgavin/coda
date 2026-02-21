@@ -107,6 +107,33 @@ impl SessionManager {
         self.sessions.is_empty()
     }
 
+    /// Disconnects and removes ALL active sessions. Returns the count of
+    /// disconnected sessions.
+    ///
+    /// Used during graceful shutdown to clean up `ClaudeClient` subprocesses
+    /// and background tasks before the runtime exits.
+    pub async fn disconnect_all(&self) -> usize {
+        let all_keys: Vec<(String, String)> = self
+            .sessions
+            .iter()
+            .map(|entry| entry.key().clone())
+            .collect();
+
+        let count = all_keys.len();
+        for key in all_keys {
+            if let Some((_, mut active)) = self.sessions.remove(&key) {
+                info!(
+                    channel = key.0,
+                    thread_ts = key.1,
+                    "Disconnecting plan session"
+                );
+                active.session.disconnect().await;
+            }
+        }
+
+        count
+    }
+
     /// Disconnects and removes sessions that have been idle longer than
     /// `max_idle`. Returns the count of reaped sessions.
     ///
@@ -190,6 +217,13 @@ mod tests {
     async fn test_should_reap_idle_returns_zero_when_empty() {
         let manager = SessionManager::new();
         let count = manager.reap_idle(Duration::from_secs(1800)).await;
+        assert_eq!(count, 0);
+    }
+
+    #[tokio::test]
+    async fn test_should_disconnect_all_returns_zero_when_empty() {
+        let manager = SessionManager::new();
+        let count = manager.disconnect_all().await;
         assert_eq!(count, 0);
     }
 }

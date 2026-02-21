@@ -9,7 +9,8 @@ use std::sync::Arc;
 use serde::Deserialize;
 use tracing::{debug, info, warn};
 
-use crate::formatter::{self, CLEAN_CONFIRM_ACTION, CleanTarget};
+use crate::commands;
+use crate::formatter::{self, CLEAN_CONFIRM_ACTION, CleanTarget, REPO_SELECT_ACTION};
 use crate::state::AppState;
 
 /// Channel reference from an interaction payload.
@@ -33,12 +34,20 @@ struct MessageRef {
     ts: String,
 }
 
+/// A selected option from a `static_select` element.
+#[derive(Debug, Deserialize)]
+struct SelectedOption {
+    value: String,
+}
+
 /// A single action from a `block_actions` interaction.
 #[derive(Debug, Deserialize)]
 struct Action {
     action_id: String,
     #[serde(default)]
     value: Option<String>,
+    #[serde(default)]
+    selected_option: Option<SelectedOption>,
 }
 
 /// Top-level interactive payload from Slack Socket Mode.
@@ -74,6 +83,18 @@ pub async fn handle_interaction(state: Arc<AppState>, payload: serde_json::Value
                 action.value.as_deref(),
             )
             .await;
+        } else if action.action_id == REPO_SELECT_ACTION {
+            if let Some(ref selected) = action.selected_option {
+                commands::repos::handle_repo_clone(
+                    &state,
+                    &interaction.channel.id,
+                    &interaction.message.ts,
+                    &selected.value,
+                )
+                .await;
+            } else {
+                debug!("Repo select action received without selected_option");
+            }
         } else {
             debug!(action_id = %action.action_id, "Unknown interaction action, ignoring");
         }
@@ -116,7 +137,7 @@ async fn handle_clean_confirm(
 }
 
 /// Executes the clean operation: deserializes candidates, resolves
-/// binding, creates Engine, removes worktrees.
+/// binding, acquires repo lock, creates Engine, removes worktrees.
 ///
 /// Returns a user-friendly error message on failure.
 async fn execute_clean(
@@ -138,15 +159,30 @@ async fn execute_clean(
         .get(channel_id)
         .ok_or("Channel binding was removed. Use `/coda bind <path>` first.")?;
 
-    let engine = coda_core::Engine::new(repo_path)
-        .await
-        .map_err(|e| format!("Failed to initialize engine: {e}"))?;
+    // Acquire repo lock for worktree removal
+    state
+        .repo_locks()
+        .try_lock(&repo_path, "clean")
+        .map_err(|holder| format!("Repository is busy (`{holder}`). Try again later."))?;
 
-    let candidates: Vec<coda_core::CleanedWorktree> = targets.into_iter().map(Into::into).collect();
+    let result = async {
+        let engine = coda_core::Engine::new(repo_path.clone())
+            .await
+            .map_err(|e| format!("Failed to initialize engine: {e}"))?;
 
-    engine
-        .remove_worktrees(&candidates)
-        .map_err(|e| format!("Failed to remove worktrees: {e}"))
+        let candidates: Vec<coda_core::CleanedWorktree> =
+            targets.into_iter().map(Into::into).collect();
+
+        engine
+            .remove_worktrees(&candidates)
+            .map_err(|e| format!("Failed to remove worktrees: {e}"))
+    }
+    .await;
+
+    // Release repo lock
+    state.repo_locks().unlock(&repo_path);
+
+    result
 }
 
 #[cfg(test)]
@@ -196,6 +232,24 @@ mod tests {
         let action: Action = serde_json::from_value(json).unwrap();
         assert_eq!(action.action_id, "some_action");
         assert!(action.value.is_none());
+        assert!(action.selected_option.is_none());
+    }
+
+    #[test]
+    fn test_should_deserialize_action_with_selected_option() {
+        let json = serde_json::json!({
+            "action_id": REPO_SELECT_ACTION,
+            "type": "static_select",
+            "selected_option": {
+                "text": { "type": "plain_text", "text": "org/repo" },
+                "value": "org/repo"
+            }
+        });
+
+        let action: Action = serde_json::from_value(json).unwrap();
+        assert_eq!(action.action_id, REPO_SELECT_ACTION);
+        let selected = action.selected_option.expect("selected_option");
+        assert_eq!(selected.value, "org/repo");
     }
 
     #[test]

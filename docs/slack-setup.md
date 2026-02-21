@@ -31,7 +31,6 @@ Under **OAuth & Permissions** > **Bot Token Scopes**, ensure these scopes are ad
 |-------|---------|
 | `commands` | Receive slash commands |
 | `chat:write` | Send and update messages |
-| `files:write` | Upload long content as snippets |
 | `reactions:write` | Thinking indicator |
 | `channels:history` | Read public channel messages (plan threads) |
 | `groups:history` | Read private channel messages (plan threads) |

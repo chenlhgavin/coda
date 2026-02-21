@@ -47,17 +47,17 @@ pub async fn handle_run(
     let channel = payload.channel_id.clone();
     let slug = feature_slug.to_string();
 
-    // Duplicate prevention
-    let task_key = format!("run:{slug}");
+    let Some((repo_path, engine)) = resolve_engine(state.as_ref(), &channel).await? else {
+        return Ok(());
+    };
+
+    // Duplicate prevention — keyed by repo path + slug
+    let task_key = format!("run:{}:{slug}", repo_path.display());
     if state.running_tasks().is_running(&task_key) {
         let blocks = formatter::error(&format!("A run for `{slug}` is already in progress."));
         state.slack().post_message(&channel, blocks).await?;
         return Ok(());
     }
-
-    let Some((_repo_path, engine)) = resolve_engine(state.as_ref(), &channel).await? else {
-        return Ok(());
-    };
 
     info!(channel, feature_slug = slug, "Starting run command");
 
@@ -70,9 +70,18 @@ pub async fn handle_run(
     let state_clone = Arc::clone(&state);
     let channel_clone = channel.clone();
     let slug_clone = slug.clone();
+    let repo_path_clone = repo_path;
 
     let handle = tokio::spawn(async move {
-        run_feature_task(state_clone, engine, channel_clone, message_ts, slug_clone).await;
+        run_feature_task(
+            state_clone,
+            engine,
+            channel_clone,
+            message_ts,
+            slug_clone,
+            repo_path_clone,
+        )
+        .await;
     });
 
     state.running_tasks().insert(task_key, handle);
@@ -87,6 +96,7 @@ async fn run_feature_task(
     channel: String,
     message_ts: String,
     slug: String,
+    repo_path: std::path::PathBuf,
 ) {
     let (tx, rx) = mpsc::unbounded_channel();
     let slack = state.slack().clone();
@@ -129,7 +139,7 @@ async fn run_feature_task(
     }
 
     // Clean up running task entry
-    let task_key = format!("run:{slug}");
+    let task_key = format!("run:{}:{slug}", repo_path.display());
     state.running_tasks().remove(&task_key);
 }
 
@@ -329,9 +339,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_should_format_run_task_key() {
-        let key = format!("run:{}", "add-auth");
-        assert_eq!(key, "run:add-auth");
+    fn test_should_format_run_task_key_with_repo_path() {
+        let key = format!("run:{}:{}", "/repos/myproject", "add-auth");
+        assert_eq!(key, "run:/repos/myproject:add-auth");
     }
 
     #[test]

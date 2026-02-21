@@ -12,6 +12,7 @@
 //! - `quit` — disconnects the session without finalizing
 
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use tracing::{info, warn};
 
@@ -22,9 +23,17 @@ use crate::state::AppState;
 
 use super::resolve_engine;
 
+/// Minimum interval between debounced `chat.update` calls for streaming
+/// plan replies.
+const STREAM_UPDATE_DEBOUNCE: Duration = Duration::from_secs(3);
+
 /// Maximum length of inline content in a Slack section block.
 /// Content exceeding this is uploaded as a file snippet.
 const SLACK_SECTION_CHAR_LIMIT: usize = 3000;
+
+/// Interval between heartbeat updates when the stream is idle or
+/// text has exceeded the inline limit.
+const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(15);
 
 /// Handles `/coda plan <feature_slug>`.
 ///
@@ -108,7 +117,12 @@ pub async fn handle_thread_message(
     }
 }
 
-/// Sends a conversation turn to the plan session and posts the response.
+/// Sends a conversation turn to the plan session and streams the response.
+///
+/// Posts a placeholder "Thinking..." reply immediately, then updates it
+/// with partial responses as the AI generates text. Uses debounced
+/// `chat.update` calls (at most once per [`STREAM_UPDATE_DEBOUNCE`]) to
+/// respect Slack rate limits.
 async fn handle_conversation(
     state: Arc<AppState>,
     channel: &str,
@@ -116,13 +130,41 @@ async fn handle_conversation(
     user_ts: &str,
     text: &str,
 ) {
-    // Add thinking indicator
+    // Add thinking indicator on the user's message
     let _ = state
         .slack()
         .add_reaction(channel, user_ts, "hourglass_flowing_sand")
         .await;
 
-    // Scope the DashMap guard: acquire, update activity, send, then drop
+    // Post placeholder reply in the thread
+    let reply_ts = match state
+        .slack()
+        .post_thread_reply(channel, thread_ts, "_Thinking..._")
+        .await
+    {
+        Ok(ts) => ts,
+        Err(e) => {
+            warn!(error = %e, "Failed to post placeholder reply");
+            let _ = state
+                .slack()
+                .remove_reaction(channel, user_ts, "hourglass_flowing_sand")
+                .await;
+            return;
+        }
+    };
+
+    // Create streaming channel
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<coda_core::PlanStreamUpdate>();
+
+    // Spawn debounced updater task that progressively updates the placeholder
+    let slack = state.slack().clone();
+    let update_channel = channel.to_string();
+    let update_ts = reply_ts.clone();
+    let updater = tokio::spawn(async move {
+        consume_streaming_updates(slack, update_channel, update_ts, rx).await;
+    });
+
+    // Send message to AI with streaming text updates
     let response = {
         let mut entry = match state.sessions().get_mut(channel, thread_ts) {
             Some(e) => e,
@@ -131,8 +173,8 @@ async fn handle_conversation(
                 return;
             }
         };
-        entry.last_activity = std::time::Instant::now();
-        entry.session.send(text).await
+        entry.last_activity = Instant::now();
+        entry.session.send_streaming(text, tx).await
     };
 
     // Remove thinking indicator
@@ -141,25 +183,165 @@ async fn handle_conversation(
         .remove_reaction(channel, user_ts, "hourglass_flowing_sand")
         .await;
 
+    // Wait for updater to flush remaining updates
+    if let Err(join_err) = updater.await {
+        warn!(error = %join_err, channel, thread_ts, "Streaming updater task panicked");
+        let _ = state
+            .slack()
+            .update_message_text(
+                channel,
+                &reply_ts,
+                ":x: An internal error occurred while streaming. The full response will follow.",
+            )
+            .await;
+    }
+
+    // Final update: post the complete response, splitting into multiple
+    // messages if it exceeds the Slack inline limit.
     match response {
         Ok(reply) => {
-            if let Err(e) = state
-                .slack()
-                .post_thread_reply(channel, thread_ts, &reply)
-                .await
-            {
-                warn!(error = %e, "Failed to post plan reply");
+            let chunks = split_into_chunks(&reply, SLACK_SECTION_CHAR_LIMIT);
+            // First chunk replaces the placeholder message
+            if let Some(first) = chunks.first() {
+                let _ = state
+                    .slack()
+                    .update_message_text(channel, &reply_ts, first)
+                    .await;
+            }
+            // Remaining chunks are posted as new thread replies
+            for chunk in chunks.iter().skip(1) {
+                let _ = state
+                    .slack()
+                    .post_thread_reply(channel, thread_ts, chunk)
+                    .await;
             }
         }
         Err(e) => {
-            warn!(error = %e, channel, thread_ts, "PlanSession::send failed");
+            warn!(error = %e, channel, thread_ts, "PlanSession::send_streaming failed");
             let error_msg = format!(":warning: Planning error: {e}");
             let _ = state
                 .slack()
-                .post_thread_reply(channel, thread_ts, &error_msg)
+                .update_message_text(channel, &reply_ts, &error_msg)
                 .await;
         }
     }
+}
+
+/// Consumes streaming plan updates and debounces Slack `chat.update` calls.
+///
+/// Handles two types of updates:
+/// - [`PlanStreamUpdate::Text`]: accumulated response text, debounced at
+///   [`STREAM_UPDATE_DEBOUNCE`] intervals.
+/// - [`PlanStreamUpdate::ToolActivity`]: tool invocation events, displayed
+///   immediately as a status line appended to the current text.
+///
+/// When the accumulated text exceeds [`SLACK_SECTION_CHAR_LIMIT`], further
+/// text updates are skipped (the final handler will split into multiple
+/// messages), but tool activity is still shown. Performs a final flush
+/// when the sender is dropped (stream ends).
+async fn consume_streaming_updates(
+    slack: crate::slack_client::SlackClient,
+    channel: String,
+    ts: String,
+    mut rx: tokio::sync::mpsc::UnboundedReceiver<coda_core::PlanStreamUpdate>,
+) {
+    let mut last_update = Instant::now();
+    let mut pending = false;
+    let mut latest_text = String::new();
+    let mut exceeded_limit = false;
+    let started = Instant::now();
+
+    loop {
+        tokio::select! {
+            update = rx.recv() => {
+                let Some(update) = update else { break; };
+                match update {
+                    coda_core::PlanStreamUpdate::Text(text) => {
+                        latest_text = text;
+
+                        // Once the text exceeds the inline limit, post a
+                        // truncated preview once and stop further text updates.
+                        if !exceeded_limit && latest_text.len() > SLACK_SECTION_CHAR_LIMIT {
+                            exceeded_limit = true;
+                            let preview = truncated_preview(&latest_text);
+                            let msg = format!(
+                                "{preview}\n\n_:hourglass: generating..._"
+                            );
+                            let _ = slack
+                                .update_message_text(&channel, &ts, &msg)
+                                .await;
+                            last_update = Instant::now();
+                            pending = false;
+                            continue;
+                        }
+
+                        if exceeded_limit {
+                            continue;
+                        }
+
+                        pending = true;
+                        if last_update.elapsed() >= STREAM_UPDATE_DEBOUNCE {
+                            let _ = slack
+                                .update_message_text(&channel, &ts, &latest_text)
+                                .await;
+                            last_update = Instant::now();
+                            pending = false;
+                        }
+                    }
+                    coda_core::PlanStreamUpdate::ToolActivity {
+                        tool_name,
+                        summary,
+                    } => {
+                        let activity = if summary.is_empty() {
+                            format!("_:mag: {tool_name}_")
+                        } else {
+                            format!("_:mag: {tool_name} {summary}_")
+                        };
+                        let display = if exceeded_limit {
+                            let preview = truncated_preview(&latest_text);
+                            format!("{preview}\n\n{activity}")
+                        } else {
+                            format!("{latest_text}\n\n{activity}")
+                        };
+                        let _ = slack
+                            .update_message_text(&channel, &ts, &display)
+                            .await;
+                        last_update = Instant::now();
+                        pending = false;
+                    }
+                }
+            }
+            // Heartbeat: show progress when the stream is idle
+            () = tokio::time::sleep(HEARTBEAT_INTERVAL) => {
+                let elapsed = started.elapsed().as_secs();
+                let msg = if exceeded_limit {
+                    let preview = truncated_preview(&latest_text);
+                    format!("{preview}\n\n_:hourglass: generating... ({elapsed}s)_")
+                } else if latest_text.is_empty() {
+                    format!("_:hourglass: thinking... ({elapsed}s)_")
+                } else {
+                    format!("{latest_text}\n\n_:hourglass: thinking... ({elapsed}s)_")
+                };
+                let _ = slack.update_message_text(&channel, &ts, &msg).await;
+                last_update = Instant::now();
+            }
+        }
+    }
+
+    // Flush any remaining pending text update (only if within limit)
+    if pending && !exceeded_limit {
+        let _ = slack.update_message_text(&channel, &ts, &latest_text).await;
+    }
+}
+
+/// Returns a UTF-8-safe truncated preview of `text` at
+/// [`SLACK_SECTION_CHAR_LIMIT`].
+fn truncated_preview(text: &str) -> &str {
+    let mut end = SLACK_SECTION_CHAR_LIMIT.min(text.len());
+    while end > 0 && !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    &text[..end]
 }
 
 /// Handles the `approve` keyword: formalizes design and verification.
@@ -273,6 +455,22 @@ async fn handle_done(state: Arc<AppState>, channel: &str, thread_ts: &str) {
         return;
     }
 
+    // Acquire repo lock for worktree creation
+    let repo_path = state.bindings().get(channel);
+    if let Some(ref path) = repo_path
+        && let Err(holder) = state.repo_locks().try_lock(path, "plan finalize")
+    {
+        let _ = state
+            .slack()
+            .post_thread_reply(
+                channel,
+                thread_ts,
+                &format!(":warning: Repository is busy (`{holder}`). Try again later."),
+            )
+            .await;
+        return;
+    }
+
     let _ = state
         .slack()
         .add_reaction(channel, thread_ts, "hourglass_flowing_sand")
@@ -283,12 +481,20 @@ async fn handle_done(state: Arc<AppState>, channel: &str, thread_ts: &str) {
             Some(e) => e,
             None => {
                 warn!(channel, thread_ts, "Session not found for done");
+                if let Some(ref path) = repo_path {
+                    state.repo_locks().unlock(path);
+                }
                 return;
             }
         };
         entry.last_activity = std::time::Instant::now();
         entry.session.finalize().await
     };
+
+    // Release repo lock immediately after finalize
+    if let Some(ref path) = repo_path {
+        state.repo_locks().unlock(path);
+    }
 
     let _ = state
         .slack()
@@ -383,50 +589,77 @@ async fn handle_quit(state: Arc<AppState>, channel: &str, thread_ts: &str) {
     }
 }
 
-/// Posts content inline if short enough, or uploads as a file snippet.
+/// Posts content inline, splitting into multiple messages if too long.
+///
+/// Wraps each chunk in a code block with a label. For multi-part content,
+/// each part includes a `(N/M)` suffix in the header.
 async fn post_content_or_file(
     state: &AppState,
     channel: &str,
     thread_ts: &str,
     content: &str,
     label: &str,
-    filename: &str,
-    filetype: &str,
+    _filename: &str,
+    _filetype: &str,
 ) {
-    if content.len() <= SLACK_SECTION_CHAR_LIMIT {
-        let msg = format!("*{label}:*\n```\n{content}\n```");
+    // Reserve space for the code block wrapper: "*Label (N/M):*\n```\n...\n```"
+    let wrapper_overhead = label.len() + 30;
+    let chunk_limit = SLACK_SECTION_CHAR_LIMIT.saturating_sub(wrapper_overhead);
+    let chunks = split_into_chunks(content, chunk_limit);
+    let total = chunks.len();
+
+    for (i, chunk) in chunks.iter().enumerate() {
+        let header = if total == 1 {
+            format!("*{label}:*")
+        } else {
+            format!("*{label} ({}/{}):*", i + 1, total)
+        };
+        let msg = format!("{header}\n```\n{chunk}\n```");
         let _ = state
             .slack()
             .post_thread_reply(channel, thread_ts, &msg)
             .await;
-    } else {
-        // Upload as file snippet for long content
-        if let Err(e) = state
-            .slack()
-            .upload_file(channel, Some(thread_ts), content, filename, filetype)
-            .await
-        {
-            warn!(error = %e, "Failed to upload {label} as file snippet");
-            // Fallback: post truncated inline
-            let truncated = &content[..SLACK_SECTION_CHAR_LIMIT.min(content.len())];
-            let msg = format!(
-                "*{label}* (truncated, full version upload failed):\n```\n{truncated}\n```"
-            );
-            let _ = state
-                .slack()
-                .post_thread_reply(channel, thread_ts, &msg)
-                .await;
+    }
+}
+
+/// Splits text into chunks of at most `max_len` bytes, preferring to
+/// break at newline boundaries for cleaner output. Handles multi-byte
+/// character boundaries safely.
+fn split_into_chunks(text: &str, max_len: usize) -> Vec<&str> {
+    if text.len() <= max_len {
+        return vec![text];
+    }
+
+    let mut chunks = Vec::new();
+    let mut start = 0;
+
+    while start < text.len() {
+        let remaining = &text[start..];
+        if remaining.len() <= max_len {
+            chunks.push(remaining);
+            break;
+        }
+
+        // Find the largest valid byte offset within max_len
+        let mut end = start + max_len;
+        while end > start && !text.is_char_boundary(end) {
+            end -= 1;
+        }
+
+        let chunk = &text[start..end];
+
+        // Prefer splitting at the last newline for cleaner breaks
+        if let Some(last_newline) = chunk.rfind('\n') {
+            let split_at = start + last_newline + 1;
+            chunks.push(&text[start..split_at]);
+            start = split_at;
         } else {
-            let _ = state
-                .slack()
-                .post_thread_reply(
-                    channel,
-                    thread_ts,
-                    &format!("*{label}* uploaded as `{filename}` above."),
-                )
-                .await;
+            chunks.push(chunk);
+            start = end;
         }
     }
+
+    chunks
 }
 
 #[cfg(test)]
@@ -472,5 +705,52 @@ mod tests {
     fn test_should_route_regular_text_to_conversation() {
         let trimmed = "design a REST API for auth".trim().to_lowercase();
         assert!(trimmed != "approve" && trimmed != "done" && trimmed != "quit");
+    }
+
+    #[test]
+    fn test_should_return_single_chunk_for_short_text() {
+        let chunks = split_into_chunks("hello world", 100);
+        assert_eq!(chunks, vec!["hello world"]);
+    }
+
+    #[test]
+    fn test_should_split_at_newline_boundary() {
+        let text = "line1\nline2\nline3\nline4\n";
+        let chunks = split_into_chunks(text, 12);
+        assert_eq!(chunks[0], "line1\nline2\n");
+        assert_eq!(chunks[1], "line3\nline4\n");
+    }
+
+    #[test]
+    fn test_should_split_without_newline() {
+        let text = "abcdefghij";
+        let chunks = split_into_chunks(text, 4);
+        assert_eq!(chunks, vec!["abcd", "efgh", "ij"]);
+    }
+
+    #[test]
+    fn test_should_handle_exact_boundary() {
+        let text = "abc";
+        let chunks = split_into_chunks(text, 3);
+        assert_eq!(chunks, vec!["abc"]);
+    }
+
+    #[test]
+    fn test_should_handle_multibyte_chars() {
+        // Each CJK char is 3 bytes in UTF-8
+        let text = "你好世界测试";
+        // max_len=9 fits exactly 3 CJK chars (9 bytes)
+        let chunks = split_into_chunks(text, 9);
+        assert_eq!(chunks.len(), 2);
+        assert_eq!(chunks[0], "你好世");
+        assert_eq!(chunks[1], "界测试");
+    }
+
+    #[test]
+    fn test_should_reassemble_to_original() {
+        let text = "aaa\nbbb\nccc\nddd\neee\n";
+        let chunks = split_into_chunks(text, 8);
+        let reassembled: String = chunks.concat();
+        assert_eq!(reassembled, text);
     }
 }

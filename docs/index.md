@@ -16,6 +16,12 @@ See [`.coda.md`](../.coda.md) for a comprehensive overview of the repository str
 |----------|-------------|
 | [`slack-setup.md`](slack-setup.md) | Slack App creation and configuration guide for `coda-server` |
 
+## Research
+
+| Document | Description |
+|----------|-------------|
+| [`research/openai-codex-cli-research.md`](research/openai-codex-cli-research.md) | OpenAI Codex CLI research -- product status, capabilities, API/interface, code review, CI/CD integration |
+
 ## Per-Crate API Reference
 
 Each library crate maintains an `API.md` file at its root that documents the crate's public interface: re-exported types, traits, structs, enums, and free functions with one-line descriptions.

@@ -128,52 +128,6 @@ impl SlackClient {
         })
     }
 
-    /// Uploads a text file as a snippet to a channel (optionally in a thread).
-    ///
-    /// # Errors
-    ///
-    /// Returns `ServerError::SlackApi` if the API call fails or returns an error.
-    pub async fn upload_file(
-        &self,
-        channel: &str,
-        thread_ts: Option<&str>,
-        content: &str,
-        title: &str,
-        filetype: &str,
-    ) -> Result<(), ServerError> {
-        let mut form = reqwest::multipart::Form::new()
-            .text("channels", channel.to_string())
-            .text("content", content.to_string())
-            .text("title", title.to_string())
-            .text("filetype", filetype.to_string());
-
-        if let Some(ts) = thread_ts {
-            form = form.text("thread_ts", ts.to_string());
-        }
-
-        debug!(channel, title, "Uploading file");
-        let resp = self
-            .http
-            .post(format!("{SLACK_API_BASE}/files.upload"))
-            .bearer_auth(&self.bot_token)
-            .multipart(form)
-            .send()
-            .await
-            .map_err(|e| ServerError::SlackApi(format!("files.upload request failed: {e}")))?;
-
-        let api_resp: SlackApiResponse = resp.json().await.map_err(|e| {
-            ServerError::SlackApi(format!("files.upload response parse failed: {e}"))
-        })?;
-
-        if !api_resp.ok {
-            return Err(ServerError::SlackApi(format!(
-                "files.upload error: {}",
-                api_resp.error.unwrap_or_default()
-            )));
-        }
-        Ok(())
-    }
-
     /// Adds a reaction emoji to a message.
     ///
     /// # Errors
@@ -213,6 +167,30 @@ impl SlackClient {
         });
         debug!(channel, ts, name, "Removing reaction");
         self.call_bot_api("reactions.remove", &body).await?;
+        Ok(())
+    }
+
+    /// Updates an existing message's plain-text content.
+    ///
+    /// Unlike [`update_message`] which replaces Block Kit blocks, this method
+    /// updates a text-only message identified by its timestamp.
+    ///
+    /// # Errors
+    ///
+    /// Returns `ServerError::SlackApi` if the API call fails or returns an error.
+    pub async fn update_message_text(
+        &self,
+        channel: &str,
+        ts: &str,
+        text: &str,
+    ) -> Result<(), ServerError> {
+        let body = serde_json::json!({
+            "channel": channel,
+            "ts": ts,
+            "text": text,
+        });
+        debug!(channel, ts, "Updating message text");
+        self.call_bot_api("chat.update", &body).await?;
         Ok(())
     }
 

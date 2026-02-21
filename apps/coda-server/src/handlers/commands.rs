@@ -64,6 +64,18 @@ pub enum CodaCommand {
     /// Clean up merged worktrees.
     Clean,
 
+    /// List GitHub repos and select one to clone and bind.
+    Repos {
+        /// Optional GitHub org/user to list repos from.
+        org: Option<String>,
+    },
+
+    /// Switch the bound repository to a different branch.
+    Switch {
+        /// Target branch name.
+        branch: String,
+    },
+
     /// Show available commands.
     Help,
 }
@@ -142,6 +154,23 @@ impl CodaCommand {
                 })
             }
             "clean" => Ok(Self::Clean),
+            "repos" => Ok(Self::Repos {
+                org: if rest.is_empty() {
+                    None
+                } else {
+                    Some(rest.to_string())
+                },
+            }),
+            "switch" => {
+                if rest.is_empty() {
+                    return Err(ServerError::Dispatch(
+                        "Usage: `/coda switch <branch>` — provide a branch name".into(),
+                    ));
+                }
+                Ok(Self::Switch {
+                    branch: rest.to_string(),
+                })
+            }
             "help" => Ok(Self::Help),
             _ => Ok(Self::Help),
         }
@@ -229,6 +258,12 @@ pub async fn handle_slash_command(state: Arc<AppState>, payload: serde_json::Val
             commands::query::handle_status(Arc::clone(&state), &cmd_payload, &feature_slug).await
         }
         CodaCommand::Clean => commands::query::handle_clean(Arc::clone(&state), &cmd_payload).await,
+        CodaCommand::Repos { org } => {
+            commands::repos::handle_repos(Arc::clone(&state), &cmd_payload, org.as_deref()).await
+        }
+        CodaCommand::Switch { branch } => {
+            commands::repos::handle_switch(Arc::clone(&state), &cmd_payload, &branch).await
+        }
     };
 
     if let Err(e) = result {
@@ -410,6 +445,41 @@ mod tests {
         assert_eq!(payload.command, "/coda");
         assert_eq!(payload.text, "help");
         assert_eq!(payload.channel_id, "C123");
+    }
+
+    #[test]
+    fn test_should_parse_repos_without_org() {
+        let cmd = CodaCommand::parse("repos").expect("parse");
+        assert_eq!(cmd, CodaCommand::Repos { org: None });
+    }
+
+    #[test]
+    fn test_should_parse_repos_with_org() {
+        let cmd = CodaCommand::parse("repos my-org").expect("parse");
+        assert_eq!(
+            cmd,
+            CodaCommand::Repos {
+                org: Some("my-org".into())
+            }
+        );
+    }
+
+    #[test]
+    fn test_should_parse_switch_with_branch() {
+        let cmd = CodaCommand::parse("switch main").expect("parse");
+        assert_eq!(
+            cmd,
+            CodaCommand::Switch {
+                branch: "main".into()
+            }
+        );
+    }
+
+    #[test]
+    fn test_should_error_on_switch_without_branch() {
+        let result = CodaCommand::parse("switch");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("branch"));
     }
 
     #[test]

@@ -15,6 +15,10 @@ use serde::{Deserialize, Serialize};
 /// and the interaction handler for routing.
 pub const CLEAN_CONFIRM_ACTION: &str = "coda_clean_confirm";
 
+/// Action ID for the repo select dropdown, used by both the formatter
+/// and the interaction handler for routing.
+pub const REPO_SELECT_ACTION: &str = "coda_repo_select";
+
 /// Serializable representation of a clean candidate for button payloads.
 ///
 /// Encoded as JSON in the clean confirm button's `value` field and
@@ -51,6 +55,114 @@ impl From<CleanTarget> for CleanedWorktree {
             pr_state: t.pr_state,
         }
     }
+}
+
+/// A GitHub repository entry for the select menu.
+///
+/// # Examples
+///
+/// ```
+/// use coda_server::formatter::RepoListEntry;
+///
+/// let entry = RepoListEntry {
+///     name_with_owner: "org/repo".to_string(),
+///     description: Some("A cool project".to_string()),
+/// };
+/// assert_eq!(entry.name_with_owner, "org/repo");
+/// ```
+#[derive(Debug, Clone)]
+pub struct RepoListEntry {
+    /// Full repository name in `owner/repo` format.
+    pub name_with_owner: String,
+    /// Optional repository description.
+    pub description: Option<String>,
+}
+
+/// Maximum length for a Slack `static_select` option text/description (75 chars).
+const SELECT_OPTION_TEXT_MAX: usize = 75;
+
+/// Builds a Block Kit message with a `static_select` dropdown listing repos.
+///
+/// The dropdown uses [`REPO_SELECT_ACTION`] as its `action_id`. Each option's
+/// value is the `nameWithOwner` string. Descriptions are truncated to 75
+/// characters per Slack's limit.
+///
+/// # Examples
+///
+/// ```
+/// use coda_server::formatter::{self, RepoListEntry};
+///
+/// let repos = vec![
+///     RepoListEntry {
+///         name_with_owner: "org/repo-a".to_string(),
+///         description: Some("First repo".to_string()),
+///     },
+///     RepoListEntry {
+///         name_with_owner: "org/repo-b".to_string(),
+///         description: None,
+///     },
+/// ];
+/// let blocks = formatter::repo_select_menu(&repos);
+/// assert!(blocks.len() >= 2); // header + actions
+/// ```
+pub fn repo_select_menu(repos: &[RepoListEntry]) -> Vec<serde_json::Value> {
+    let mut blocks = vec![header("GitHub Repositories")];
+
+    let options: Vec<serde_json::Value> = repos
+        .iter()
+        .map(|repo| {
+            // Slack option text is plain_text with max 75 chars
+            let label = truncate_str(&repo.name_with_owner, SELECT_OPTION_TEXT_MAX);
+            let mut option = serde_json::json!({
+                "text": {
+                    "type": "plain_text",
+                    "text": label,
+                },
+                "value": &repo.name_with_owner,
+            });
+            // Only add description if non-empty (Slack rejects empty plain_text)
+            if let Some(ref desc) = repo.description {
+                let trimmed = desc.trim();
+                if !trimmed.is_empty() {
+                    let truncated = truncate_str(trimmed, SELECT_OPTION_TEXT_MAX);
+                    option["description"] = serde_json::json!({
+                        "type": "plain_text",
+                        "text": truncated,
+                    });
+                }
+            }
+            option
+        })
+        .collect();
+
+    blocks.push(serde_json::json!({
+        "type": "actions",
+        "elements": [{
+            "type": "static_select",
+            "placeholder": {
+                "type": "plain_text",
+                "text": "Select a repository...",
+            },
+            "action_id": REPO_SELECT_ACTION,
+            "options": options,
+        }],
+    }));
+
+    blocks.push(context(&format!("_{} repo(s) found_", repos.len())));
+
+    blocks
+}
+
+/// Truncates a string to `max_len` bytes, respecting UTF-8 char boundaries.
+fn truncate_str(s: &str, max_len: usize) -> &str {
+    if s.len() <= max_len {
+        return s;
+    }
+    let mut end = max_len;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
 }
 
 /// Display state for a single init phase in the progress message.
@@ -1118,5 +1230,100 @@ mod tests {
         let status_text = blocks[1]["text"]["text"].as_str().unwrap_or("");
         assert!(status_text.contains(":clipboard:"));
         assert!(status_text.contains("CustomPhase"));
+    }
+
+    #[test]
+    fn test_should_build_repo_select_menu() {
+        let repos = vec![
+            RepoListEntry {
+                name_with_owner: "org/repo-a".to_string(),
+                description: Some("First repo".to_string()),
+            },
+            RepoListEntry {
+                name_with_owner: "org/repo-b".to_string(),
+                description: None,
+            },
+        ];
+        let blocks = repo_select_menu(&repos);
+
+        // header + actions + context = 3
+        assert_eq!(blocks.len(), 3);
+        assert_eq!(blocks[0]["type"], "header");
+        assert_eq!(blocks[1]["type"], "actions");
+
+        let select = &blocks[1]["elements"][0];
+        assert_eq!(select["type"], "static_select");
+        assert_eq!(select["action_id"], REPO_SELECT_ACTION);
+
+        let options = select["options"].as_array().expect("options array");
+        assert_eq!(options.len(), 2);
+        assert_eq!(options[0]["value"], "org/repo-a");
+        assert_eq!(options[1]["value"], "org/repo-b");
+
+        // First option has description, second does not
+        assert!(options[0]["description"]["text"].as_str().is_some());
+        assert!(options[1].get("description").is_none());
+
+        let context_text = blocks[2]["elements"][0]["text"].as_str().unwrap_or("");
+        assert!(context_text.contains("2 repo(s) found"));
+    }
+
+    #[test]
+    fn test_should_truncate_long_description_in_select_menu() {
+        let long_desc = "a".repeat(100);
+        let repos = vec![RepoListEntry {
+            name_with_owner: "org/repo".to_string(),
+            description: Some(long_desc),
+        }];
+        let blocks = repo_select_menu(&repos);
+
+        let desc = blocks[1]["elements"][0]["options"][0]["description"]["text"]
+            .as_str()
+            .expect("description text");
+        assert!(desc.len() <= SELECT_OPTION_TEXT_MAX);
+    }
+
+    #[test]
+    fn test_should_skip_empty_description_in_select_menu() {
+        let repos = vec![RepoListEntry {
+            name_with_owner: "org/repo".to_string(),
+            description: Some(String::new()),
+        }];
+        let blocks = repo_select_menu(&repos);
+
+        // Empty description should not produce a description field
+        assert!(
+            blocks[1]["elements"][0]["options"][0]
+                .get("description")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn test_should_truncate_long_name_in_select_menu() {
+        let long_name = format!("org/{}", "a".repeat(100));
+        let repos = vec![RepoListEntry {
+            name_with_owner: long_name.clone(),
+            description: None,
+        }];
+        let blocks = repo_select_menu(&repos);
+
+        let text = blocks[1]["elements"][0]["options"][0]["text"]["text"]
+            .as_str()
+            .expect("text");
+        assert!(text.len() <= SELECT_OPTION_TEXT_MAX);
+        // Value should still contain the full name for cloning
+        let value = blocks[1]["elements"][0]["options"][0]["value"]
+            .as_str()
+            .expect("value");
+        assert_eq!(value, long_name);
+    }
+
+    #[test]
+    fn test_should_truncate_str() {
+        assert_eq!(truncate_str("hello", 10), "hello");
+        assert_eq!(truncate_str("hello world", 5), "hello");
+        // Multi-byte: "你好" = 6 bytes, truncate at 4 should give "你" (3 bytes)
+        assert_eq!(truncate_str("你好", 4), "你");
     }
 }

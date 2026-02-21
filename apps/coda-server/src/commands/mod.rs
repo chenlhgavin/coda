@@ -5,6 +5,7 @@
 //! - [`init`] — `/coda init` with live progress updates
 //! - [`plan`] — `/coda plan` with interactive Slack thread sessions
 //! - [`query`] — `/coda help`, `/coda list`, `/coda status`, `/coda clean`
+//! - [`repos`] — `/coda repos` and `/coda switch`
 //! - [`run`] — `/coda run` with live progress updates
 //!
 //! The shared [`resolve_engine`] helper resolves a channel binding and
@@ -22,6 +23,7 @@ pub mod bind;
 pub mod init;
 pub mod plan;
 pub mod query;
+pub mod repos;
 pub mod run;
 
 /// Resolves the channel binding and creates an Engine for the bound repository.

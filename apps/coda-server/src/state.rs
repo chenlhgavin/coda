@@ -7,7 +7,7 @@
 //! [`SessionManager`](crate::session::SessionManager) tracks active plan sessions.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use dashmap::DashMap;
 use tracing::{debug, info};
@@ -23,7 +23,7 @@ use crate::slack_client::SlackClient;
 ///
 /// ```
 /// use std::path::PathBuf;
-/// use coda_server::state::{AppState, BindingStore, RunningTasks};
+/// use coda_server::state::{AppState, BindingStore, RepoLocks, RunningTasks};
 /// use coda_server::session::SessionManager;
 /// use coda_server::slack_client::SlackClient;
 ///
@@ -31,7 +31,8 @@ use crate::slack_client::SlackClient;
 /// let bindings = BindingStore::new(PathBuf::from("/tmp/config.yml"), Default::default());
 /// let running = RunningTasks::new();
 /// let sessions = SessionManager::new();
-/// let state = AppState::new(slack, bindings, running, sessions);
+/// let repo_locks = RepoLocks::new();
+/// let state = AppState::new(slack, bindings, running, sessions, None, repo_locks);
 /// assert!(state.bindings().get("nonexistent").is_none());
 /// ```
 #[derive(Debug)]
@@ -40,22 +41,27 @@ pub struct AppState {
     bindings: BindingStore,
     running_tasks: RunningTasks,
     sessions: SessionManager,
+    workspace: Option<PathBuf>,
+    repo_locks: RepoLocks,
 }
 
 impl AppState {
-    /// Creates a new application state with the given Slack client, bindings,
-    /// running task tracker, and session manager.
+    /// Creates a new application state with the given components.
     pub fn new(
         slack: SlackClient,
         bindings: BindingStore,
         running_tasks: RunningTasks,
         sessions: SessionManager,
+        workspace: Option<PathBuf>,
+        repo_locks: RepoLocks,
     ) -> Self {
         Self {
             slack,
             bindings,
             running_tasks,
             sessions,
+            workspace,
+            repo_locks,
         }
     }
 
@@ -77,6 +83,16 @@ impl AppState {
     /// Returns a reference to the plan session manager.
     pub fn sessions(&self) -> &SessionManager {
         &self.sessions
+    }
+
+    /// Returns the workspace directory path, if configured.
+    pub fn workspace(&self) -> Option<&Path> {
+        self.workspace.as_deref()
+    }
+
+    /// Returns a reference to the repository lock manager.
+    pub fn repo_locks(&self) -> &RepoLocks {
+        &self.repo_locks
     }
 }
 
@@ -289,6 +305,68 @@ impl Default for RunningTasks {
     }
 }
 
+/// Manages per-repository locks to prevent concurrent mutating operations.
+///
+/// Multiple channels can bind to the same repository directory. This lock
+/// ensures that mutating operations (`init`, `switch`, `clean`, `plan finalize`)
+/// do not run concurrently on the same repository.
+///
+/// Read-only operations (`list`, `status`) and worktree-isolated operations
+/// (`run`) do not require locking.
+///
+/// # Examples
+///
+/// ```
+/// use std::path::PathBuf;
+/// use coda_server::state::RepoLocks;
+///
+/// let locks = RepoLocks::new();
+/// let repo = PathBuf::from("/repos/myproject");
+/// assert!(locks.try_lock(&repo, "init").is_ok());
+/// assert!(locks.try_lock(&repo, "switch main").is_err());
+/// locks.unlock(&repo);
+/// assert!(locks.try_lock(&repo, "switch main").is_ok());
+/// ```
+#[derive(Debug)]
+pub struct RepoLocks {
+    locks: DashMap<PathBuf, String>,
+}
+
+impl RepoLocks {
+    /// Creates a new, empty repository lock manager.
+    pub fn new() -> Self {
+        Self {
+            locks: DashMap::new(),
+        }
+    }
+
+    /// Attempts to acquire a lock on a repository path.
+    ///
+    /// Returns `Ok(())` if the lock was acquired, or `Err(description)` with
+    /// the current lock holder's description if the repository is already locked.
+    pub fn try_lock(&self, repo_path: &Path, description: &str) -> Result<(), String> {
+        use dashmap::mapref::entry::Entry;
+        match self.locks.entry(repo_path.to_path_buf()) {
+            Entry::Occupied(e) => Err(e.get().clone()),
+            Entry::Vacant(e) => {
+                e.insert(description.to_string());
+                Ok(())
+            }
+        }
+    }
+
+    /// Releases the lock on a repository path.
+    pub fn unlock(&self, repo_path: &Path) {
+        self.locks.remove(repo_path);
+    }
+}
+
+impl Default for RepoLocks {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
@@ -424,9 +502,23 @@ mod tests {
         let bindings = BindingStore::new(PathBuf::from("/tmp/config.yml"), HashMap::new());
         let running = RunningTasks::new();
         let sessions = SessionManager::new();
-        let state = AppState::new(slack, bindings, running, sessions);
+        let repo_locks = RepoLocks::new();
+        let state = AppState::new(slack, bindings, running, sessions, None, repo_locks);
         assert!(state.bindings().is_empty());
         assert!(state.sessions().is_empty());
+        assert!(state.workspace().is_none());
+    }
+
+    #[test]
+    fn test_should_create_app_state_with_workspace() {
+        let slack = SlackClient::new("xoxb-test".into());
+        let bindings = BindingStore::new(PathBuf::from("/tmp/config.yml"), HashMap::new());
+        let running = RunningTasks::new();
+        let sessions = SessionManager::new();
+        let repo_locks = RepoLocks::new();
+        let workspace = Some(PathBuf::from("/workspace"));
+        let state = AppState::new(slack, bindings, running, sessions, workspace, repo_locks);
+        assert_eq!(state.workspace(), Some(Path::new("/workspace")));
     }
 
     #[test]
@@ -494,5 +586,45 @@ mod tests {
     fn test_should_default_running_tasks() {
         let tasks = RunningTasks::default();
         assert!(!tasks.is_running("anything"));
+    }
+
+    #[test]
+    fn test_should_acquire_repo_lock() {
+        let locks = RepoLocks::new();
+        let repo = PathBuf::from("/repos/myproject");
+        assert!(locks.try_lock(&repo, "init").is_ok());
+    }
+
+    #[test]
+    fn test_should_reject_concurrent_repo_lock() {
+        let locks = RepoLocks::new();
+        let repo = PathBuf::from("/repos/myproject");
+        locks.try_lock(&repo, "init").expect("first lock");
+        let err = locks.try_lock(&repo, "switch main").unwrap_err();
+        assert_eq!(err, "init");
+    }
+
+    #[test]
+    fn test_should_release_repo_lock() {
+        let locks = RepoLocks::new();
+        let repo = PathBuf::from("/repos/myproject");
+        locks.try_lock(&repo, "init").expect("lock");
+        locks.unlock(&repo);
+        assert!(locks.try_lock(&repo, "switch main").is_ok());
+    }
+
+    #[test]
+    fn test_should_allow_different_repos_concurrently() {
+        let locks = RepoLocks::new();
+        let repo1 = PathBuf::from("/repos/project-a");
+        let repo2 = PathBuf::from("/repos/project-b");
+        assert!(locks.try_lock(&repo1, "init").is_ok());
+        assert!(locks.try_lock(&repo2, "init").is_ok());
+    }
+
+    #[test]
+    fn test_should_default_repo_locks() {
+        let locks = RepoLocks::default();
+        assert!(locks.try_lock(&PathBuf::from("/repo"), "test").is_ok());
     }
 }
