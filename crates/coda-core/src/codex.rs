@@ -98,6 +98,7 @@ pub fn is_codex_available() -> bool {
 ///
 /// Returns `CoreError::AgentError` if:
 /// - The `codex` process cannot be spawned
+/// - The prompt cannot be written to stdin
 /// - The process exits with a non-zero status
 /// - The output cannot be parsed
 pub async fn run_codex_review(

@@ -42,6 +42,12 @@ pub enum Task {
         feature_slug: String,
     },
 
+    /// Update `.coda.md` and `README.md` after all code phases complete.
+    UpdateDocs {
+        /// URL-safe feature slug.
+        feature_slug: String,
+    },
+
     /// Create a pull request after all phases complete.
     CreatePr {
         /// URL-safe feature slug.

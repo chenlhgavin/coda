@@ -1,0 +1,88 @@
+feature:
+  slug: auto-update-doc
+  created_at: 2026-02-21T10:40:30.755902Z
+  updated_at: 2026-02-21T11:35:51.130232Z
+status: completed
+current_phase: 5
+git:
+  worktree_path: .trees/auto-update-doc
+  branch: feature/auto-update-doc
+  base_branch: main
+phases:
+- name: core-pipeline-wiring
+  kind: dev
+  status: completed
+  started_at: 2026-02-21T10:42:47.362945Z
+  completed_at: 2026-02-21T10:50:21.607663Z
+  turns: 46
+  cost_usd: 3.22126675
+  cost:
+    input_tokens: 41
+    output_tokens: 21906
+  duration_secs: 454
+  details: {}
+- name: prompt-template
+  kind: dev
+  status: completed
+  started_at: 2026-02-21T10:50:21.608664Z
+  completed_at: 2026-02-21T10:52:11.137300Z
+  turns: 14
+  cost_usd: 1.8439182499999998
+  cost:
+    input_tokens: 0
+    output_tokens: 0
+  duration_secs: 109
+  details: {}
+- name: full-implementation-with-retry-logic
+  kind: dev
+  status: completed
+  started_at: 2026-02-21T10:52:11.138102Z
+  completed_at: 2026-02-21T10:58:07.630328Z
+  turns: 54
+  cost_usd: 3.388325250000001
+  cost:
+    input_tokens: 33
+    output_tokens: 6732
+  duration_secs: 356
+  details: {}
+- name: review
+  kind: quality
+  status: completed
+  started_at: 2026-02-21T11:09:36.518680Z
+  completed_at: 2026-02-21T11:32:00.378992Z
+  turns: 83
+  cost_usd: 3.45493725
+  cost:
+    input_tokens: 7825
+    output_tokens: 8730
+  duration_secs: 1343
+  details:
+    issues_found: 6
+    issues_resolved: 6
+    rounds: 4
+- name: verify
+  kind: quality
+  status: completed
+  started_at: 2026-02-21T11:32:00.379652Z
+  completed_at: 2026-02-21T11:35:51.130230Z
+  turns: 32
+  cost_usd: 2.2677887499999962
+  cost:
+    input_tokens: 11
+    output_tokens: 1184
+  duration_secs: 230
+  details:
+    attempts: 35
+    checks_passed: 35
+    checks_total: 35
+pr:
+  url: https://github.com/chenlhgavin/coda/pull/2
+  number: 2
+  title: 'feat(auto-update-doc): feature implementation'
+total:
+  turns: 229
+  cost_usd: 14.176236249999997
+  cost:
+    input_tokens: 7910
+    output_tokens: 38552
+  duration_secs: 2492

@@ -59,7 +59,7 @@ pub struct PlanOutput {
 }
 
 /// Fixed quality-assurance phase names appended after dynamic dev phases.
-const QUALITY_PHASES: &[&str] = &["review", "verify"];
+const QUALITY_PHASES: &[&str] = &["review", "verify", "update-docs"];
 
 /// An interactive planning session wrapping a `ClaudeClient` with the
 /// Planner profile for multi-turn feature planning conversations.
@@ -618,9 +618,9 @@ fn slugify_phase_name(name: &str) -> String {
 /// Builds an initial `FeatureState` for a newly planned feature.
 ///
 /// Creates dev phases from `dev_phase_names`, appends the fixed
-/// review + verify quality phases, and initialises everything to `Pending`
-/// with zeroed cost/duration statistics. Planning session costs are
-/// recorded in `total` so they appear in status reports.
+/// review + verify + update-docs quality phases, and initialises everything
+/// to `Pending` with zeroed cost/duration statistics. Planning session costs
+/// are recorded in `total` so they appear in status reports.
 pub(crate) fn build_initial_state(
     feature_slug: &str,
     worktree_path: &Path,
@@ -710,8 +710,8 @@ mod tests {
         assert_eq!(state.git.branch, "feature/add-auth");
         assert_eq!(state.git.base_branch, "main");
 
-        // Phases: 3 dev + 2 quality = 5
-        assert_eq!(state.phases.len(), 5);
+        // Phases: 3 dev + 3 quality = 6
+        assert_eq!(state.phases.len(), 6);
         let names: Vec<&str> = state.phases.iter().map(|p| p.name.as_str()).collect();
         assert_eq!(
             names,
@@ -720,13 +720,15 @@ mod tests {
                 "transport-layer",
                 "client-methods",
                 "review",
-                "verify"
+                "verify",
+                "update-docs",
             ]
         );
 
         assert_eq!(state.phases[0].kind, PhaseKind::Dev);
         assert_eq!(state.phases[3].kind, PhaseKind::Quality);
         assert_eq!(state.phases[4].kind, PhaseKind::Quality);
+        assert_eq!(state.phases[5].kind, PhaseKind::Quality);
 
         for phase in &state.phases {
             assert_eq!(phase.status, PhaseStatus::Pending);
@@ -760,9 +762,10 @@ mod tests {
         assert!(yaml.contains("phase-one"));
         assert!(yaml.contains("review"));
         assert!(yaml.contains("verify"));
+        assert!(yaml.contains("update-docs"));
 
         let deserialized: FeatureState = serde_yaml::from_str(&yaml).unwrap();
-        assert_eq!(deserialized.phases.len(), 4);
+        assert_eq!(deserialized.phases.len(), 5);
         assert_eq!(deserialized.status, FeatureStatus::Planned);
     }
 
