@@ -82,9 +82,10 @@ pub fn is_codex_available() -> bool {
 
 /// Runs a Codex CLI review on the given diff.
 ///
-/// Spawns `codex exec --full-auto --sandbox read-only` with a review prompt
-/// containing the diff and design spec. Parses the YAML output from the
-/// Codex response into structured [`ReviewIssue`]s.
+/// Spawns `codex exec --full-auto --sandbox read-only --json` with a review
+/// prompt piped via stdin. The `--json` flag suppresses TTY output and emits
+/// JSONL events on stdout. The agent message text is extracted from the
+/// `item.completed` events and parsed for YAML review issues.
 ///
 /// The `reasoning_effort` parameter controls the model's reasoning depth
 /// and is passed via `-c model_reasoning_effort=<value>`. Valid values:
@@ -114,15 +115,16 @@ pub async fn run_codex_review(
 
     let effort_config = format!("model_reasoning_effort=\"{reasoning_effort}\"");
 
-    // Pass the prompt via stdin instead of as a CLI argument to avoid
-    // E2BIG (os error 7) when the diff + design spec exceeds the OS
-    // argument-list limit for execve().
+    // Pass the prompt via stdin (with `-`) to avoid E2BIG (os error 7) when
+    // the diff + design spec exceeds the OS execve() argument-list limit.
+    // Use `--json` to suppress TTY output so codex doesn't corrupt CODA's TUI.
     let mut child = tokio::process::Command::new("codex")
         .args([
             "exec",
             "--full-auto",
             "--sandbox",
             "read-only",
+            "--json",
             "--model",
             model,
             "-c",
@@ -164,11 +166,13 @@ pub async fn run_codex_review(
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    debug!(output_len = stdout.len(), "Codex review completed",);
+    debug!(output_len = stdout.len(), "Codex review completed");
 
-    // Extract the assistant message text from the Codex output.
-    // `codex exec` without `--json` outputs the assistant's response directly.
-    let issues = parse_review_issues_structured(&stdout, ReviewSource::Codex);
+    // Extract the agent message text from `--json` JSONL events.
+    let agent_text = extract_agent_message_from_jsonl(&stdout);
+    debug!(agent_text_len = agent_text.len(), "Extracted agent message");
+
+    let issues = parse_review_issues_structured(&agent_text, ReviewSource::Codex);
 
     info!(issues = issues.len(), "Codex review found issues");
     Ok(issues)
@@ -376,6 +380,48 @@ fn jaccard_similarity(a: &str, b: &str) -> f64 {
     }
 
     intersection as f64 / union as f64
+}
+
+/// Extracts agent message text from `codex exec --json` JSONL output.
+///
+/// Scans for `item.completed` events where `item.type` is `"agent_message"`
+/// and concatenates their `item.text` fields.
+///
+/// # Examples
+///
+/// ```
+/// use coda_core::codex::extract_agent_message_from_jsonl;
+///
+/// let jsonl = r#"{"type":"thread.started","thread_id":"abc"}
+/// {"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"hello"}}
+/// {"type":"turn.completed","usage":{"input_tokens":10,"output_tokens":5}}"#;
+///
+/// assert_eq!(extract_agent_message_from_jsonl(jsonl), "hello");
+/// ```
+pub fn extract_agent_message_from_jsonl(jsonl: &str) -> String {
+    let mut texts = Vec::new();
+    for line in jsonl.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let Ok(event) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        if event.get("type").and_then(|t| t.as_str()) != Some("item.completed") {
+            continue;
+        }
+        let Some(item) = event.get("item") else {
+            continue;
+        };
+        if item.get("type").and_then(|t| t.as_str()) != Some("agent_message") {
+            continue;
+        }
+        if let Some(text) = item.get("text").and_then(|t| t.as_str()) {
+            texts.push(text.to_string());
+        }
+    }
+    texts.join("\n")
 }
 
 /// Builds the review prompt for the Codex CLI.
@@ -587,6 +633,42 @@ issues:
             formatted[1],
             "[major] src/lib.rs: missing docs. Suggestion: add docs [Claude+Codex]",
         );
+    }
+
+    #[test]
+    fn test_should_extract_agent_message_from_jsonl() {
+        let jsonl = r#"{"type":"thread.started","thread_id":"019c7fd5"}
+{"type":"turn.started"}
+{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"```yaml\nissues:\n  - severity: critical\n    file: src/main.rs\n    description: unwrap used\n    suggestion: use ?\n```"}}
+{"type":"turn.completed","usage":{"input_tokens":100,"output_tokens":50}}"#;
+
+        let text = extract_agent_message_from_jsonl(jsonl);
+        assert!(text.contains("issues:"));
+        assert!(text.contains("critical"));
+    }
+
+    #[test]
+    fn test_should_return_empty_for_no_agent_message() {
+        let jsonl = r#"{"type":"thread.started","thread_id":"abc"}
+{"type":"turn.completed","usage":{"input_tokens":10,"output_tokens":5}}"#;
+
+        assert!(extract_agent_message_from_jsonl(jsonl).is_empty());
+    }
+
+    #[test]
+    fn test_should_concatenate_multiple_agent_messages() {
+        let jsonl = r#"{"type":"item.completed","item":{"id":"0","type":"agent_message","text":"first"}}
+{"type":"item.completed","item":{"id":"1","type":"agent_message","text":"second"}}"#;
+
+        assert_eq!(extract_agent_message_from_jsonl(jsonl), "first\nsecond");
+    }
+
+    #[test]
+    fn test_should_skip_non_agent_message_items() {
+        let jsonl = r#"{"type":"item.completed","item":{"id":"0","type":"tool_call","text":"ignored"}}
+{"type":"item.completed","item":{"id":"1","type":"agent_message","text":"kept"}}"#;
+
+        assert_eq!(extract_agent_message_from_jsonl(jsonl), "kept");
     }
 
     #[test]
