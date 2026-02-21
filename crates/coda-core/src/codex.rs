@@ -129,6 +129,7 @@ pub async fn run_codex_review(
             &effort_config,
             "-C",
             &worktree.to_string_lossy(),
+            "-",
         ])
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
