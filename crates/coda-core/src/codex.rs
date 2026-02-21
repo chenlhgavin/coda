@@ -8,7 +8,11 @@
 //! # Architecture
 //!
 //! - [`ReviewIssue`] is the normalized issue representation shared by both engines
-//! - [`run_codex_review`] spawns `codex exec` as a subprocess and parses its output
+//! - [`run_codex_review`] spawns `codex exec` as a subprocess with filesystem
+//!   access (`--sandbox read-only`). Instead of inlining the full diff in the
+//!   prompt (which can overflow the context window on large changesets), the
+//!   prompt provides only metadata (base branch, spec path, changed file list)
+//!   and Codex reads files and runs `git diff` on its own.
 //! - [`deduplicate_issues`] merges overlapping issues from multiple reviewers
 //! - Falls back gracefully when `codex` is not installed
 
@@ -82,13 +86,18 @@ pub fn is_codex_available() -> bool {
         .is_ok_and(|s| s.success())
 }
 
-/// Runs a Codex CLI review on the given diff.
+/// Runs a Codex CLI review using filesystem access.
 ///
-/// Spawns `codex exec --full-auto --sandbox read-only --json` with a review
-/// prompt piped via stdin. The `--json` flag suppresses TTY output and emits
-/// JSONL events on stdout. Agent message text is extracted from
-/// `item.completed` events in real time and streamed to the TUI via
-/// `progress_tx` as [`RunEvent::AgentTextDelta`] events.
+/// Instead of inlining the entire diff in the prompt (which overflows
+/// the model's context window on large changesets), this function passes
+/// only lightweight metadata — the base branch, spec file path, and list
+/// of changed files. Codex operates in `--sandbox read-only` mode with
+/// `-C <worktree>`, giving it direct filesystem access to run `git diff`
+/// and read files on its own, keeping the initial prompt small.
+///
+/// Spawns `codex exec --full-auto --sandbox read-only --json` with the
+/// review prompt piped via stdin. JSONL events on stdout are parsed in
+/// real time and streamed to the TUI via `progress_tx`.
 ///
 /// The `reasoning_effort` parameter controls the model's reasoning depth
 /// and is passed via `-c model_reasoning_effort=<value>`. Valid values:
@@ -103,13 +112,14 @@ pub fn is_codex_available() -> bool {
 /// - The output cannot be parsed
 pub async fn run_codex_review(
     worktree: &Path,
-    diff: &str,
-    design_spec: &str,
+    base_branch: &str,
+    spec_path: &str,
+    changed_files: &[String],
     model: &str,
     reasoning_effort: &str,
     progress_tx: Option<&UnboundedSender<RunEvent>>,
 ) -> Result<Vec<ReviewIssue>, CoreError> {
-    let prompt = build_codex_review_prompt(diff, design_spec);
+    let prompt = build_codex_review_prompt(base_branch, spec_path, changed_files);
 
     info!(
         model = model,
@@ -498,25 +508,35 @@ pub fn extract_agent_message_from_jsonl(jsonl: &str) -> String {
 
 /// Builds the review prompt for the Codex CLI.
 ///
-/// Contains the diff, design spec, and output format instructions
-/// matching the same YAML schema used by Claude's review prompt.
-fn build_codex_review_prompt(diff: &str, design_spec: &str) -> String {
+/// Instead of inlining the entire diff (which can exceed the model's
+/// context window), this prompt provides metadata and instructs Codex
+/// to read files from disk. Codex runs with `--sandbox read-only` and
+/// `-C <worktree>`, so it has full filesystem read access and can run
+/// `git diff` itself.
+fn build_codex_review_prompt(
+    base_branch: &str,
+    spec_path: &str,
+    changed_files: &[String],
+) -> String {
+    let file_list = changed_files
+        .iter()
+        .map(|f| format!("- {f}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+
     format!(
-        r#"You are a senior code reviewer. Review the following changes for a new feature.
+        r#"You are a senior code reviewer. Review the changes on the current branch compared to `{base_branch}`.
 
-## Design Specification
+## Instructions
 
-{design_spec}
+1. Read the design specification from disk: `{spec_path}`
+2. The following {file_count} files were changed:
+{file_list}
+3. For each changed file, run `git diff {base_branch} -- <file>` to see the diff, and read the full file for additional context when needed.
+4. Focus only on **critical** and **major** issues.
 
-## Code Changes (diff)
+## Review Checklist
 
-```diff
-{diff}
-```
-
-## Task
-
-Perform a thorough code review focusing on:
 1. Correctness — Does the code match the design spec?
 2. Error Handling — Are all error cases handled properly?
 3. Security — Any input validation issues or sensitive data exposure?
@@ -526,7 +546,7 @@ Perform a thorough code review focusing on:
 
 ## Output Format
 
-Respond with a YAML block listing only **critical** and **major** issues:
+After reviewing all files, respond with a single YAML block listing only **critical** and **major** issues:
 
 ```yaml
 issues:
@@ -543,6 +563,7 @@ issues: []
 ```
 
 Be precise and avoid false positives. Only report issues that are objectively problematic."#,
+        file_count = changed_files.len(),
     )
 }
 
@@ -806,5 +827,36 @@ issues:
     fn test_should_return_none_for_non_error_events() {
         let line = r#"{"type":"thread.started","thread_id":"abc"}"#;
         assert_eq!(extract_error_from_jsonl_event(line), None);
+    }
+
+    #[test]
+    fn test_should_build_filesystem_based_review_prompt() {
+        let files = vec![
+            "src/main.rs".to_string(),
+            "src/lib.rs".to_string(),
+            "tests/integration.rs".to_string(),
+        ];
+        let prompt = build_codex_review_prompt("main", ".coda/my-feature/specs/design.md", &files);
+
+        // Should reference base branch for git diff
+        assert!(prompt.contains("git diff main -- <file>"));
+        // Should reference spec path for reading from disk
+        assert!(prompt.contains(".coda/my-feature/specs/design.md"));
+        // Should list all changed files
+        assert!(prompt.contains("- src/main.rs"));
+        assert!(prompt.contains("- src/lib.rs"));
+        assert!(prompt.contains("- tests/integration.rs"));
+        // Should include file count
+        assert!(prompt.contains("3 files"));
+        // Should NOT contain any inline diff content
+        assert!(!prompt.contains("```diff"));
+    }
+
+    #[test]
+    fn test_should_build_prompt_with_empty_file_list() {
+        let prompt = build_codex_review_prompt("main", ".coda/slug/specs/design.md", &[]);
+
+        assert!(prompt.contains("0 files"));
+        assert!(prompt.contains("git diff main"));
     }
 }

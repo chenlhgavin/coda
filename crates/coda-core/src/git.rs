@@ -103,6 +103,15 @@ pub trait GitOps: Send + Sync {
     /// Returns `CoreError::GitError` if the command fails.
     fn diff(&self, cwd: &Path, base: &str) -> Result<String, CoreError>;
 
+    /// Returns the list of file paths changed between `base` and HEAD.
+    ///
+    /// Equivalent to `git diff --name-only <base> HEAD` run inside `cwd`.
+    ///
+    /// # Errors
+    ///
+    /// Returns `CoreError::GitError` if the command fails.
+    fn diff_name_only(&self, cwd: &Path, base: &str) -> Result<Vec<String>, CoreError>;
+
     /// Returns one-line log entries for commits in `range`.
     ///
     /// Equivalent to `git log <range> --oneline --no-decorate` inside `cwd`.
@@ -208,6 +217,15 @@ impl GitOps for DefaultGitOps {
 
     fn diff(&self, cwd: &Path, base: &str) -> Result<String, CoreError> {
         run_git(cwd, &["diff", base, "HEAD"])
+    }
+
+    fn diff_name_only(&self, cwd: &Path, base: &str) -> Result<Vec<String>, CoreError> {
+        let output = run_git(cwd, &["diff", "--name-only", base, "HEAD"])?;
+        Ok(output
+            .lines()
+            .filter(|l| !l.is_empty())
+            .map(String::from)
+            .collect())
     }
 
     fn log_oneline(&self, cwd: &Path, range: &str) -> Result<String, CoreError> {

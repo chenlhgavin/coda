@@ -1183,20 +1183,21 @@ impl Runner {
 
     /// Runs review using only Codex, then asks Claude to fix.
     async fn run_review_codex(&mut self, phase_idx: usize) -> Result<TaskResult, CoreError> {
-        let design_spec = self.load_spec("design.md")?;
         let max_rounds = self.config.review.max_review_rounds;
         let codex_model = self.config.review.codex_model.clone();
         let codex_effort = self.config.review.codex_reasoning_effort.clone();
+        let spec_path = self.spec_relative_path("design.md");
         let mut acc = PhaseMetricsAccumulator::new();
 
         for round in 0..max_rounds {
             info!(round = round + 1, max = max_rounds, "Review round (codex)");
 
-            let diff = self.get_diff()?;
+            let changed_files = self.get_changed_files()?;
             let codex_issues = run_codex_review(
                 &self.worktree_path,
-                &diff,
-                &design_spec,
+                &self.state.git.base_branch,
+                &spec_path,
+                &changed_files,
                 &codex_model,
                 &codex_effort,
                 self.progress_tx.as_ref(),
@@ -1242,18 +1243,20 @@ impl Runner {
         let max_rounds = self.config.review.max_review_rounds;
         let codex_model = self.config.review.codex_model.clone();
         let codex_effort = self.config.review.codex_reasoning_effort.clone();
+        let spec_path = self.spec_relative_path("design.md");
         let mut acc = PhaseMetricsAccumulator::new();
 
         for round in 0..max_rounds {
             info!(round = round + 1, max = max_rounds, "Review round (hybrid)",);
 
-            let diff = self.get_diff()?;
+            let changed_files = self.get_changed_files()?;
 
-            // 1. Run Codex review
+            // 1. Run Codex review (filesystem-based, no inline diff)
             let codex_issues = match run_codex_review(
                 &self.worktree_path,
-                &diff,
-                &design_spec,
+                &self.state.git.base_branch,
+                &spec_path,
+                &changed_files,
                 &codex_model,
                 &codex_effort,
                 self.progress_tx.as_ref(),
@@ -1277,7 +1280,8 @@ impl Runner {
                 }
             };
 
-            // 2. Run Claude review
+            // 2. Run Claude review (uses inline diff — Claude's 200K context handles it)
+            let diff = self.get_diff()?;
             let review_prompt = self.pm.render(
                 "run/review",
                 minijinja::context!(
@@ -1983,6 +1987,17 @@ impl Runner {
     fn get_diff(&self) -> Result<String, CoreError> {
         self.git
             .diff(&self.worktree_path, &self.state.git.base_branch)
+    }
+
+    /// Gets the list of changed file paths from the base branch.
+    fn get_changed_files(&self) -> Result<Vec<String>, CoreError> {
+        self.git
+            .diff_name_only(&self.worktree_path, &self.state.git.base_branch)
+    }
+
+    /// Returns the worktree-relative path to a spec file.
+    fn spec_relative_path(&self, filename: &str) -> String {
+        format!(".coda/{}/specs/{filename}", self.state.feature.slug,)
     }
 
     /// Gets the list of commits from the base branch to HEAD.
