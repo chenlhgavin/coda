@@ -16,6 +16,7 @@ use std::collections::HashSet;
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
+use tokio::io::AsyncWriteExt;
 use tracing::{debug, info, warn};
 
 use crate::CoreError;
@@ -82,8 +83,10 @@ pub fn is_codex_available() -> bool {
 /// Runs a Codex CLI review on the given diff.
 ///
 /// Spawns `codex exec --full-auto --sandbox read-only` with a review prompt
-/// containing the diff and design spec. Parses the YAML output from the
-/// Codex response into structured [`ReviewIssue`]s.
+/// piped via stdin to avoid OS argument-length limits (`E2BIG`) on large diffs.
+/// The `-` argument tells `codex exec` to read the prompt from stdin.
+/// Parses the YAML output from the Codex response into structured
+/// [`ReviewIssue`]s.
 ///
 /// The `reasoning_effort` parameter controls the model's reasoning depth
 /// and is passed via `-c model_reasoning_effort=<value>`. Valid values:
@@ -93,6 +96,7 @@ pub fn is_codex_available() -> bool {
 ///
 /// Returns `CoreError::AgentError` if:
 /// - The `codex` process cannot be spawned
+/// - The prompt cannot be written to stdin
 /// - The process exits with a non-zero status
 /// - The output cannot be parsed
 pub async fn run_codex_review(
@@ -113,7 +117,10 @@ pub async fn run_codex_review(
 
     let effort_config = format!("model_reasoning_effort=\"{reasoning_effort}\"");
 
-    let output = tokio::process::Command::new("codex")
+    // Pass the prompt via stdin instead of as a CLI argument to avoid
+    // E2BIG (os error 7) when the diff + design spec exceeds the OS
+    // argument-list limit for execve().
+    let mut child = tokio::process::Command::new("codex")
         .args([
             "exec",
             "--full-auto",
@@ -125,13 +132,26 @@ pub async fn run_codex_review(
             &effort_config,
             "-C",
             &worktree.to_string_lossy(),
-            &prompt,
+            "-",
         ])
+        .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
-        .output()
-        .await
+        .spawn()
         .map_err(|e| CoreError::AgentError(format!("Failed to spawn codex: {e}")))?;
+
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin
+            .write_all(prompt.as_bytes())
+            .await
+            .map_err(|e| CoreError::AgentError(format!("Failed to write prompt to codex: {e}")))?;
+        // Drop stdin to signal EOF so codex starts processing.
+    }
+
+    let output = child
+        .wait_with_output()
+        .await
+        .map_err(|e| CoreError::AgentError(format!("Failed to wait for codex: {e}")))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);

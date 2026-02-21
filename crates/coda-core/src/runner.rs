@@ -1533,16 +1533,9 @@ impl Runner {
             }
             acc.record(&resp, m);
 
-            // Validate that both doc files exist and are non-empty
-            let coda_md = self.worktree_path.join(".coda.md");
-            let readme = self.worktree_path.join("README.md");
+            let missing = validate_doc_files(&self.worktree_path);
 
-            let coda_ok =
-                coda_md.is_file() && fs::metadata(&coda_md).is_ok_and(|m| m.len() > 0);
-            let readme_ok =
-                readme.is_file() && fs::metadata(&readme).is_ok_and(|m| m.len() > 0);
-
-            if coda_ok && readme_ok {
+            if missing.is_empty() {
                 info!("Documentation files validated successfully");
                 docs_valid = true;
                 break;
@@ -1553,26 +1546,12 @@ impl Runner {
                 break;
             }
 
-            let mut missing = Vec::new();
-            if !coda_ok {
-                missing.push(".coda.md");
-            }
-            if !readme_ok {
-                missing.push("README.md");
-            }
-
             info!(
                 missing = ?missing,
                 "Documentation validation failed, asking agent to fix"
             );
 
-            let fix_prompt = format!(
-                "Documentation update validation failed. The following files are missing or empty:\n\n\
-                 {}\n\n\
-                 Please create or fix these files and ensure they contain valid, non-empty Markdown content.\n\
-                 Refer to the instructions from the previous prompt.",
-                missing.join(", "),
-            );
+            let fix_prompt = build_doc_fix_prompt(&missing);
 
             let fix_resp = self.send_and_collect(&fix_prompt, None).await?;
             let fm = self.metrics.record(&fix_resp.result);
@@ -2228,6 +2207,40 @@ fn find_feature_dir(project_root: &Path, feature_slug: &str) -> Result<PathBuf, 
     Err(CoreError::StateError(format!(
         "No feature directory found for slug '{feature_slug}'. {hint}\nRun `coda plan {feature_slug}` first.",
     )))
+}
+
+/// Validates that required documentation files exist and are non-empty.
+///
+/// Returns a list of file names that are missing or empty.
+/// An empty list means all required documentation files are valid.
+fn validate_doc_files(worktree: &Path) -> Vec<&'static str> {
+    let coda_md = worktree.join(".coda.md");
+    let readme = worktree.join("README.md");
+
+    let coda_ok = coda_md.is_file() && fs::metadata(&coda_md).is_ok_and(|m| m.len() > 0);
+    let readme_ok = readme.is_file() && fs::metadata(&readme).is_ok_and(|m| m.len() > 0);
+
+    let mut missing = Vec::new();
+    if !coda_ok {
+        missing.push(".coda.md");
+    }
+    if !readme_ok {
+        missing.push("README.md");
+    }
+    missing
+}
+
+/// Builds a fix prompt for the agent when documentation validation fails.
+///
+/// Lists the missing or empty files and asks the agent to create or fix them.
+fn build_doc_fix_prompt(missing: &[&str]) -> String {
+    format!(
+        "Documentation update validation failed. The following files are missing or empty:\n\n\
+         {}\n\n\
+         Please create or fix these files and ensure they contain valid, non-empty Markdown content.\n\
+         Refer to the instructions from the previous prompt.",
+        missing.join(", "),
+    )
 }
 
 #[cfg(test)]
