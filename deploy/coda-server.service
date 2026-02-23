@@ -20,12 +20,15 @@ StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=coda-server
 
+# Environment (GH_TOKEN for GitHub CLI authentication)
+EnvironmentFile=/home/chenlh/.coda-server/env
+
 # Security hardening
 NoNewPrivileges=true
 ProtectSystem=strict
-ProtectHome=read-only
+ProtectHome=no
 PrivateTmp=true
-ReadWritePaths=/home/chenlh/workspace/coda /home/chenlh/.coda-server
+ReadWritePaths=/home/chenlh/workspace /home/chenlh/.coda-server
 
 [Install]
 WantedBy=multi-user.target

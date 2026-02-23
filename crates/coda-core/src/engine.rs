@@ -10,11 +10,11 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use claude_agent_sdk_rs::Message;
+use claude_agent_sdk_rs::{Message, ResultMessage};
 use coda_pm::PromptManager;
 use futures::StreamExt;
 use serde::Serialize;
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
 use tokio::sync::mpsc::UnboundedSender;
 
@@ -354,6 +354,23 @@ impl Engine {
             return Err(e);
         }
 
+        // 4b. Verify the agent created critical artifacts
+        if !self.project_root.join(".coda").exists() {
+            let msg = "Setup phase completed but .coda/ directory was not created. \
+                       The AI agent may have failed to execute the setup steps."
+                .to_string();
+            emit(
+                &progress_tx,
+                InitEvent::PhaseFailed {
+                    name: INIT_PHASE_SETUP.to_string(),
+                    index: 1,
+                    error: msg.clone(),
+                },
+            );
+            emit(&progress_tx, InitEvent::InitFinished { success: false });
+            return Err(CoreError::AgentError(msg));
+        }
+
         // 5. Auto-commit init artifacts unless --no-commit
         if !no_commit {
             self.commit_init_artifacts(force)?;
@@ -383,6 +400,79 @@ impl Engine {
             "chore: initialize CODA project"
         };
         commit_coda_artifacts(self.git.as_ref(), &self.project_root, paths, message)
+    }
+
+    /// Validates the agent `ResultMessage` for errors and budget exhaustion.
+    ///
+    /// Always emits a `debug!` log with the full `ResultMessage` fields for
+    /// post-mortem diagnostics. When `is_error` is set, emits an `error!`
+    /// log and returns `CoreError::AgentError` containing the `result` JSON
+    /// (truncated to 500 chars) so the detail surfaces in journal and Slack.
+    ///
+    /// # Errors
+    ///
+    /// Returns `CoreError::AgentError` when `is_error` is true, or
+    /// `CoreError::BudgetExhausted` when cost reaches the configured limit.
+    fn validate_agent_result(
+        &self,
+        result_msg: &ResultMessage,
+        phase_name: &str,
+    ) -> Result<(), CoreError> {
+        let result_detail = result_msg
+            .result
+            .as_ref()
+            .map(|v| v.to_string())
+            .unwrap_or_default();
+
+        debug!(
+            phase = phase_name,
+            subtype = %result_msg.subtype,
+            is_error = result_msg.is_error,
+            num_turns = result_msg.num_turns,
+            session_id = %result_msg.session_id,
+            duration_ms = result_msg.duration_ms,
+            cost = ?result_msg.total_cost_usd,
+            result = %result_detail,
+            "Agent phase result",
+        );
+
+        if result_msg.is_error {
+            error!(
+                phase = phase_name,
+                subtype = %result_msg.subtype,
+                num_turns = result_msg.num_turns,
+                session_id = %result_msg.session_id,
+                duration_ms = result_msg.duration_ms,
+                cost = ?result_msg.total_cost_usd,
+                result = %result_detail,
+                "Agent reported error",
+            );
+            let detail_preview = if result_detail.len() > 500 {
+                format!("{}…", &result_detail[..500])
+            } else {
+                result_detail
+            };
+            return Err(CoreError::AgentError(format!(
+                "{phase_name}: agent error \
+                 (subtype={}, turns={}, cost={:?}, session={}, detail={detail_preview})",
+                result_msg.subtype,
+                result_msg.num_turns,
+                result_msg.total_cost_usd,
+                result_msg.session_id,
+            )));
+        }
+
+        let budget_limit = self.config.agent.max_budget_usd;
+        if let Some(spent) = result_msg.total_cost_usd
+            && spent >= budget_limit
+        {
+            return Err(CoreError::BudgetExhausted {
+                spent,
+                limit: budget_limit,
+            });
+        }
+
+        Ok(())
     }
 
     /// Runs the analyze-repo phase: streams the AI analysis and collects text.
@@ -450,6 +540,15 @@ impl Engine {
                     if let Some(c) = result_msg.total_cost_usd {
                         cost_usd = c;
                     }
+                    if result_msg.is_error {
+                        let text_len: usize = text_parts.iter().map(String::len).sum();
+                        warn!(
+                            phase = INIT_PHASE_ANALYZE,
+                            agent_text_len = text_len,
+                            "Agent errored; collected text may contain diagnostics",
+                        );
+                    }
+                    self.validate_agent_result(result_msg, INIT_PHASE_ANALYZE)?;
                 }
                 _ => {}
             }
@@ -518,6 +617,7 @@ impl Engine {
             .await
             .map_err(|e| CoreError::AgentError(e.to_string()))?;
 
+        let mut text_parts: Vec<String> = Vec::new();
         let mut cost_usd = 0.0;
 
         while let Some(result) = stream.next().await {
@@ -532,6 +632,7 @@ impl Engine {
                                     text: text_block.text.clone(),
                                 },
                             );
+                            text_parts.push(text_block.text.clone());
                         }
                     }
                 }
@@ -539,6 +640,15 @@ impl Engine {
                     if let Some(c) = result_msg.total_cost_usd {
                         cost_usd = c;
                     }
+                    if result_msg.is_error {
+                        let text_len: usize = text_parts.iter().map(String::len).sum();
+                        warn!(
+                            phase = INIT_PHASE_SETUP,
+                            agent_text_len = text_len,
+                            "Agent errored; collected text may contain diagnostics",
+                        );
+                    }
+                    self.validate_agent_result(result_msg, INIT_PHASE_SETUP)?;
                 }
                 _ => {}
             }
@@ -1026,7 +1136,16 @@ pub fn commit_coda_artifacts(
     paths: &[&str],
     message: &str,
 ) -> Result<(), CoreError> {
-    git.add(cwd, paths)?;
+    // Filter to paths that actually exist on disk to avoid git add errors
+    let existing: Vec<&str> = paths
+        .iter()
+        .copied()
+        .filter(|p| cwd.join(p).exists())
+        .collect();
+    if existing.is_empty() {
+        return Ok(());
+    }
+    git.add(cwd, &existing)?;
     if !git.has_staged_changes(cwd) {
         return Ok(());
     }
