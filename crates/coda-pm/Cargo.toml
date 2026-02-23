@@ -1,0 +1,19 @@
+[package]
+name = "coda-pm"
+description = "Prompt template manager for CODA — loads, renders, and manages Jinja2 prompt templates"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "../../README.md"
+include = ["src/**/*.rs", "templates/**/*.j2", "Cargo.toml"]
+
+[dependencies]
+minijinja = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"

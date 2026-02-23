@@ -1,0 +1,71 @@
+You are implementing a new feature in an existing codebase. This is **development phase {{ phase_number }}/{{ total_dev_phases }}: {{ phase_name }}**.
+
+## Design Specification
+
+{{ design_spec }}
+
+{% if resume_context %}
+## Resume Context
+
+{{ resume_context }}
+{% endif %}
+
+## Current Phase
+
+You are working on **Phase {{ phase_number }}: {{ phase_name }}** of the development plan. Locate the corresponding phase in the "Development Phases" section of the design spec above and implement it completely.
+
+{% if is_first %}
+## First Phase — Setup & Scaffolding
+
+Since this is the **first** development phase, you may also need to:
+
+1. **Create new directories** listed in the "Directory Structure" section
+2. **Create scaffold files** with module declarations, struct/enum definitions, and `use` imports
+3. **Update existing files** to register new modules (e.g., `mod` statements, `Cargo.toml` dependencies)
+
+The `.coda/{{ feature_slug }}/` directory contains the design spec, verification plan, and execution state for this feature. It must be tracked in git.
+{% endif %}
+
+## Task
+
+Implement all code changes described in this phase:
+
+1. Follow the interface design from the spec exactly
+2. Handle all error cases properly — no `unwrap()` or `expect()` in production code
+3. Add appropriate logging with `tracing` macros
+4. Write unit tests for new public functions in `#[cfg(test)] mod tests`
+5. Use descriptive test names: `test_should_<expected_behavior>_when_<condition>`
+6. Add doc comments (`///`) for all public items with at least one example
+
+## After Implementation
+
+Run the following checks and fix any issues:
+{% for check in checks %}
+- `{{ check }}`
+{% endfor %}
+
+If any check fails:
+1. Read the error output carefully
+2. Fix the issue
+3. Re-run the checks
+4. Repeat until all checks pass
+
+## Commit
+
+Once all checks pass, commit with an appropriate conventional commit message:
+
+```bash
+{% if is_first %}
+git add -A
+{% endif %}
+git commit -am "feat({{ feature_slug }}): {{ phase_name }}"
+```
+
+## Guidelines
+
+- Implement ONLY what is described in this phase — do not jump ahead
+- Each function should be focused and under 150 lines
+- Use the project's existing patterns and conventions
+- Prefer borrowing over cloning, iterators over explicit loops
+- Add inline comments only for non-obvious logic
+- Import order: std → external deps → local modules

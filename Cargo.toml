@@ -1,0 +1,66 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/coda-core",
+    "crates/coda-pm",
+    "apps/coda-cli",
+    "apps/coda-server",
+]
+
+[workspace.package]
+version = "0.1.0"
+authors = ["chenlh <lehuagavin@gmail.com>"]
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/lehuagavin/coda"
+homepage = "https://github.com/lehuagavin/coda"
+readme = "README.md"
+categories = ["development-tools"]
+keywords = ["claude", "ai", "agent", "development", "cli"]
+
+[workspace.dependencies]
+# Internal crates (path for local dev, version for crates.io publish)
+coda-core = { path = "crates/coda-core", version = "0.1.0" }
+coda-pm = { path = "crates/coda-pm", version = "0.1.0" }
+
+# Async runtime
+tokio = { version = "1.43", features = ["rt", "rt-multi-thread", "macros", "sync", "time", "fs", "process"] }
+
+# Claude Agent SDK
+claude-agent-sdk-rs = "0.6"
+
+# CLI
+clap = { version = "4.5", features = ["derive"] }
+ratatui = "0.30"
+crossterm = "0.29"
+unicode-width = "0.2"
+
+# Template engine
+minijinja = { version = "2.6", features = ["loader"] }
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+serde_yaml = "0.9"
+chrono = { version = "0.4", features = ["serde"] }
+
+# Regex
+regex = "1.11"
+
+# Async utilities
+futures = "0.3"
+
+# Error handling
+anyhow = "1.0"
+thiserror = "2.0"
+
+# Tracing
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# HTTP / WebSocket (used by coda-server)
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+tokio-tungstenite = { version = "0.24", default-features = false, features = ["connect", "rustls-tls-webpki-roots"] }
+
+# Concurrent data structures
+dashmap = "6.1"

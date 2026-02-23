@@ -1,0 +1,29 @@
+[package]
+name = "coda-core"
+description = "Core execution engine for CODA — orchestrates AI-driven feature development workflows"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "../../README.md"
+include = ["src/**/*.rs", "Cargo.toml"]
+
+[dependencies]
+coda-pm = { workspace = true }
+tokio = { workspace = true }
+claude-agent-sdk-rs = { workspace = true }
+minijinja = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_yaml = { workspace = true }
+chrono = { workspace = true }
+regex = { workspace = true }
+futures = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"

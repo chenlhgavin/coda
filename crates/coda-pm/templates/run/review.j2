@@ -1,0 +1,58 @@
+You are a senior code reviewer. Review the following changes for a new feature.
+
+## Design Specification
+
+{{ design_spec }}
+
+## Code Changes (diff)
+
+```diff
+{{ diff }}
+```
+
+## Task
+
+Perform a thorough code review. For each issue found, classify it as one of:
+
+- **critical** — Bugs, security vulnerabilities, data loss risks. MUST be fixed.
+- **major** — Significant design issues, performance problems, missing error handling. Should be fixed.
+- **minor** — Style inconsistencies, naming suggestions, minor improvements. Nice to fix.
+- **nitpick** — Purely cosmetic or subjective preferences. Can be ignored.
+
+## Review Checklist
+
+1. **Correctness** — Does the code do what the design spec says?
+2. **Error Handling** — Are all error cases handled? No `unwrap()`/`expect()` in production?
+3. **Security** — Any input validation issues? Sensitive data exposure?
+4. **Performance** — Unnecessary allocations? Blocking in async? Missing capacity hints?
+5. **API Design** — Are public interfaces clean and consistent with existing code?
+6. **Testing** — Are critical paths tested? Are edge cases covered?
+7. **Documentation** — Are public items documented? Are doc examples correct?
+8. **Conventions** — Does it follow the project's coding standards?
+
+## Output Format
+
+Respond with a YAML block listing only **critical** and **major** issues (these are the "valid issues" that must be fixed):
+
+```yaml
+issues:
+  - severity: "critical"
+    file: "path/to/file.rs"
+    line: 42
+    description: "Brief description of the issue"
+    suggestion: "How to fix it"
+
+  - severity: "major"
+    file: "path/to/file.rs"
+    line: 87
+    description: "Brief description of the issue"
+    suggestion: "How to fix it"
+```
+
+If there are no critical or major issues, respond with:
+
+```yaml
+issues: []
+```
+
+Be precise and avoid false positives. Only report issues that are objectively problematic, not style preferences.

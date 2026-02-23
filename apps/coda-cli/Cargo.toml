@@ -1,0 +1,27 @@
+[package]
+name = "coda-cli"
+description = "AI-driven feature development CLI powered by Claude — analyze, plan, implement, review, and ship"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "../../README.md"
+include = ["src/**/*.rs", "Cargo.toml"]
+
+[[bin]]
+name = "coda"
+path = "src/main.rs"
+
+[dependencies]
+coda-core = { workspace = true }
+coda-pm = { workspace = true }
+clap = { workspace = true }
+ratatui = { workspace = true }
+crossterm = { workspace = true }
+unicode-width = { workspace = true }
+tokio = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }

@@ -1,0 +1,34 @@
+[Unit]
+Description=CODA Slack Server - Claude Orchestrated Development Agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=chenlh
+Group=chenlh
+WorkingDirectory=/home/chenlh/workspace/coda
+ExecStart=/home/chenlh/workspace/coda/target/release/coda-server
+Restart=on-failure
+RestartSec=5
+
+# Graceful shutdown timeout (matches JoinSet abort + subprocess cleanup)
+TimeoutStopSec=10
+
+# Logging via journal
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=coda-server
+
+# Environment (GH_TOKEN for GitHub CLI authentication)
+EnvironmentFile=/home/chenlh/.coda-server/env
+
+# Security hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=no
+PrivateTmp=true
+ReadWritePaths=/home/chenlh/workspace /home/chenlh/.coda-server
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,65 @@
+You are a senior software architect performing a deep analysis of a repository structure.
+
+## Task
+
+Analyze the following repository tree and identify:
+1. **Important directories** — directories containing core source code, configuration, and infrastructure
+2. **Tech stack** — programming languages, frameworks, build tools, and key dependencies
+3. **Project type** — library, CLI tool, web service, monorepo, etc.
+4. **Architecture pattern** — if identifiable (e.g., layered, microservices, modular monolith)
+5. **Key interfaces** — core traits, interfaces, or abstract types that define module boundaries and contracts
+6. **Data flows** — primary data processing pipelines, request handling paths, or state transitions
+7. **Error handling pattern** — how errors are defined, propagated, and handled across the codebase
+8. **Concurrency model** — async runtime, threading strategy, synchronization primitives used
+
+## Repository Tree
+
+```
+{{ repo_tree }}
+```
+
+## Sample Files
+
+The following files were sampled to help identify the tech stack:
+
+{% for sample in file_samples %}
+### `{{ sample.path }}`
+```
+{{ sample.content }}
+```
+{% endfor %}
+
+## Output Format
+
+Respond in valid YAML with the following structure:
+
+```yaml
+project_type: "<type>"
+tech_stack:
+  languages:
+    - "<language>"
+  frameworks:
+    - "<framework>"
+  build_tools:
+    - "<tool>"
+  key_dependencies:
+    - "<dependency>"
+important_dirs:
+  - path: "<dir>"
+    purpose: "<description>"
+ignore_dirs:
+  - "<dir>"
+architecture: "<brief description of layering, module relationships, and design philosophy>"
+key_interfaces:
+  - name: "<trait/interface/abstract type name>"
+    module: "<module or file path>"
+    purpose: "<what it abstracts and why>"
+data_flows:
+  - name: "<flow name, e.g., request handling, feature pipeline>"
+    description: "<brief description>"
+    stages:
+      - "<stage1: what happens>"
+      - "<stage2: what happens>"
+error_handling_pattern: "<how errors are defined and propagated, e.g., thiserror enums + anyhow context>"
+concurrency_model: "<async runtime, channel patterns, shared state strategy>"
+```

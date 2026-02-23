@@ -1,0 +1,120 @@
+The user has approved the plan. Please produce the final, formal specification document.
+
+## Task
+
+- **Slug**: {{ feature_slug }}
+
+## Instructions
+
+Based on our conversation, produce a clean Markdown document. Include ONLY the document content — no preamble, no commentary, no code fences wrapping the entire document.
+
+Choose the structure that best fits the task type we discussed. Use the appropriate format below:
+
+### For Feature / Code Changes
+
+# Feature: {{ feature_slug }}
+
+## Overview
+<1-2 paragraph summary of what this feature does and why>
+
+## High-Level Design
+<Architecture decisions, component interactions, data flow>
+<Include an ASCII diagram if helpful>
+
+## Interface Design
+<New or modified public APIs, function signatures, trait definitions>
+<Use code blocks with the appropriate language>
+
+## Directory Structure
+<New files and directories to create or modify>
+
+## Core Data Structures
+<Key structs, enums, and types with field descriptions>
+
+## Development Phases
+
+### Phase 1: <name>
+- **Goal**: <what this phase achieves>
+- **Tasks**:
+  - <specific task 1>
+  - <specific task 2>
+- **Commit message**: "<conventional commit message>"
+
+### Phase 2: <name>
+...
+
+## Dependencies
+<New crate dependencies needed, if any>
+
+## Risk & Trade-offs
+<Known risks, limitations, or trade-offs of this design>
+
+### For Documentation / Content Tasks
+
+# Task: {{ feature_slug }}
+
+## Overview
+<What document(s) will be created or updated and why>
+
+## Target Audience
+<Who will read this and what they need>
+
+## Content Outline
+<Section-by-section outline with key points for each>
+
+## Development Phases
+
+### Phase 1: <name>
+- **Goal**: <what this phase achieves>
+- **Tasks**:
+  - <specific task 1>
+  - <specific task 2>
+- **Commit message**: "<conventional commit message>"
+
+### Phase 2: <name>
+...
+
+## References
+<Source materials, existing docs, or code to reference>
+
+## Risk & Trade-offs
+<Known risks, limitations, or trade-offs>
+
+### For Bug Fixes / Refactoring
+
+# Task: {{ feature_slug }}
+
+## Overview
+<What the problem is and the proposed approach>
+
+## Root Cause Analysis
+<Understanding of why the issue exists>
+
+## Proposed Solution
+<High-level approach to fixing the issue>
+
+## Affected Areas
+<Files, modules, or systems impacted>
+
+## Development Phases
+
+### Phase 1: <name>
+- **Goal**: <what this phase achieves>
+- **Tasks**:
+  - <specific task 1>
+  - <specific task 2>
+- **Commit message**: "<conventional commit message>"
+
+### Phase 2: <name>
+...
+
+## Risk & Trade-offs
+<Known risks, limitations, or trade-offs>
+
+## Guidelines
+
+- Each phase MUST result in code that compiles and passes existing tests
+- Phases should be ordered from foundational to feature-complete
+- Keep phases small — ideally 1-3 files changed per phase
+- Use conventional commit messages (feat:, fix:, refactor:, test:, docs:)
+- Reference existing patterns in the codebase where applicable
