@@ -8,7 +8,7 @@
 use std::sync::Arc;
 
 use serde::Deserialize;
-use tracing::{debug, info, warn};
+use tracing::{debug, info, instrument, warn};
 
 use crate::error::ServerError;
 use crate::handlers;
@@ -97,6 +97,59 @@ pub enum ParsedMessage {
     Envelope(Envelope),
 }
 
+/// Best-effort extraction of a channel identifier from an envelope payload.
+///
+/// Tries known paths for each envelope type:
+/// - `channel_id` (slash commands)
+/// - `event.channel` (events API)
+/// - `channel.id` (interactive)
+fn extract_channel(payload: &Option<serde_json::Value>) -> &str {
+    payload
+        .as_ref()
+        .and_then(|p| {
+            p.get("channel_id")
+                .and_then(|v| v.as_str())
+                .or_else(|| {
+                    p.get("event")
+                        .and_then(|e| e.get("channel"))
+                        .and_then(|v| v.as_str())
+                })
+                .or_else(|| {
+                    p.get("channel")
+                        .and_then(|c| c.get("id"))
+                        .and_then(|v| v.as_str())
+                })
+        })
+        .unwrap_or("")
+}
+
+/// Best-effort extraction of a user identifier from an envelope payload.
+///
+/// Tries known paths for each envelope type:
+/// - `user_name` or `user_id` (slash commands)
+/// - `event.user` (events API)
+/// - `user.id` (interactive)
+fn extract_user(payload: &Option<serde_json::Value>) -> &str {
+    payload
+        .as_ref()
+        .and_then(|p| {
+            p.get("user_name")
+                .and_then(|v| v.as_str())
+                .or_else(|| p.get("user_id").and_then(|v| v.as_str()))
+                .or_else(|| {
+                    p.get("event")
+                        .and_then(|e| e.get("user"))
+                        .and_then(|v| v.as_str())
+                })
+                .or_else(|| {
+                    p.get("user")
+                        .and_then(|u| u.get("id"))
+                        .and_then(|v| v.as_str())
+                })
+        })
+        .unwrap_or("")
+}
+
 /// Parses a raw JSON string from the WebSocket into a [`ParsedMessage`].
 ///
 /// Returns `None` for unknown message types (logged as a warning).
@@ -133,10 +186,15 @@ pub fn parse_message(text: &str) -> Result<Option<ParsedMessage>, ServerError> {
                 _ => unreachable!(),
             };
 
+            let channel = extract_channel(&raw.payload);
+            let user = extract_user(&raw.payload);
+
             debug!(
                 envelope_id,
                 envelope_type = ?envelope_type,
-                "Parsed envelope"
+                channel,
+                user,
+                "Parsed envelope",
             );
 
             Ok(Some(ParsedMessage::Envelope(Envelope {
@@ -159,12 +217,15 @@ pub fn parse_message(text: &str) -> Result<Option<ParsedMessage>, ServerError> {
 ///
 /// This is the main routing function called after acknowledging the envelope.
 /// Each handler runs independently and posts results back to Slack.
-pub async fn dispatch(state: Arc<AppState>, envelope: Envelope) {
-    debug!(
-        envelope_id = envelope.envelope_id,
+#[instrument(
+    skip(state, envelope),
+    fields(
+        envelope_id = %envelope.envelope_id,
         envelope_type = ?envelope.envelope_type,
-        "Dispatching envelope"
-    );
+    )
+)]
+pub async fn dispatch(state: Arc<AppState>, envelope: Envelope) {
+    debug!("Dispatching envelope");
 
     match envelope.envelope_type {
         EnvelopeType::SlashCommands => {
@@ -278,5 +339,69 @@ mod tests {
             }
             _ => panic!("Expected Envelope"),
         }
+    }
+
+    #[test]
+    fn test_should_extract_channel_from_slash_command_payload() {
+        let payload = Some(serde_json::json!({"channel_id": "C12345"}));
+        assert_eq!(extract_channel(&payload), "C12345");
+    }
+
+    #[test]
+    fn test_should_extract_channel_from_events_api_payload() {
+        let payload = Some(serde_json::json!({"event": {"channel": "C67890"}}));
+        assert_eq!(extract_channel(&payload), "C67890");
+    }
+
+    #[test]
+    fn test_should_extract_channel_from_interactive_payload() {
+        let payload = Some(serde_json::json!({"channel": {"id": "CABCDE"}}));
+        assert_eq!(extract_channel(&payload), "CABCDE");
+    }
+
+    #[test]
+    fn test_should_return_empty_channel_when_missing() {
+        let payload = Some(serde_json::json!({"other": "data"}));
+        assert_eq!(extract_channel(&payload), "");
+    }
+
+    #[test]
+    fn test_should_return_empty_channel_when_payload_is_none() {
+        assert_eq!(extract_channel(&None), "");
+    }
+
+    #[test]
+    fn test_should_extract_user_from_slash_command_payload() {
+        let payload = Some(serde_json::json!({"user_name": "alice"}));
+        assert_eq!(extract_user(&payload), "alice");
+    }
+
+    #[test]
+    fn test_should_extract_user_id_from_slash_command_payload() {
+        let payload = Some(serde_json::json!({"user_id": "U12345"}));
+        assert_eq!(extract_user(&payload), "U12345");
+    }
+
+    #[test]
+    fn test_should_extract_user_from_events_api_payload() {
+        let payload = Some(serde_json::json!({"event": {"user": "U67890"}}));
+        assert_eq!(extract_user(&payload), "U67890");
+    }
+
+    #[test]
+    fn test_should_extract_user_from_interactive_payload() {
+        let payload = Some(serde_json::json!({"user": {"id": "UABCDE"}}));
+        assert_eq!(extract_user(&payload), "UABCDE");
+    }
+
+    #[test]
+    fn test_should_return_empty_user_when_missing() {
+        let payload = Some(serde_json::json!({"other": "data"}));
+        assert_eq!(extract_user(&payload), "");
+    }
+
+    #[test]
+    fn test_should_return_empty_user_when_payload_is_none() {
+        assert_eq!(extract_user(&None), "");
     }
 }

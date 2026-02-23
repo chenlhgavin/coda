@@ -7,7 +7,7 @@
 use std::sync::Arc;
 
 use serde::Deserialize;
-use tracing::{info, warn};
+use tracing::{info, instrument, warn};
 
 use crate::commands;
 use crate::error::ServerError;
@@ -190,6 +190,7 @@ pub struct SlashCommandPayload {
 ///
 /// Parses the payload, extracts the command text, and routes to the
 /// appropriate command handler. Errors are posted back to the channel.
+#[instrument(skip(state, payload), fields(channel, user, command_text))]
 pub async fn handle_slash_command(state: Arc<AppState>, payload: serde_json::Value) {
     let cmd_payload: SlashCommandPayload = match serde_json::from_value(payload) {
         Ok(p) => p,
@@ -198,6 +199,12 @@ pub async fn handle_slash_command(state: Arc<AppState>, payload: serde_json::Val
             return;
         }
     };
+
+    // Record parsed fields onto the current span for downstream correlation
+    let span = tracing::Span::current();
+    span.record("channel", cmd_payload.channel_id.as_str());
+    span.record("user", cmd_payload.user_name.as_str());
+    span.record("command_text", cmd_payload.text.as_str());
 
     info!(
         user = cmd_payload.user_name,

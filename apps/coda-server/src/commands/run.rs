@@ -20,7 +20,7 @@ use std::time::{Duration, Instant};
 
 use coda_core::RunEvent;
 use tokio::sync::mpsc;
-use tracing::{info, warn};
+use tracing::{debug, info, instrument, warn};
 
 use crate::error::ServerError;
 use crate::formatter::{self, PhaseDisplayStatus, RunPhaseDisplay};
@@ -46,6 +46,7 @@ use super::streaming::{
 /// Returns `ServerError` if the initial Slack message post fails or
 /// the engine cannot be created. Errors during the background run
 /// are reported by updating the Slack message.
+#[instrument(skip(state, payload), fields(channel = %payload.channel_id, slug = %feature_slug))]
 pub async fn handle_run(
     state: Arc<AppState>,
     payload: &SlashCommandPayload,
@@ -118,7 +119,16 @@ async fn run_feature_task(
         rx,
     ));
 
+    debug!(slug, "Starting engine.run()");
+    let start = Instant::now();
     let result = engine.run(&slug, Some(tx)).await;
+    let duration_ms = start.elapsed().as_millis();
+    debug!(
+        duration_ms,
+        slug,
+        success = result.is_ok(),
+        "engine.run() completed"
+    );
 
     // Wait for event consumer to finish processing remaining events
     let pr_url = match event_handle.await {

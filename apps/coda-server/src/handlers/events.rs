@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use futures::FutureExt;
 use serde::Deserialize;
-use tracing::{debug, warn};
+use tracing::{debug, instrument, warn};
 
 use crate::commands;
 use crate::state::AppState;
@@ -87,6 +87,7 @@ pub struct MessageEvent {
 ///
 /// Parses the event, skips bot messages and non-thread messages,
 /// and routes thread replies to active plan sessions.
+#[instrument(skip(state, payload))]
 pub async fn handle_event(state: Arc<AppState>, payload: serde_json::Value) {
     let events_payload: EventsApiPayload = match serde_json::from_value(payload) {
         Ok(p) => p,
@@ -110,6 +111,7 @@ pub async fn handle_event(state: Arc<AppState>, payload: serde_json::Value) {
 /// thread_ts (not thread replies), and messages in threads without an
 /// active plan session. Eligible messages are forwarded to the plan
 /// thread handler.
+#[instrument(skip(state, msg), fields(channel = %msg.channel, thread_ts = ?msg.thread_ts))]
 async fn handle_message_event(state: Arc<AppState>, msg: MessageEvent) {
     // Skip bot messages to prevent feedback loops
     if msg.bot_id.is_some() {

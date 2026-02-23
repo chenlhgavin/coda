@@ -13,6 +13,7 @@
 use std::path::PathBuf;
 
 use coda_core::Engine;
+use tracing::{debug, instrument};
 
 use crate::error::ServerError;
 use crate::formatter;
@@ -35,6 +36,7 @@ pub mod streaming;
 ///
 /// Returns `ServerError` if the Slack API call fails (when posting the
 /// "no binding" error) or if `Engine::new()` fails.
+#[instrument(skip(state), fields(channel = %channel_id))]
 pub(crate) async fn resolve_engine(
     state: &AppState,
     channel_id: &str,
@@ -48,5 +50,6 @@ pub(crate) async fn resolve_engine(
     };
 
     let engine = Engine::new(repo_path.clone()).await?;
+    debug!(repo_path = %repo_path.display(), "Engine created for channel");
     Ok(Some((repo_path, engine)))
 }

@@ -8,9 +8,10 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Instant;
 
 use serde::Deserialize;
-use tracing::{debug, info, warn};
+use tracing::{debug, info, instrument, warn};
 
 use crate::error::ServerError;
 use crate::formatter::{self, RepoListEntry};
@@ -27,6 +28,7 @@ use crate::state::AppState;
 ///
 /// Returns `ServerError` if the Slack API call fails or the `gh` CLI
 /// returns an error.
+#[instrument(skip(state, payload), fields(channel = %payload.channel_id))]
 pub async fn handle_repos(
     state: Arc<AppState>,
     payload: &SlashCommandPayload,
@@ -43,9 +45,20 @@ pub async fn handle_repos(
 
     info!(channel, "Listing GitHub repos");
 
+    let start = Instant::now();
     let repos = match list_github_repos().await {
-        Ok(repos) => repos,
+        Ok(repos) => {
+            let duration_ms = start.elapsed().as_millis();
+            debug!(
+                duration_ms,
+                count = repos.len(),
+                "list_github_repos() completed"
+            );
+            repos
+        }
         Err(e) => {
+            let duration_ms = start.elapsed().as_millis();
+            debug!(duration_ms, error = %e, "list_github_repos() failed");
             let blocks = formatter::error(&format!("Failed to list repos: {e}"));
             state.slack().post_message(channel, blocks).await?;
             return Ok(());
@@ -86,6 +99,7 @@ pub async fn handle_repos(
 /// # Errors
 ///
 /// Returns `ServerError` if the Slack API call fails.
+#[instrument(skip(state, payload), fields(channel = %payload.channel_id, branch = %branch))]
 pub async fn handle_switch(
     state: Arc<AppState>,
     payload: &SlashCommandPayload,
@@ -113,7 +127,15 @@ pub async fn handle_switch(
 
     info!(channel, branch, repo = %repo_path.display(), "Switching branch");
 
+    let start = Instant::now();
     let result = switch_branch(&repo_path, branch).await;
+    let duration_ms = start.elapsed().as_millis();
+    debug!(
+        duration_ms,
+        branch,
+        success = result.is_ok(),
+        "switch_branch() completed"
+    );
 
     // Release lock
     state.repo_locks().unlock(&repo_path);
@@ -147,6 +169,7 @@ pub async fn handle_switch(
 ///
 /// Acquires a repository lock for the duration of clone/update + bind
 /// to prevent concurrent operations on the same path.
+#[instrument(skip(state, message_ts), fields(channel = %channel_id, repo = %repo_name))]
 pub async fn handle_repo_clone(
     state: &AppState,
     channel_id: &str,
@@ -188,8 +211,16 @@ pub async fn handle_repo_clone(
         return;
     }
 
+    let start = Instant::now();
     let result =
         clone_or_update_locked(state, channel_id, message_ts, repo_name, &clone_path).await;
+    let duration_ms = start.elapsed().as_millis();
+    debug!(
+        duration_ms,
+        repo_name,
+        success = result.is_ok(),
+        "clone_or_update_locked() completed"
+    );
 
     // Always release the lock
     state.repo_locks().unlock(&clone_path);
