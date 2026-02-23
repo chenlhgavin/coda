@@ -1,9 +1,9 @@
 feature:
   slug: slack-repo
   created_at: 2026-02-23T05:45:01.491526162Z
-  updated_at: 2026-02-23T05:52:52.627127873Z
+  updated_at: 2026-02-23T06:08:34.047342762Z
 status: in_progress
-current_phase: 3
+current_phase: 6
 git:
   worktree_path: .trees/slack-repo
   branch: feature/slack-repo
@@ -47,39 +47,51 @@ phases:
   details: {}
 - name: review
   kind: quality
-  status: running
+  status: completed
   started_at: 2026-02-23T05:52:52.627870941Z
-  turns: 0
-  cost_usd: 0.0
+  completed_at: 2026-02-23T06:01:13.119677617Z
+  turns: 16
+  cost_usd: 1.1789142499999998
   cost:
-    input_tokens: 0
-    output_tokens: 0
-  duration_secs: 0
-  details: {}
+    input_tokens: 10
+    output_tokens: 9532
+  duration_secs: 500
+  details:
+    issues_found: 2
+    issues_resolved: 2
+    rounds: 2
 - name: verify
   kind: quality
-  status: pending
-  turns: 0
-  cost_usd: 0.0
+  status: completed
+  started_at: 2026-02-23T06:01:13.120319705Z
+  completed_at: 2026-02-23T06:04:29.987144008Z
+  turns: 22
+  cost_usd: 1.4702187500000021
   cost:
-    input_tokens: 0
+    input_tokens: 6
     output_tokens: 0
-  duration_secs: 0
-  details: {}
+  duration_secs: 196
+  details:
+    attempts: 15
+    checks_passed: 15
+    checks_total: 15
 - name: update-docs
   kind: quality
-  status: pending
-  turns: 0
-  cost_usd: 0.0
+  status: completed
+  started_at: 2026-02-23T06:04:29.987765720Z
+  completed_at: 2026-02-23T06:08:34.047340653Z
+  turns: 13
+  cost_usd: 1.3687509999999996
   cost:
-    input_tokens: 0
-    output_tokens: 0
-  duration_secs: 0
-  details: {}
+    input_tokens: 5000
+    output_tokens: 3269
+  duration_secs: 244
+  details:
+    docs_updated: true
 total:
-  turns: 19
-  cost_usd: 3.0357522500000003
+  turns: 88
+  cost_usd: 5.908393000000002
   cost:
-    input_tokens: 0
-    output_tokens: 0
-  duration_secs: 0
+    input_tokens: 7057
+    output_tokens: 25453
+  duration_secs: 1373
