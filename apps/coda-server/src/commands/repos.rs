@@ -144,6 +144,9 @@ pub async fn handle_switch(
 /// If the target path already contains a `.git` directory, the existing
 /// clone is updated (fetch + checkout default branch + pull). Otherwise
 /// a fresh clone is performed. In both cases the channel is auto-bound.
+///
+/// Acquires a repository lock for the duration of clone/update + bind
+/// to prevent concurrent operations on the same path.
 pub async fn handle_repo_clone(
     state: &AppState,
     channel_id: &str,
@@ -159,37 +162,65 @@ pub async fn handle_repo_clone(
         return;
     };
 
-    let clone_path = build_clone_path(workspace, repo_name);
-    let is_existing = clone_path.join(".git").exists();
-
-    let bind_action = if is_existing {
-        match clone_or_update_existing(channel_id, repo_name, &clone_path).await {
-            Ok(action) => action,
-            Err(msg) => {
-                let blocks = formatter::error(&msg);
-                let _ = state
-                    .slack()
-                    .update_message(channel_id, message_ts, blocks)
-                    .await;
-                return;
-            }
-        }
-    } else {
-        match clone_fresh(channel_id, repo_name, &clone_path).await {
-            Ok(action) => action,
-            Err(msg) => {
-                let blocks = formatter::error(&msg);
-                let _ = state
-                    .slack()
-                    .update_message(channel_id, message_ts, blocks)
-                    .await;
-                return;
-            }
+    let clone_path = match build_clone_path(workspace, repo_name) {
+        Ok(path) => path,
+        Err(e) => {
+            warn!(channel_id, repo_name, error = %e, "Invalid repo name");
+            let blocks = formatter::error(&e);
+            let _ = state
+                .slack()
+                .update_message(channel_id, message_ts, blocks)
+                .await;
+            return;
         }
     };
 
+    // Acquire repo lock to prevent concurrent clone/update on the same path
+    let lock_desc = format!("clone/update {repo_name}");
+    if let Err(holder) = state.repo_locks().try_lock(&clone_path, &lock_desc) {
+        let blocks = formatter::error(&format!(
+            "Repository is busy (`{holder}`). Try again later."
+        ));
+        let _ = state
+            .slack()
+            .update_message(channel_id, message_ts, blocks)
+            .await;
+        return;
+    }
+
+    let result =
+        clone_or_update_locked(state, channel_id, message_ts, repo_name, &clone_path).await;
+
+    // Always release the lock
+    state.repo_locks().unlock(&clone_path);
+
+    if let Err(msg) = result {
+        let blocks = formatter::error(&msg);
+        let _ = state
+            .slack()
+            .update_message(channel_id, message_ts, blocks)
+            .await;
+    }
+}
+
+/// Performs clone-or-update and binding while the repo lock is held.
+async fn clone_or_update_locked(
+    state: &AppState,
+    channel_id: &str,
+    message_ts: &str,
+    repo_name: &str,
+    clone_path: &Path,
+) -> Result<(), String> {
+    let is_existing = clone_path.join(".git").exists();
+
+    let bind_action = if is_existing {
+        clone_or_update_existing(channel_id, repo_name, clone_path).await?
+    } else {
+        clone_fresh(channel_id, repo_name, clone_path).await?
+    };
+
     // Auto-bind the channel
-    match state.bindings().set(channel_id, clone_path.clone()) {
+    match state.bindings().set(channel_id, clone_path.to_path_buf()) {
         Ok(()) => {
             let blocks = vec![serde_json::json!({
                 "type": "section",
@@ -205,14 +236,9 @@ pub async fn handle_repo_clone(
                 .slack()
                 .update_message(channel_id, message_ts, blocks)
                 .await;
+            Ok(())
         }
-        Err(e) => {
-            let blocks = formatter::error(&format!("Binding failed: {e}"));
-            let _ = state
-                .slack()
-                .update_message(channel_id, message_ts, blocks)
-                .await;
-        }
+        Err(e) => Err(format!("Binding failed: {e}")),
     }
 }
 
@@ -323,31 +349,67 @@ async fn list_github_repos() -> Result<Vec<RepoInfo>, String> {
     Ok(repos)
 }
 
-/// Builds a stable, deterministic clone path from a workspace and repo name.
+/// Validates a repository name and builds a stable clone path.
 ///
-/// For `nameWithOwner` format (`owner/repo`), produces `<workspace>/<owner>/<repo>`.
-/// For plain names without a `/`, produces `<workspace>/<name>`.
+/// Accepts either `owner/repo` or plain `repo` names. Rejects names that
+/// contain path traversal segments (`..`), absolute paths, or characters
+/// outside the set `[a-zA-Z0-9._-/]`.
 ///
-/// This path is reused across repeated selections of the same repository,
-/// eliminating directory clutter from timestamped paths.
+/// Returns `<workspace>/<owner>/<repo>` or `<workspace>/<name>`, and
+/// verifies the result is a child of `workspace`.
 ///
-/// # Examples
+/// # Errors
 ///
-/// ```
-/// # use std::path::Path;
-/// // owner/repo format
-/// # // build_clone_path is private, so this is illustrative:
-/// // build_clone_path(Path::new("/ws"), "myorg/my-repo")
-/// //   => PathBuf::from("/ws/myorg/my-repo")
-///
-/// // plain name
-/// // build_clone_path(Path::new("/ws"), "my-repo")
-/// //   => PathBuf::from("/ws/my-repo")
-/// ```
-fn build_clone_path(workspace: &Path, repo_name: &str) -> PathBuf {
-    // For "owner/repo", join both segments to get <workspace>/<owner>/<repo>.
-    // For plain names, join as a single segment.
-    workspace.join(repo_name)
+/// Returns an error string if the repo name is invalid or the resolved
+/// path escapes the workspace.
+fn build_clone_path(workspace: &Path, repo_name: &str) -> Result<PathBuf, String> {
+    if repo_name.is_empty() {
+        return Err("Repository name is empty.".to_string());
+    }
+
+    // Reject absolute paths
+    if repo_name.starts_with('/') || repo_name.starts_with('\\') {
+        return Err(format!(
+            "Invalid repository name `{repo_name}`: absolute paths are not allowed."
+        ));
+    }
+
+    // Reject path traversal segments
+    for segment in repo_name.split('/') {
+        if segment.is_empty() || segment == "." || segment == ".." {
+            return Err(format!(
+                "Invalid repository name `{repo_name}`: path traversal is not allowed."
+            ));
+        }
+    }
+
+    // Allow only safe characters: alphanumeric, hyphen, underscore, dot, slash
+    if !repo_name
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '/'))
+    {
+        return Err(format!(
+            "Invalid repository name `{repo_name}`: contains disallowed characters."
+        ));
+    }
+
+    // Expect at most one slash (owner/repo)
+    if repo_name.matches('/').count() > 1 {
+        return Err(format!(
+            "Invalid repository name `{repo_name}`: expected `owner/repo` or `repo` format."
+        ));
+    }
+
+    let candidate = workspace.join(repo_name);
+
+    // Final containment check: the candidate must start with the workspace prefix
+    if !candidate.starts_with(workspace) {
+        return Err(format!(
+            "Invalid repository name `{repo_name}`: resolved path escapes workspace."
+        ));
+    }
+
+    Ok(candidate)
 }
 
 /// Clones a GitHub repository using the `gh` CLI.
@@ -556,21 +618,105 @@ mod tests {
     fn test_should_build_clone_path_with_owner() {
         let workspace = Path::new("/home/user/workspace");
         let path = build_clone_path(workspace, "org/my-repo");
-        assert_eq!(path, PathBuf::from("/home/user/workspace/org/my-repo"));
+        assert_eq!(
+            path.as_deref(),
+            Ok(Path::new("/home/user/workspace/org/my-repo"))
+        );
     }
 
     #[test]
     fn test_should_build_clone_path_with_nested_owner() {
         let workspace = Path::new("/ws");
         let path = build_clone_path(workspace, "deep-org/sub-repo");
-        assert_eq!(path, PathBuf::from("/ws/deep-org/sub-repo"));
+        assert_eq!(path.as_deref(), Ok(Path::new("/ws/deep-org/sub-repo")));
     }
 
     #[test]
     fn test_should_build_clone_path_plain_name() {
         let workspace = Path::new("/ws");
         let path = build_clone_path(workspace, "my-repo");
-        assert_eq!(path, PathBuf::from("/ws/my-repo"));
+        assert_eq!(path.as_deref(), Ok(Path::new("/ws/my-repo")));
+    }
+
+    #[test]
+    fn test_should_reject_empty_repo_name() {
+        let workspace = Path::new("/ws");
+        let result = build_clone_path(workspace, "");
+        assert!(result.is_err());
+        assert!(
+            result.as_ref().expect_err("should fail").contains("empty"),
+            "got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_should_reject_absolute_path_in_repo_name() {
+        let workspace = Path::new("/ws");
+        let result = build_clone_path(workspace, "/etc/passwd");
+        assert!(result.is_err());
+        assert!(
+            result
+                .as_ref()
+                .expect_err("should fail")
+                .contains("absolute"),
+            "got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_should_reject_path_traversal_in_repo_name() {
+        let workspace = Path::new("/ws");
+        let result = build_clone_path(workspace, "../escape/repo");
+        assert!(result.is_err());
+        assert!(
+            result
+                .as_ref()
+                .expect_err("should fail")
+                .contains("traversal"),
+            "got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_should_reject_dot_dot_segment_in_repo_name() {
+        let workspace = Path::new("/ws");
+        let result = build_clone_path(workspace, "owner/../escape");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_should_reject_disallowed_characters_in_repo_name() {
+        let workspace = Path::new("/ws");
+        let result = build_clone_path(workspace, "owner/repo;rm -rf");
+        assert!(result.is_err());
+        assert!(
+            result
+                .as_ref()
+                .expect_err("should fail")
+                .contains("disallowed"),
+            "got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_should_reject_deeply_nested_repo_name() {
+        let workspace = Path::new("/ws");
+        let result = build_clone_path(workspace, "a/b/c");
+        assert!(result.is_err());
+        assert!(
+            result
+                .as_ref()
+                .expect_err("should fail")
+                .contains("owner/repo"),
+            "got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_should_accept_repo_name_with_dots_and_underscores() {
+        let workspace = Path::new("/ws");
+        let path = build_clone_path(workspace, "owner/my_repo.rs");
+        assert_eq!(path.as_deref(), Ok(Path::new("/ws/owner/my_repo.rs")));
     }
 
     #[test]

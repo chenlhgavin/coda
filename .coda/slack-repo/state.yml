@@ -1,9 +1,9 @@
 feature:
   slug: slack-repo
   created_at: 2026-02-23T05:45:01.491526162Z
-  updated_at: 2026-02-23T05:48:53.060053071Z
+  updated_at: 2026-02-23T05:52:52.627127873Z
 status: in_progress
-current_phase: 1
+current_phase: 3
 git:
   worktree_path: .trees/slack-repo
   branch: feature/slack-repo
@@ -23,28 +23,32 @@ phases:
   details: {}
 - name: clone-or-reuse-with-auto-update
   kind: dev
-  status: running
+  status: completed
   started_at: 2026-02-23T05:48:53.060680893Z
-  turns: 0
-  cost_usd: 0.0
+  completed_at: 2026-02-23T05:52:24.030904602Z
+  turns: 14
+  cost_usd: 0.9103830000000003
   cost:
     input_tokens: 0
-    output_tokens: 0
-  duration_secs: 0
+    output_tokens: 5953
+  duration_secs: 210
   details: {}
 - name: build-verify
   kind: dev
-  status: pending
-  turns: 0
-  cost_usd: 0.0
+  status: completed
+  started_at: 2026-02-23T05:52:24.031558493Z
+  completed_at: 2026-02-23T05:52:52.627125726Z
+  turns: 5
+  cost_usd: 0.2432602500000003
   cost:
     input_tokens: 0
     output_tokens: 0
-  duration_secs: 0
+  duration_secs: 28
   details: {}
 - name: review
   kind: quality
-  status: pending
+  status: running
+  started_at: 2026-02-23T05:52:52.627870941Z
   turns: 0
   cost_usd: 0.0
   cost:
