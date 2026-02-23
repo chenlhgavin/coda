@@ -2,7 +2,7 @@ feature:
   slug: slack-repo
   created_at: 2026-02-23T05:45:01.491526162Z
   updated_at: 2026-02-23T06:08:34.047342762Z
-status: in_progress
+status: completed
 current_phase: 6
 git:
   worktree_path: .trees/slack-repo
@@ -88,6 +88,10 @@ phases:
   duration_secs: 244
   details:
     docs_updated: true
+pr:
+  url: https://github.com/chenlhgavin/coda/pull/3
+  number: 3
+  title: 'feat(slack-repo): feature implementation'
 total:
   turns: 88
   cost_usd: 5.908393000000002
