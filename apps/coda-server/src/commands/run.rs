@@ -599,9 +599,23 @@ async fn consume_run_events(
                         true
                     }
                     RunEvent::ReviewRound { .. } | RunEvent::VerifyAttempt { .. } => true,
-                    RunEvent::CreatingPr => true,
+                    RunEvent::CreatingPr => {
+                        tracker.phases.push(RunPhaseDisplay {
+                            name: "create-pr".to_string(),
+                            status: PhaseDisplayStatus::Running,
+                            duration: None,
+                            turns: None,
+                            cost_usd: None,
+                        });
+                        true
+                    }
                     RunEvent::PrCreated { ref url } => {
                         tracker.pr_url = url.clone();
+                        if let Some(p) = tracker.phases.last_mut()
+                            && p.name == "create-pr"
+                        {
+                            p.status = PhaseDisplayStatus::Completed;
+                        }
                         true
                     }
                     RunEvent::RunFinished { .. } => true,
