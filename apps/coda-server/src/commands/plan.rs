@@ -191,6 +191,12 @@ async fn handle_conversation(
     // Final update: post the complete response, splitting into multiple
     // messages if it exceeds the Slack inline limit.
     match response {
+        Ok(reply) if reply.trim().is_empty() => {
+            let _ = state
+                .slack()
+                .update_message_text(channel, &reply_ts, "_Agent produced no text response._")
+                .await;
+        }
         Ok(reply) => {
             let chunks = split_into_chunks(&reply, SLACK_SECTION_CHAR_LIMIT);
             // First chunk replaces the placeholder message
@@ -250,6 +256,12 @@ async fn consume_streaming_updates(
                 match update {
                     coda_core::PlanStreamUpdate::Text(text) => {
                         latest_text = text;
+
+                        // Skip empty text updates — Slack rejects empty text
+                        // with `no_text`.
+                        if latest_text.is_empty() {
+                            continue;
+                        }
 
                         // Once the text exceeds the inline limit, post a
                         // truncated preview once and stop further text updates.
@@ -316,8 +328,8 @@ async fn consume_streaming_updates(
         }
     }
 
-    // Flush any remaining pending text update (only if within limit)
-    if pending && !exceeded_limit {
+    // Flush any remaining pending text update (only if within limit and non-empty)
+    if pending && !exceeded_limit && !latest_text.is_empty() {
         let _ = slack.update_message_text(&channel, &ts, &latest_text).await;
     }
 }
