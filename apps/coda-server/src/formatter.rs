@@ -445,6 +445,39 @@ pub fn run_progress(feature_slug: &str, phases: &[RunPhaseDisplay]) -> Vec<serde
     blocks
 }
 
+/// Builds a Block Kit failure message for a failed run operation.
+///
+/// Preserves completed phase metrics and appends a truncated error
+/// summary so the user can see both progress and the failure reason.
+pub fn run_failure(
+    feature_slug: &str,
+    phases: &[RunPhaseDisplay],
+    error: &str,
+) -> Vec<serde_json::Value> {
+    let mut blocks = vec![header(&format!("Run: `{feature_slug}` \u{274c}"))];
+
+    if !phases.is_empty() {
+        let mut lines = Vec::with_capacity(phases.len());
+        for phase in phases {
+            let icon = display_status_icon(phase.status);
+            let mut line = format!("{icon} `{}`", phase.name);
+            if let Some(duration) = phase.duration {
+                line.push_str(&format!(
+                    " \u{2014} {}",
+                    format_duration(duration.as_secs())
+                ));
+            }
+            lines.push(line);
+        }
+        blocks.push(section(&lines.join("\n")));
+    }
+
+    let error_preview = truncate_str(error, 300);
+    blocks.push(section(&format!(":warning: {error_preview}")));
+
+    blocks
+}
+
 /// Builds a Block Kit message listing all features in a repository.
 ///
 /// Shows each feature with a status icon, slug, status text, branch,
@@ -710,7 +743,7 @@ pub fn plan_thread_header(feature_slug: &str, phase: &str) -> Vec<serde_json::Va
 ///         cost_usd: Some(0.98),
 ///     },
 /// ];
-/// let blocks = formatter::run_completion_notification("add-auth", true, &phases, None);
+/// let blocks = formatter::run_completion_notification("add-auth", true, &phases, None, None);
 /// assert!(!blocks.is_empty());
 /// ```
 pub fn run_completion_notification(
@@ -718,6 +751,7 @@ pub fn run_completion_notification(
     success: bool,
     phases: &[RunPhaseDisplay],
     pr_url: Option<&str>,
+    error_msg: Option<&str>,
 ) -> Vec<serde_json::Value> {
     if success {
         let total_turns: u32 = phases.iter().filter_map(|p| p.turns).sum();
@@ -745,14 +779,16 @@ pub fn run_completion_notification(
             .map(|p| p.name.as_str())
             .collect();
 
-        let failed_list = if failed.is_empty() {
+        let detail = if let Some(err) = error_msg {
+            truncate_str(err, 200).to_string()
+        } else if failed.is_empty() {
             "unknown".to_string()
         } else {
-            failed.join(", ")
+            format!("failed phase(s): {}", failed.join(", "))
         };
 
         vec![section(&format!(
-            ":x: Run `{slug}` failed \u{2014} failed phase(s): {failed_list}"
+            ":x: Run `{slug}` failed \u{2014} {detail}"
         ))]
     }
 }
@@ -1544,7 +1580,7 @@ mod tests {
                 cost_usd: Some(0.98),
             },
         ];
-        let blocks = run_completion_notification("add-auth", true, &phases, None);
+        let blocks = run_completion_notification("add-auth", true, &phases, None, None);
         assert_eq!(blocks.len(), 1);
         let text = blocks[0]["text"]["text"].as_str().unwrap_or("");
         assert!(text.contains(":white_check_mark:"));
@@ -1568,6 +1604,7 @@ mod tests {
             true,
             &phases,
             Some("https://github.com/org/repo/pull/42"),
+            None,
         );
         let text = blocks[0]["text"]["text"].as_str().unwrap_or("");
         assert!(text.contains(":link:"));
@@ -1592,7 +1629,7 @@ mod tests {
                 cost_usd: Some(0.10),
             },
         ];
-        let blocks = run_completion_notification("add-auth", false, &phases, None);
+        let blocks = run_completion_notification("add-auth", false, &phases, None, None);
         assert_eq!(blocks.len(), 1);
         let text = blocks[0]["text"]["text"].as_str().unwrap_or("");
         assert!(text.contains(":x:"));
@@ -1602,8 +1639,22 @@ mod tests {
 
     #[test]
     fn test_should_build_failure_notification_with_no_failed_phases() {
-        let blocks = run_completion_notification("add-auth", false, &[], None);
+        let blocks = run_completion_notification("add-auth", false, &[], None, None);
         let text = blocks[0]["text"]["text"].as_str().unwrap_or("");
         assert!(text.contains("unknown"));
+    }
+
+    #[test]
+    fn test_should_build_failure_notification_with_error_message() {
+        let blocks = run_completion_notification(
+            "add-auth",
+            false,
+            &[],
+            None,
+            Some("Agent error: connection timeout"),
+        );
+        let text = blocks[0]["text"]["text"].as_str().unwrap_or("");
+        assert!(text.contains(":x:"));
+        assert!(text.contains("connection timeout"));
     }
 }

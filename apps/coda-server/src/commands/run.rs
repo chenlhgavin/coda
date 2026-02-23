@@ -130,17 +130,18 @@ async fn run_feature_task(
     };
 
     // Build final summary and completion notification
-    let (final_blocks, success, phases) = match result {
+    let (final_blocks, success, phases, error_msg) = match result {
         Ok(ref results) => {
             info!(channel, slug, "Run completed successfully");
             let phases = results_to_phases(results);
             let blocks = formatter::run_progress(&slug, &phases);
-            (blocks, true, phases)
+            (blocks, true, phases, None)
         }
         Err(ref e) => {
             warn!(channel, slug, error = %e, "Run failed");
-            let blocks = formatter::error(&format!("Run `{slug}` failed: {e}"));
-            (blocks, false, Vec::new())
+            let err_str = e.to_string();
+            let blocks = formatter::run_failure(&slug, &[], &err_str);
+            (blocks, false, Vec::new(), Some(err_str))
         }
     };
 
@@ -154,8 +155,13 @@ async fn run_feature_task(
     }
 
     // Post a new channel message as completion notification (triggers Slack notification)
-    let notification_blocks =
-        formatter::run_completion_notification(&slug, success, &phases, pr_url.as_deref());
+    let notification_blocks = formatter::run_completion_notification(
+        &slug,
+        success,
+        &phases,
+        pr_url.as_deref(),
+        error_msg.as_deref(),
+    );
     if let Err(e) = state
         .slack()
         .post_message(&channel, notification_blocks)
