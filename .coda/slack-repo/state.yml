@@ -1,0 +1,78 @@
+feature:
+  slug: slack-repo
+  created_at: 2026-02-23T05:45:01.491526162Z
+  updated_at: 2026-02-23T05:45:01.491526162Z
+status: planned
+current_phase: 0
+git:
+  worktree_path: .trees/slack-repo
+  branch: feature/slack-repo
+  base_branch: main
+phases:
+- name: stable-clone-path
+  kind: dev
+  status: pending
+  turns: 0
+  cost_usd: 0.0
+  cost:
+    input_tokens: 0
+    output_tokens: 0
+  duration_secs: 0
+  details: {}
+- name: clone-or-reuse-with-auto-update
+  kind: dev
+  status: pending
+  turns: 0
+  cost_usd: 0.0
+  cost:
+    input_tokens: 0
+    output_tokens: 0
+  duration_secs: 0
+  details: {}
+- name: build-verify
+  kind: dev
+  status: pending
+  turns: 0
+  cost_usd: 0.0
+  cost:
+    input_tokens: 0
+    output_tokens: 0
+  duration_secs: 0
+  details: {}
+- name: review
+  kind: quality
+  status: pending
+  turns: 0
+  cost_usd: 0.0
+  cost:
+    input_tokens: 0
+    output_tokens: 0
+  duration_secs: 0
+  details: {}
+- name: verify
+  kind: quality
+  status: pending
+  turns: 0
+  cost_usd: 0.0
+  cost:
+    input_tokens: 0
+    output_tokens: 0
+  duration_secs: 0
+  details: {}
+- name: update-docs
+  kind: quality
+  status: pending
+  turns: 0
+  cost_usd: 0.0
+  cost:
+    input_tokens: 0
+    output_tokens: 0
+  duration_secs: 0
+  details: {}
+total:
+  turns: 19
+  cost_usd: 3.0357522500000003
+  cost:
+    input_tokens: 0
+    output_tokens: 0
+  duration_secs: 0
