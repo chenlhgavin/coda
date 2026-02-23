@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use serde::Deserialize;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use crate::error::ServerError;
 use crate::formatter::{self, RepoListEntry};
@@ -139,10 +139,11 @@ pub async fn handle_switch(
     Ok(())
 }
 
-/// Handles the repo clone action triggered from the select menu.
+/// Handles the repo clone-or-update action triggered from the select menu.
 ///
-/// Clones the selected repository into the workspace directory and
-/// auto-binds the channel.
+/// If the target path already contains a `.git` directory, the existing
+/// clone is updated (fetch + checkout default branch + pull). Otherwise
+/// a fresh clone is performed. In both cases the channel is auto-bound.
 pub async fn handle_repo_clone(
     state: &AppState,
     channel_id: &str,
@@ -159,50 +160,33 @@ pub async fn handle_repo_clone(
     };
 
     let clone_path = build_clone_path(workspace, repo_name);
+    let is_existing = clone_path.join(".git").exists();
 
-    info!(
-        channel_id,
-        repo_name,
-        clone_path = %clone_path.display(),
-        "Cloning repository"
-    );
-
-    // Ensure parent directory exists
-    if let Some(parent) = clone_path.parent()
-        && let Err(e) = std::fs::create_dir_all(parent)
-    {
-        let blocks = formatter::error(&format!("Failed to create directory: {e}"));
-        let _ = state
-            .slack()
-            .update_message(channel_id, message_ts, blocks)
-            .await;
-        return;
-    }
-
-    match clone_repo(repo_name, &clone_path).await {
-        Ok(()) => {
-            info!(
-                channel_id,
-                repo_name,
-                path = %clone_path.display(),
-                "Repository cloned"
-            );
+    let bind_action = if is_existing {
+        match clone_or_update_existing(channel_id, repo_name, &clone_path).await {
+            Ok(action) => action,
+            Err(msg) => {
+                let blocks = formatter::error(&msg);
+                let _ = state
+                    .slack()
+                    .update_message(channel_id, message_ts, blocks)
+                    .await;
+                return;
+            }
         }
-        Err(e) => {
-            warn!(
-                channel_id,
-                repo_name,
-                error = %e,
-                "Failed to clone repository"
-            );
-            let blocks = formatter::error(&format!("Clone failed: {e}"));
-            let _ = state
-                .slack()
-                .update_message(channel_id, message_ts, blocks)
-                .await;
-            return;
+    } else {
+        match clone_fresh(channel_id, repo_name, &clone_path).await {
+            Ok(action) => action,
+            Err(msg) => {
+                let blocks = formatter::error(&msg);
+                let _ = state
+                    .slack()
+                    .update_message(channel_id, message_ts, blocks)
+                    .await;
+                return;
+            }
         }
-    }
+    };
 
     // Auto-bind the channel
     match state.bindings().set(channel_id, clone_path.clone()) {
@@ -212,7 +196,7 @@ pub async fn handle_repo_clone(
                 "text": {
                     "type": "mrkdwn",
                     "text": format!(
-                        ":white_check_mark: Cloned and bound `{repo_name}` to `{}`",
+                        ":white_check_mark: {bind_action} `{repo_name}` to `{}`",
                         clone_path.display()
                     )
                 }
@@ -228,6 +212,82 @@ pub async fn handle_repo_clone(
                 .slack()
                 .update_message(channel_id, message_ts, blocks)
                 .await;
+        }
+    }
+}
+
+/// Updates an existing clone and returns the bind action label.
+async fn clone_or_update_existing(
+    channel_id: &str,
+    repo_name: &str,
+    clone_path: &Path,
+) -> Result<String, String> {
+    info!(
+        channel_id,
+        repo_name,
+        clone_path = %clone_path.display(),
+        "Updating existing repository clone"
+    );
+
+    match update_repo(clone_path).await {
+        Ok(branch) => {
+            info!(
+                channel_id,
+                repo_name,
+                branch,
+                path = %clone_path.display(),
+                "Repository updated"
+            );
+            Ok(format!("Updated and bound (branch `{branch}`)"))
+        }
+        Err(e) => {
+            warn!(
+                channel_id,
+                repo_name,
+                error = %e,
+                "Failed to update repository"
+            );
+            Err(format!("Update failed: {e}"))
+        }
+    }
+}
+
+/// Clones a fresh repo and returns the bind action label.
+async fn clone_fresh(
+    channel_id: &str,
+    repo_name: &str,
+    clone_path: &Path,
+) -> Result<String, String> {
+    info!(
+        channel_id,
+        repo_name,
+        clone_path = %clone_path.display(),
+        "Cloning repository"
+    );
+
+    // Ensure parent directory exists
+    if let Some(parent) = clone_path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("Failed to create directory: {e}"))?;
+    }
+
+    match clone_repo(repo_name, clone_path).await {
+        Ok(()) => {
+            info!(
+                channel_id,
+                repo_name,
+                path = %clone_path.display(),
+                "Repository cloned"
+            );
+            Ok("Cloned and bound".to_string())
+        }
+        Err(e) => {
+            warn!(
+                channel_id,
+                repo_name,
+                error = %e,
+                "Failed to clone repository"
+            );
+            Err(format!("Clone failed: {e}"))
         }
     }
 }
@@ -309,6 +369,108 @@ async fn clone_repo(repo_name: &str, clone_path: &Path) -> Result<(), String> {
     }
 
     Ok(())
+}
+
+/// Updates an existing repository clone to the latest default branch.
+///
+/// Performs the following sequence:
+/// 1. `git fetch origin`
+/// 2. Detect default branch via `git symbolic-ref refs/remotes/origin/HEAD`
+///    (falls back to `main` if the symbolic ref is not set)
+/// 3. `git checkout --force <branch>` (force handles dirty working trees)
+/// 4. `git pull --ff-only`; falls back to `git pull --rebase` on failure
+///
+/// Returns the default branch name on success.
+async fn update_repo(repo_path: &Path) -> Result<String, String> {
+    let repo_path = repo_path.to_path_buf();
+    tokio::task::spawn_blocking(move || update_repo_sync(&repo_path))
+        .await
+        .map_err(|e| format!("Repository update task panicked: {e}"))?
+}
+
+/// Synchronous repository update operations.
+fn update_repo_sync(repo_path: &Path) -> Result<String, String> {
+    // 1. Fetch latest refs from origin
+    let fetch_output = std::process::Command::new("git")
+        .args(["fetch", "origin"])
+        .current_dir(repo_path)
+        .output()
+        .map_err(|e| format!("Failed to run `git fetch`: {e}"))?;
+
+    if !fetch_output.status.success() {
+        let stderr = String::from_utf8_lossy(&fetch_output.stderr);
+        return Err(format!("`git fetch origin` failed: {stderr}"));
+    }
+
+    // 2. Detect default branch
+    let branch = detect_default_branch(repo_path);
+    debug!(branch, path = %repo_path.display(), "Detected default branch");
+
+    // 3. Force checkout the default branch (handles dirty working trees)
+    let checkout_output = std::process::Command::new("git")
+        .args(["checkout", "--force", &branch])
+        .current_dir(repo_path)
+        .output()
+        .map_err(|e| format!("Failed to run `git checkout`: {e}"))?;
+
+    if !checkout_output.status.success() {
+        let stderr = String::from_utf8_lossy(&checkout_output.stderr);
+        return Err(format!("`git checkout --force {branch}` failed: {stderr}"));
+    }
+
+    // 4. Pull latest: try ff-only first, fall back to rebase
+    let pull_ff = std::process::Command::new("git")
+        .args(["pull", "--ff-only"])
+        .current_dir(repo_path)
+        .output()
+        .map_err(|e| format!("Failed to run `git pull --ff-only`: {e}"))?;
+
+    if !pull_ff.status.success() {
+        debug!(
+            path = %repo_path.display(),
+            "Fast-forward pull failed, falling back to rebase"
+        );
+        let pull_rebase = std::process::Command::new("git")
+            .args(["pull", "--rebase"])
+            .current_dir(repo_path)
+            .output()
+            .map_err(|e| format!("Failed to run `git pull --rebase`: {e}"))?;
+
+        if !pull_rebase.status.success() {
+            let stderr = String::from_utf8_lossy(&pull_rebase.stderr);
+            return Err(format!("`git pull --rebase` failed: {stderr}"));
+        }
+    }
+
+    Ok(branch)
+}
+
+/// Detects the default branch by reading `refs/remotes/origin/HEAD`.
+///
+/// Returns the branch name (e.g. `main`) with the `origin/` prefix stripped.
+/// Falls back to `"main"` when the symbolic ref is not set.
+fn detect_default_branch(repo_path: &Path) -> String {
+    let output = std::process::Command::new("git")
+        .args(["symbolic-ref", "refs/remotes/origin/HEAD", "--short"])
+        .current_dir(repo_path)
+        .output();
+
+    let Ok(output) = output else {
+        return "main".to_string();
+    };
+
+    if !output.status.success() {
+        return "main".to_string();
+    }
+
+    let full_ref = String::from_utf8_lossy(&output.stdout);
+    let trimmed = full_ref.trim();
+
+    // Strip "origin/" prefix: "origin/main" → "main"
+    trimmed
+        .strip_prefix("origin/")
+        .unwrap_or(trimmed)
+        .to_string()
 }
 
 /// Switches a repository to a different branch.
@@ -422,5 +584,85 @@ mod tests {
         assert_eq!(repos[0].name_with_owner, "org/repo");
         assert_eq!(repos[0].description.as_deref(), Some("A repo"));
         assert!(repos[1].description.is_none());
+    }
+
+    #[test]
+    fn test_should_fallback_to_main_when_origin_head_not_set() {
+        let dir = tempfile::tempdir().expect("create temp dir");
+        // Initialize a bare git repo — no origin/HEAD exists
+        let init = std::process::Command::new("git")
+            .args(["init"])
+            .current_dir(dir.path())
+            .output()
+            .expect("git init");
+        assert!(init.status.success());
+
+        let branch = detect_default_branch(dir.path());
+        assert_eq!(branch, "main");
+    }
+
+    #[test]
+    fn test_should_return_fetch_error_when_no_remote_configured() {
+        let dir = tempfile::tempdir().expect("create temp dir");
+        let init = std::process::Command::new("git")
+            .args(["init"])
+            .current_dir(dir.path())
+            .output()
+            .expect("git init");
+        assert!(init.status.success());
+
+        let result = update_repo_sync(dir.path());
+        assert!(result.is_err());
+        let err = result.expect_err("should fail");
+        assert!(
+            err.contains("git fetch origin"),
+            "expected fetch error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_should_detect_default_branch_from_origin_head() {
+        let bare_dir = tempfile::tempdir().expect("create bare dir");
+        let clone_dir = tempfile::tempdir().expect("create clone dir");
+
+        // Create a bare repo with an initial commit
+        let init = std::process::Command::new("git")
+            .args(["init", "--bare"])
+            .current_dir(bare_dir.path())
+            .output()
+            .expect("git init --bare");
+        assert!(init.status.success());
+
+        // Clone bare repo (creates origin/HEAD pointing to default branch)
+        let clone_path = clone_dir.path().join("repo");
+        let clone = std::process::Command::new("git")
+            .args([
+                "clone",
+                &bare_dir.path().display().to_string(),
+                &clone_path.display().to_string(),
+            ])
+            .output()
+            .expect("git clone");
+        assert!(
+            clone.status.success(),
+            "clone failed: {}",
+            String::from_utf8_lossy(&clone.stderr)
+        );
+
+        let branch = detect_default_branch(&clone_path);
+        // The default branch for a bare init is typically "main" or "master"
+        // depending on git config; either is acceptable here.
+        assert!(
+            branch == "main" || branch == "master",
+            "expected main or master, got: {branch}"
+        );
+    }
+
+    #[test]
+    fn test_should_fallback_to_main_when_path_is_not_a_repo() {
+        let dir = tempfile::tempdir().expect("create temp dir");
+        // Not a git repo at all
+        let branch = detect_default_branch(dir.path());
+        assert_eq!(branch, "main");
     }
 }
