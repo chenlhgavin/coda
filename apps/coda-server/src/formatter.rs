@@ -445,6 +445,39 @@ pub fn run_progress(feature_slug: &str, phases: &[RunPhaseDisplay]) -> Vec<serde
     blocks
 }
 
+/// Builds a Block Kit failure message for a failed run operation.
+///
+/// Preserves completed phase metrics and appends a truncated error
+/// summary so the user can see both progress and the failure reason.
+pub fn run_failure(
+    feature_slug: &str,
+    phases: &[RunPhaseDisplay],
+    error: &str,
+) -> Vec<serde_json::Value> {
+    let mut blocks = vec![header(&format!("Run: `{feature_slug}` \u{274c}"))];
+
+    if !phases.is_empty() {
+        let mut lines = Vec::with_capacity(phases.len());
+        for phase in phases {
+            let icon = display_status_icon(phase.status);
+            let mut line = format!("{icon} `{}`", phase.name);
+            if let Some(duration) = phase.duration {
+                line.push_str(&format!(
+                    " \u{2014} {}",
+                    format_duration(duration.as_secs())
+                ));
+            }
+            lines.push(line);
+        }
+        blocks.push(section(&lines.join("\n")));
+    }
+
+    let error_preview = truncate_str(error, 300);
+    blocks.push(section(&format!(":warning: {error_preview}")));
+
+    blocks
+}
+
 /// Builds a Block Kit message listing all features in a repository.
 ///
 /// Shows each feature with a status icon, slug, status text, branch,
@@ -710,7 +743,7 @@ pub fn plan_thread_header(feature_slug: &str, phase: &str) -> Vec<serde_json::Va
 ///         cost_usd: Some(0.98),
 ///     },
 /// ];
-/// let blocks = formatter::run_completion_notification("add-auth", true, &phases, None);
+/// let blocks = formatter::run_completion_notification("add-auth", true, &phases, None, None);
 /// assert!(!blocks.is_empty());
 /// ```
 pub fn run_completion_notification(
@@ -718,6 +751,7 @@ pub fn run_completion_notification(
     success: bool,
     phases: &[RunPhaseDisplay],
     pr_url: Option<&str>,
+    error_msg: Option<&str>,
 ) -> Vec<serde_json::Value> {
     if success {
         let total_turns: u32 = phases.iter().filter_map(|p| p.turns).sum();
@@ -745,16 +779,162 @@ pub fn run_completion_notification(
             .map(|p| p.name.as_str())
             .collect();
 
-        let failed_list = if failed.is_empty() {
+        let detail = if let Some(err) = error_msg {
+            truncate_str(err, 200).to_string()
+        } else if failed.is_empty() {
             "unknown".to_string()
         } else {
-            failed.join(", ")
+            format!("failed phase(s): {}", failed.join(", "))
         };
 
         vec![section(&format!(
-            ":x: Run `{slug}` failed \u{2014} failed phase(s): {failed_list}"
+            ":x: Run `{slug}` failed \u{2014} {detail}"
         ))]
     }
+}
+
+/// Display state for a single repo sync step in the progress message.
+///
+/// # Examples
+///
+/// ```
+/// use std::time::Duration;
+/// use coda_server::formatter::{RepoStepDisplay, PhaseDisplayStatus};
+///
+/// let step = RepoStepDisplay {
+///     label: "Cloning".to_string(),
+///     status: PhaseDisplayStatus::Completed,
+///     duration: Some(Duration::from_secs(12)),
+///     started_at: None,
+///     detail: None,
+/// };
+/// assert_eq!(step.label, "Cloning");
+/// ```
+#[derive(Debug, Clone)]
+pub struct RepoStepDisplay {
+    /// Step label (e.g., `"Fetching"`, `"Cloning"`).
+    pub label: String,
+    /// Current display status.
+    pub status: PhaseDisplayStatus,
+    /// Duration if completed or failed.
+    pub duration: Option<Duration>,
+    /// When the step started executing (for live elapsed display).
+    pub started_at: Option<Instant>,
+    /// Optional detail line (e.g., `"Receiving objects: 45% (556/1234)"`).
+    pub detail: Option<String>,
+}
+
+/// Builds a Block Kit progress message for a repo sync (clone or update).
+///
+/// Shows a header and a list of steps with status icons, durations, and
+/// optional detail text. Updated in-place via `chat.update` as steps progress.
+///
+/// # Examples
+///
+/// ```
+/// use std::time::Duration;
+/// use coda_server::formatter::{self, RepoStepDisplay, PhaseDisplayStatus};
+///
+/// let steps = vec![
+///     RepoStepDisplay {
+///         label: "Cloning".to_string(),
+///         status: PhaseDisplayStatus::Running,
+///         duration: None,
+///         started_at: None,
+///         detail: Some("Receiving objects: 45%".to_string()),
+///     },
+/// ];
+/// let blocks = formatter::repo_sync_progress("org/repo", &steps);
+/// assert!(!blocks.is_empty());
+/// ```
+pub fn repo_sync_progress(repo_name: &str, steps: &[RepoStepDisplay]) -> Vec<serde_json::Value> {
+    let mut blocks = vec![header(&format!("Syncing `{repo_name}`"))];
+    blocks.push(section(&format_repo_step_lines(steps)));
+    blocks
+}
+
+/// Builds a Block Kit success message for a completed repo sync.
+///
+/// Shows a checkmark header with all step metrics and the bind label.
+pub fn repo_sync_success(
+    repo_name: &str,
+    steps: &[RepoStepDisplay],
+    bind_label: &str,
+) -> Vec<serde_json::Value> {
+    let mut blocks = vec![header(&format!("Syncing `{repo_name}` \u{2705}"))];
+    blocks.push(section(&format_repo_step_lines(steps)));
+
+    let total_duration: Duration = steps.iter().filter_map(|s| s.duration).sum();
+    blocks.push(context(&format!(
+        "{bind_label} \u{00b7} completed in {}",
+        format_duration(total_duration.as_secs()),
+    )));
+
+    blocks
+}
+
+/// Builds a Block Kit failure message for a failed repo sync.
+///
+/// Preserves completed step metrics and appends a truncated error
+/// summary so the user can see both progress and the failure reason.
+pub fn repo_sync_failure(
+    repo_name: &str,
+    steps: &[RepoStepDisplay],
+    error: &str,
+) -> Vec<serde_json::Value> {
+    let mut blocks = vec![header(&format!("Syncing `{repo_name}` \u{274c}"))];
+    blocks.push(section(&format_repo_step_lines(steps)));
+
+    let error_preview = truncate_str(error, 300);
+    blocks.push(section(&format!(":warning: {error_preview}")));
+
+    blocks
+}
+
+/// Formats repo sync step lines for reuse across progress/success/failure.
+fn format_repo_step_lines(steps: &[RepoStepDisplay]) -> String {
+    if steps.is_empty() {
+        return "Starting\u{2026}".to_string();
+    }
+
+    let mut lines = Vec::with_capacity(steps.len());
+    for step in steps {
+        let icon = display_status_icon(step.status);
+        let mut line = format!("{icon} `{}`", step.label);
+
+        match step.status {
+            PhaseDisplayStatus::Running => {
+                if let Some(started) = step.started_at {
+                    let elapsed = started.elapsed().as_secs();
+                    line.push_str(&format!(" \u{2014} {}", format_duration(elapsed)));
+                }
+                if let Some(ref detail) = step.detail {
+                    line.push_str(&format!(" \u{2014} _{detail}_"));
+                }
+            }
+            PhaseDisplayStatus::Completed => {
+                if let Some(duration) = step.duration {
+                    line.push_str(&format!(
+                        " \u{2014} {}",
+                        format_duration(duration.as_secs()),
+                    ));
+                }
+            }
+            PhaseDisplayStatus::Failed => {
+                if let Some(duration) = step.duration {
+                    line.push_str(&format!(
+                        " \u{2014} failed after {}",
+                        format_duration(duration.as_secs()),
+                    ));
+                }
+            }
+            PhaseDisplayStatus::Pending => {}
+        }
+
+        lines.push(line);
+    }
+
+    lines.join("\n")
 }
 
 /// Builds a Block Kit error message with a warning icon.
@@ -1544,7 +1724,7 @@ mod tests {
                 cost_usd: Some(0.98),
             },
         ];
-        let blocks = run_completion_notification("add-auth", true, &phases, None);
+        let blocks = run_completion_notification("add-auth", true, &phases, None, None);
         assert_eq!(blocks.len(), 1);
         let text = blocks[0]["text"]["text"].as_str().unwrap_or("");
         assert!(text.contains(":white_check_mark:"));
@@ -1568,6 +1748,7 @@ mod tests {
             true,
             &phases,
             Some("https://github.com/org/repo/pull/42"),
+            None,
         );
         let text = blocks[0]["text"]["text"].as_str().unwrap_or("");
         assert!(text.contains(":link:"));
@@ -1592,7 +1773,7 @@ mod tests {
                 cost_usd: Some(0.10),
             },
         ];
-        let blocks = run_completion_notification("add-auth", false, &phases, None);
+        let blocks = run_completion_notification("add-auth", false, &phases, None, None);
         assert_eq!(blocks.len(), 1);
         let text = blocks[0]["text"]["text"].as_str().unwrap_or("");
         assert!(text.contains(":x:"));
@@ -1602,8 +1783,124 @@ mod tests {
 
     #[test]
     fn test_should_build_failure_notification_with_no_failed_phases() {
-        let blocks = run_completion_notification("add-auth", false, &[], None);
+        let blocks = run_completion_notification("add-auth", false, &[], None, None);
         let text = blocks[0]["text"]["text"].as_str().unwrap_or("");
         assert!(text.contains("unknown"));
+    }
+
+    #[test]
+    fn test_should_build_failure_notification_with_error_message() {
+        let blocks = run_completion_notification(
+            "add-auth",
+            false,
+            &[],
+            None,
+            Some("Agent error: connection timeout"),
+        );
+        let text = blocks[0]["text"]["text"].as_str().unwrap_or("");
+        assert!(text.contains(":x:"));
+        assert!(text.contains("connection timeout"));
+    }
+
+    // -----------------------------------------------------------------------
+    // Repo sync progress
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_should_build_repo_sync_progress_with_empty_steps() {
+        let blocks = repo_sync_progress("org/repo", &[]);
+        assert_eq!(blocks.len(), 2); // header + section
+        let text = blocks[1]["text"]["text"].as_str().unwrap_or("");
+        assert!(text.contains("Starting\u{2026}"));
+    }
+
+    #[test]
+    fn test_should_build_repo_sync_progress_with_running_step_and_detail() {
+        let steps = vec![RepoStepDisplay {
+            label: "Cloning".to_string(),
+            status: PhaseDisplayStatus::Running,
+            duration: None,
+            started_at: None,
+            detail: Some("Receiving objects: 45%".to_string()),
+        }];
+        let blocks = repo_sync_progress("org/repo", &steps);
+        let text = blocks[1]["text"]["text"].as_str().unwrap_or("");
+        assert!(text.contains(":arrows_counterclockwise:"));
+        assert!(text.contains("Cloning"));
+        assert!(text.contains("Receiving objects: 45%"));
+    }
+
+    #[test]
+    fn test_should_build_repo_sync_progress_with_completed_step() {
+        let steps = vec![RepoStepDisplay {
+            label: "Fetching".to_string(),
+            status: PhaseDisplayStatus::Completed,
+            duration: Some(Duration::from_secs(5)),
+            started_at: None,
+            detail: None,
+        }];
+        let blocks = repo_sync_progress("org/repo", &steps);
+        let text = blocks[1]["text"]["text"].as_str().unwrap_or("");
+        assert!(text.contains(":white_check_mark:"));
+        assert!(text.contains("5s"));
+    }
+
+    #[test]
+    fn test_should_build_repo_sync_success_with_bind_label() {
+        let steps = vec![
+            RepoStepDisplay {
+                label: "Fetching".to_string(),
+                status: PhaseDisplayStatus::Completed,
+                duration: Some(Duration::from_secs(3)),
+                started_at: None,
+                detail: None,
+            },
+            RepoStepDisplay {
+                label: "Pulling".to_string(),
+                status: PhaseDisplayStatus::Completed,
+                duration: Some(Duration::from_secs(2)),
+                started_at: None,
+                detail: None,
+            },
+        ];
+        let blocks = repo_sync_success("org/repo", &steps, "Updated and bound (branch `main`)");
+        assert_eq!(blocks.len(), 3); // header + section + context
+        let header_text = blocks[0]["text"]["text"].as_str().unwrap_or("");
+        assert!(header_text.contains("\u{2705}"));
+        let ctx = blocks[2]["elements"][0]["text"].as_str().unwrap_or("");
+        assert!(ctx.contains("Updated and bound"));
+        assert!(ctx.contains("5s"));
+    }
+
+    #[test]
+    fn test_should_build_repo_sync_failure_with_error() {
+        let steps = vec![RepoStepDisplay {
+            label: "Cloning".to_string(),
+            status: PhaseDisplayStatus::Failed,
+            duration: Some(Duration::from_secs(8)),
+            started_at: None,
+            detail: None,
+        }];
+        let blocks = repo_sync_failure("org/repo", &steps, "gh repo clone failed: auth error");
+        assert_eq!(blocks.len(), 3); // header + section + error section
+        let header_text = blocks[0]["text"]["text"].as_str().unwrap_or("");
+        assert!(header_text.contains("\u{274c}"));
+        let error_text = blocks[2]["text"]["text"].as_str().unwrap_or("");
+        assert!(error_text.contains("auth error"));
+    }
+
+    #[test]
+    fn test_should_build_repo_sync_progress_with_failed_step_duration() {
+        let steps = vec![RepoStepDisplay {
+            label: "Fetching".to_string(),
+            status: PhaseDisplayStatus::Failed,
+            duration: Some(Duration::from_secs(15)),
+            started_at: None,
+            detail: None,
+        }];
+        let blocks = repo_sync_progress("org/repo", &steps);
+        let text = blocks[1]["text"]["text"].as_str().unwrap_or("");
+        assert!(text.contains(":x:"));
+        assert!(text.contains("failed after 15s"));
     }
 }

@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 
 use coda_core::InitEvent;
 use tokio::sync::mpsc;
-use tracing::{info, warn};
+use tracing::{debug, info, instrument, warn};
 
 use crate::error::ServerError;
 use crate::formatter::{self, InitPhaseDisplay, PhaseDisplayStatus};
@@ -36,6 +36,7 @@ const UPDATE_DEBOUNCE: Duration = Duration::from_secs(3);
 /// Returns `ServerError` if the initial Slack message post fails or
 /// the engine cannot be created. Errors during the background init
 /// are reported by updating the Slack message.
+#[instrument(skip(state, payload), fields(channel = %payload.channel_id))]
 pub async fn handle_init(
     state: Arc<AppState>,
     payload: &SlashCommandPayload,
@@ -113,7 +114,15 @@ async fn run_init_task(
         rx,
     ));
 
+    debug!("Starting engine.init()");
+    let start = Instant::now();
     let result = engine.init(false, force, Some(tx)).await;
+    let duration_ms = start.elapsed().as_millis();
+    debug!(
+        duration_ms,
+        success = result.is_ok(),
+        "engine.init() completed"
+    );
 
     // Wait for event consumer to finish and retrieve accumulated phase state
     let display_phases = match event_handle.await {

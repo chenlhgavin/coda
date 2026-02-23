@@ -684,6 +684,13 @@ impl Engine {
     pub fn plan(&self, feature_slug: &str) -> Result<PlanSession, CoreError> {
         validate_feature_slug(feature_slug)?;
 
+        // Ensure project has been initialized (coda init creates .coda/ and .trees/)
+        if !self.project_root.join(".coda").is_dir() || !self.project_root.join(".trees").is_dir() {
+            return Err(CoreError::PlanError(
+                "Project not initialized. Run `coda init` first.".into(),
+            ));
+        }
+
         let worktree_path = self.project_root.join(".trees").join(feature_slug);
         if worktree_path.exists() {
             return Err(CoreError::PlanError(format!(
@@ -1754,5 +1761,48 @@ mod tests {
         let engine = make_engine(root).await;
         let cleaned = engine.clean_logs().expect("clean_logs");
         assert!(cleaned.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_should_reject_plan_when_coda_dir_missing() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        // Create .trees/ but no .coda/ — simulates partial state
+        fs::create_dir_all(tmp.path().join(".trees")).expect("mkdir");
+
+        let engine = make_engine(tmp.path()).await;
+        let result = engine.plan("add-auth");
+
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("not initialized"), "error was: {err}");
+        assert!(err.contains("coda init"), "error was: {err}");
+    }
+
+    #[tokio::test]
+    async fn test_should_reject_plan_when_trees_dir_missing() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        // Create .coda/ but no .trees/ — simulates partial state
+        fs::create_dir_all(tmp.path().join(".coda")).expect("mkdir");
+
+        let engine = make_engine(tmp.path()).await;
+        let result = engine.plan("add-auth");
+
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("not initialized"), "error was: {err}");
+        assert!(err.contains("coda init"), "error was: {err}");
+    }
+
+    #[tokio::test]
+    async fn test_should_reject_plan_when_nothing_initialized() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        // Empty directory — no .coda/ or .trees/
+
+        let engine = make_engine(tmp.path()).await;
+        let result = engine.plan("add-auth");
+
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("not initialized"), "error was: {err}");
     }
 }

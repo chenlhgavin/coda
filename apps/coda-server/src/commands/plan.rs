@@ -14,7 +14,7 @@
 use std::sync::Arc;
 use std::time::Instant;
 
-use tracing::{info, warn};
+use tracing::{debug, info, instrument, warn};
 
 use crate::error::ServerError;
 use crate::formatter;
@@ -38,6 +38,7 @@ use super::streaming::{
 ///
 /// Returns `ServerError` if the Slack API call fails, the engine cannot
 /// be created, or the plan session cannot be initialized.
+#[instrument(skip(state, payload), fields(channel = %payload.channel_id, slug = %feature_slug))]
 pub async fn handle_plan(
     state: Arc<AppState>,
     payload: &SlashCommandPayload,
@@ -53,7 +54,13 @@ pub async fn handle_plan(
     info!(channel, feature_slug = slug, "Starting plan command");
 
     // Create the PlanSession from the engine
+    debug!("Creating plan session via engine.plan()");
+    let start = Instant::now();
     let session = engine.plan(&slug)?;
+    debug!(
+        duration_ms = start.elapsed().as_millis(),
+        "Plan session created",
+    );
 
     // Post thread parent message
     let header_blocks = formatter::plan_thread_header(&slug, "Discussing");
@@ -92,6 +99,7 @@ pub async fn handle_plan(
 /// corresponding `PlanSession` methods, and forwards regular text
 /// as planning conversation turns. Uses the hourglass reaction as
 /// a thinking indicator during AI responses.
+#[instrument(skip(state, text), fields(channel = %channel, thread_ts = %thread_ts))]
 pub async fn handle_thread_message(
     state: Arc<AppState>,
     channel: &str,
@@ -166,10 +174,17 @@ async fn handle_conversation(
     };
 
     // Send message to AI with streaming text updates (no DashMap lock held)
+    debug!("Calling session.send_streaming()");
+    let start = Instant::now();
     let response = {
         let mut session = session_arc.lock().await;
         session.send_streaming(text, tx).await
     };
+    debug!(
+        duration_ms = start.elapsed().as_millis(),
+        success = response.is_ok(),
+        "session.send_streaming() completed",
+    );
 
     // Remove thinking indicator
     let _ = state
@@ -337,6 +352,7 @@ async fn consume_streaming_updates(
 }
 
 /// Handles the `approve` keyword: formalizes design and verification.
+#[instrument(skip(state), fields(channel = %channel, thread_ts = %thread_ts))]
 async fn handle_approve(state: Arc<AppState>, channel: &str, thread_ts: &str) {
     // Add thinking indicator to the thread parent
     let _ = state
@@ -354,12 +370,19 @@ async fn handle_approve(state: Arc<AppState>, channel: &str, thread_ts: &str) {
     };
 
     // Run approve with only the tokio Mutex held (no DashMap lock)
+    debug!("Calling session.approve()");
+    let start = Instant::now();
     let (result, slug) = {
         let mut session = session_arc.lock().await;
         let slug = session.feature_slug().to_string();
         let result = session.approve().await;
         (result, slug)
     };
+    debug!(
+        duration_ms = start.elapsed().as_millis(),
+        success = result.is_ok(),
+        "session.approve() completed",
+    );
 
     let _ = state
         .slack()
@@ -423,6 +446,7 @@ async fn handle_approve(state: Arc<AppState>, channel: &str, thread_ts: &str) {
 }
 
 /// Handles the `done` keyword: finalizes the session, creates worktree.
+#[instrument(skip(state), fields(channel = %channel, thread_ts = %thread_ts))]
 async fn handle_done(state: Arc<AppState>, channel: &str, thread_ts: &str) {
     // Acquire session Arc (briefly touches DashMap, then releases shard lock)
     let session_arc = match state.sessions().acquire(channel, thread_ts) {
@@ -474,10 +498,17 @@ async fn handle_done(state: Arc<AppState>, channel: &str, thread_ts: &str) {
         .await;
 
     // Run finalize with only the tokio Mutex held (no DashMap lock)
+    debug!("Calling session.finalize()");
+    let start = Instant::now();
     let result = {
         let mut session = session_arc.lock().await;
         session.finalize().await
     };
+    debug!(
+        duration_ms = start.elapsed().as_millis(),
+        success = result.is_ok(),
+        "session.finalize() completed",
+    );
 
     // Release repo lock immediately after finalize
     if let Some(ref path) = repo_path {
@@ -543,10 +574,18 @@ async fn handle_done(state: Arc<AppState>, channel: &str, thread_ts: &str) {
 }
 
 /// Handles the `quit` keyword: disconnects the session without finalizing.
+#[instrument(skip(state), fields(channel = %channel, thread_ts = %thread_ts))]
 async fn handle_quit(state: Arc<AppState>, channel: &str, thread_ts: &str) {
     if let Some(session_arc) = state.sessions().remove(channel, thread_ts) {
         let mut session = session_arc.lock().await;
+
+        debug!("Calling session.disconnect()");
+        let start = Instant::now();
         session.disconnect().await;
+        debug!(
+            duration_ms = start.elapsed().as_millis(),
+            "session.disconnect() completed",
+        );
 
         let slug = session.feature_slug().to_string();
         drop(session);

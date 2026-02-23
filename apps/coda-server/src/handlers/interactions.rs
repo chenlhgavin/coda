@@ -7,7 +7,7 @@
 use std::sync::Arc;
 
 use serde::Deserialize;
-use tracing::{debug, info, warn};
+use tracing::{debug, info, instrument, warn};
 
 use crate::commands;
 use crate::formatter::{self, CLEAN_CONFIRM_ACTION, CleanTarget, REPO_SELECT_ACTION};
@@ -65,6 +65,7 @@ struct InteractionPayload {
 ///
 /// Parses the payload, routes by `action_id`, and delegates to the
 /// appropriate handler. Unknown actions are silently ignored.
+#[instrument(skip(state, payload), fields(channel_id, action_ids))]
 pub async fn handle_interaction(state: Arc<AppState>, payload: serde_json::Value) {
     let interaction: InteractionPayload = match serde_json::from_value(payload) {
         Ok(p) => p,
@@ -73,6 +74,17 @@ pub async fn handle_interaction(state: Arc<AppState>, payload: serde_json::Value
             return;
         }
     };
+
+    // Record parsed context onto the current span
+    let span = tracing::Span::current();
+    span.record("channel_id", interaction.channel.id.as_str());
+    let action_ids: String = interaction
+        .actions
+        .iter()
+        .map(|a| a.action_id.as_str())
+        .collect::<Vec<_>>()
+        .join(",");
+    span.record("action_ids", action_ids.as_str());
 
     for action in &interaction.actions {
         if action.action_id == CLEAN_CONFIRM_ACTION {

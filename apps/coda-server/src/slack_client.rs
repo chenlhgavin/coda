@@ -2,11 +2,15 @@
 //!
 //! Wraps `reqwest::Client` with the bot token for authorization and provides
 //! typed methods for the Slack endpoints needed by this application.
+//!
+//! The [`SlackClient`] struct implements a manual [`Debug`] that redacts the
+//! bot token to prevent accidental credential leakage in logs.
 
-use std::time::Duration;
+use std::fmt;
+use std::time::{Duration, Instant};
 
 use serde::Deserialize;
-use tracing::{debug, warn};
+use tracing::{debug, instrument, warn};
 
 use crate::error::ServerError;
 
@@ -22,18 +26,29 @@ const HTTP_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 /// [`connections_open`](Self::connections_open) which uses the app-level
 /// token (`xapp-...`) passed as a parameter.
 ///
+/// The `Debug` implementation redacts the `bot_token` field to prevent
+/// accidental credential exposure in log output.
+///
 /// # Examples
 ///
 /// ```
 /// use coda_server::slack_client::SlackClient;
 ///
 /// let client = SlackClient::new("xoxb-test-token".into()).unwrap();
-/// // client.post_message("C123", vec![]).await?;
+/// assert!(format!("{client:?}").contains("[REDACTED]"));
 /// ```
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct SlackClient {
     http: reqwest::Client,
     bot_token: String,
+}
+
+impl fmt::Debug for SlackClient {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SlackClient")
+            .field("bot_token", &"[REDACTED]")
+            .finish()
+    }
 }
 
 /// Successful response from `chat.postMessage`.
@@ -134,6 +149,7 @@ impl SlackClient {
     /// # Errors
     ///
     /// Returns `ServerError::SlackApi` if the API call fails or returns an error.
+    #[instrument(skip(self, blocks), fields(channel = %channel))]
     pub async fn post_message(
         &self,
         channel: &str,
@@ -145,7 +161,7 @@ impl SlackClient {
             "blocks": blocks,
             "text": fallback,
         });
-        debug!(channel, "Posting message");
+        debug!("Posting message");
         let resp = self.call_bot_api("chat.postMessage", &body).await?;
         Ok(PostMessageResponse {
             ts: resp.ts.ok_or_else(|| {
@@ -163,6 +179,7 @@ impl SlackClient {
     /// # Errors
     ///
     /// Returns `ServerError::SlackApi` if the API call fails or returns an error.
+    #[instrument(skip(self, blocks), fields(channel = %channel, ts = %ts))]
     pub async fn update_message(
         &self,
         channel: &str,
@@ -176,7 +193,7 @@ impl SlackClient {
             "blocks": blocks,
             "text": fallback,
         });
-        debug!(channel, ts, "Updating message");
+        debug!("Updating message");
         self.call_bot_api("chat.update", &body).await?;
         Ok(())
     }
@@ -188,6 +205,7 @@ impl SlackClient {
     /// # Errors
     ///
     /// Returns `ServerError::SlackApi` if the API call fails or returns an error.
+    #[instrument(skip(self, text), fields(channel = %channel, thread_ts = %thread_ts))]
     pub async fn post_thread_reply(
         &self,
         channel: &str,
@@ -199,7 +217,7 @@ impl SlackClient {
             "thread_ts": thread_ts,
             "text": text,
         });
-        debug!(channel, thread_ts, "Posting thread reply");
+        debug!("Posting thread reply");
         let resp = self.call_bot_api("chat.postMessage", &body).await?;
         resp.ts.ok_or_else(|| {
             ServerError::SlackApi("chat.postMessage thread reply missing 'ts'".into())
@@ -211,6 +229,7 @@ impl SlackClient {
     /// # Errors
     ///
     /// Returns `ServerError::SlackApi` if the API call fails or returns an error.
+    #[instrument(skip(self), fields(channel = %channel, ts = %ts, name = %name))]
     pub async fn add_reaction(
         &self,
         channel: &str,
@@ -222,7 +241,7 @@ impl SlackClient {
             "timestamp": ts,
             "name": name,
         });
-        debug!(channel, ts, name, "Adding reaction");
+        debug!("Adding reaction");
         self.call_bot_api("reactions.add", &body).await?;
         Ok(())
     }
@@ -232,6 +251,7 @@ impl SlackClient {
     /// # Errors
     ///
     /// Returns `ServerError::SlackApi` if the API call fails or returns an error.
+    #[instrument(skip(self), fields(channel = %channel, ts = %ts, name = %name))]
     pub async fn remove_reaction(
         &self,
         channel: &str,
@@ -243,7 +263,7 @@ impl SlackClient {
             "timestamp": ts,
             "name": name,
         });
-        debug!(channel, ts, name, "Removing reaction");
+        debug!("Removing reaction");
         self.call_bot_api("reactions.remove", &body).await?;
         Ok(())
     }
@@ -259,6 +279,7 @@ impl SlackClient {
     /// # Errors
     ///
     /// Returns `ServerError::SlackApi` if the API call fails or returns an error.
+    #[instrument(skip(self, text), fields(channel = %channel, ts = %ts))]
     pub async fn update_message_text(
         &self,
         channel: &str,
@@ -275,7 +296,7 @@ impl SlackClient {
             "ts": ts,
             "text": safe_text,
         });
-        debug!(channel, ts, "Updating message text");
+        debug!("Updating message text");
         self.call_bot_api("chat.update", &body).await?;
         Ok(())
     }
@@ -287,22 +308,55 @@ impl SlackClient {
     /// # Errors
     ///
     /// Returns `ServerError::SlackApi` if the API call fails or returns an error.
+    #[instrument(skip(self, app_token))]
     pub async fn connections_open(&self, app_token: &str) -> Result<String, ServerError> {
         debug!("Opening Socket Mode connection");
-        let resp = self
+        let start = Instant::now();
+
+        let resp = match self
             .http
             .post(format!("{SLACK_API_BASE}/apps.connections.open"))
             .bearer_auth(app_token)
             .header("Content-Type", "application/x-www-form-urlencoded")
             .send()
             .await
-            .map_err(|e| {
-                ServerError::SlackApi(format!("apps.connections.open request failed: {e}"))
-            })?;
+        {
+            Ok(resp) => resp,
+            Err(e) => {
+                let duration_ms = start.elapsed().as_millis();
+                debug!(
+                    duration_ms,
+                    error = %e,
+                    "apps.connections.open request failed",
+                );
+                return Err(ServerError::SlackApi(format!(
+                    "apps.connections.open request failed: {e}"
+                )));
+            }
+        };
 
-        let api_resp: SlackApiResponse = resp.json().await.map_err(|e| {
-            ServerError::SlackApi(format!("apps.connections.open response parse failed: {e}"))
-        })?;
+        let api_resp: SlackApiResponse = match resp.json().await {
+            Ok(parsed) => parsed,
+            Err(e) => {
+                let duration_ms = start.elapsed().as_millis();
+                debug!(
+                    duration_ms,
+                    error = %e,
+                    "apps.connections.open response parse failed",
+                );
+                return Err(ServerError::SlackApi(format!(
+                    "apps.connections.open response parse failed: {e}"
+                )));
+            }
+        };
+
+        let duration_ms = start.elapsed().as_millis();
+        debug!(
+            duration_ms,
+            ok = api_resp.ok,
+            error = ?api_resp.error,
+            "Slack API response for apps.connections.open",
+        );
 
         if !api_resp.ok {
             return Err(ServerError::SlackApi(format!(
@@ -317,24 +371,50 @@ impl SlackClient {
     }
 
     /// Sends a JSON POST request to a Slack Web API method using the bot token.
+    #[instrument(skip(self, body), fields(slack_method = method))]
     async fn call_bot_api(
         &self,
         method: &str,
         body: &serde_json::Value,
     ) -> Result<SlackApiResponse, ServerError> {
-        let resp = self
+        let start = Instant::now();
+
+        let resp = match self
             .http
             .post(format!("{SLACK_API_BASE}/{method}"))
             .bearer_auth(&self.bot_token)
             .json(body)
             .send()
             .await
-            .map_err(|e| ServerError::SlackApi(format!("{method} request failed: {e}")))?;
+        {
+            Ok(resp) => resp,
+            Err(e) => {
+                let duration_ms = start.elapsed().as_millis();
+                debug!(duration_ms, error = %e, "Slack API request failed");
+                return Err(ServerError::SlackApi(format!(
+                    "{method} request failed: {e}"
+                )));
+            }
+        };
 
-        let api_resp: SlackApiResponse = resp
-            .json()
-            .await
-            .map_err(|e| ServerError::SlackApi(format!("{method} response parse failed: {e}")))?;
+        let api_resp: SlackApiResponse = match resp.json().await {
+            Ok(parsed) => parsed,
+            Err(e) => {
+                let duration_ms = start.elapsed().as_millis();
+                debug!(duration_ms, error = %e, "Slack API response parse failed");
+                return Err(ServerError::SlackApi(format!(
+                    "{method} response parse failed: {e}"
+                )));
+            }
+        };
+
+        let duration_ms = start.elapsed().as_millis();
+        debug!(
+            duration_ms,
+            ok = api_resp.ok,
+            error = ?api_resp.error,
+            "Slack API response",
+        );
 
         if !api_resp.ok {
             let error_msg = api_resp.error.as_deref().unwrap_or("unknown");
@@ -356,6 +436,20 @@ mod tests {
     fn test_should_create_client() {
         let client = SlackClient::new("xoxb-test".into()).unwrap();
         assert!(format!("{client:?}").contains("SlackClient"));
+    }
+
+    #[test]
+    fn test_should_redact_bot_token_in_debug_output() {
+        let client = SlackClient::new("xoxb-secret-token-value".into()).unwrap();
+        let debug_output = format!("{client:?}");
+        assert!(
+            debug_output.contains("[REDACTED]"),
+            "Debug output should contain [REDACTED]"
+        );
+        assert!(
+            !debug_output.contains("xoxb-secret-token-value"),
+            "Debug output must not contain the actual token"
+        );
     }
 
     #[test]

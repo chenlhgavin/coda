@@ -11,7 +11,7 @@ use futures::{SinkExt, StreamExt};
 use tokio::net::TcpStream;
 use tokio_tungstenite::tungstenite::Message as WsMessage;
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async};
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use crate::dispatch::{self, Envelope, ParsedMessage};
 use crate::error::ServerError;
@@ -183,6 +183,7 @@ impl SocketClient {
                     match ws_msg {
                         WsMessage::Text(ref text) => {
                             let text_ref: &str = text;
+                            debug!(byte_len = text_ref.len(), "Received WebSocket text frame");
                             match dispatch::parse_message(text_ref)? {
                                 Some(ParsedMessage::Hello) => {
                                     // Already logged in parse_message
@@ -199,6 +200,10 @@ impl SocketClient {
                                     write.send(ack_msg).await.map_err(|e| {
                                         ServerError::WebSocket(format!("Ack send failed: {e}"))
                                     })?;
+                                    debug!(
+                                        envelope_id = envelope.envelope_id,
+                                        "Ack sent for envelope",
+                                    );
 
                                     // Spawn handler as tracked task
                                     let fut = handler(envelope);
@@ -210,12 +215,13 @@ impl SocketClient {
                             }
                         }
                         WsMessage::Ping(data) => {
+                            debug!("Received WebSocket ping frame");
                             write.send(WsMessage::Pong(data)).await.map_err(|e| {
                                 ServerError::WebSocket(format!("Pong send failed: {e}"))
                             })?;
                         }
                         WsMessage::Close(_) => {
-                            info!("Received WebSocket close frame");
+                            debug!("Received WebSocket close frame");
                             return Ok(ConnectionExit::Disconnect);
                         }
                         _ => {

@@ -5,8 +5,9 @@
 //! delegates to the interaction handler after user confirmation.
 
 use std::sync::Arc;
+use std::time::Instant;
 
-use tracing::info;
+use tracing::{debug, info, instrument};
 
 use crate::error::ServerError;
 use crate::formatter;
@@ -71,6 +72,7 @@ pub async fn handle_help(
 ///
 /// Returns `ServerError` if the Slack API call fails or the Engine
 /// cannot be created.
+#[instrument(skip(state, payload), fields(channel = %payload.channel_id))]
 pub async fn handle_list(
     state: Arc<AppState>,
     payload: &SlashCommandPayload,
@@ -83,7 +85,16 @@ pub async fn handle_list(
 
     info!(channel, "Listing features");
 
-    let blocks = match engine.list_features() {
+    let start = Instant::now();
+    let result = engine.list_features();
+    let duration_ms = start.elapsed().as_millis();
+    debug!(
+        duration_ms,
+        success = result.is_ok(),
+        "engine.list_features() completed"
+    );
+
+    let blocks = match result {
         Ok(features) if features.is_empty() => formatter::empty_feature_list(&repo_path),
         Ok(features) => formatter::feature_list(&repo_path, &features),
         Err(e) => formatter::error(&e.to_string()),
@@ -102,6 +113,7 @@ pub async fn handle_list(
 ///
 /// Returns `ServerError` if the Slack API call fails or the Engine
 /// cannot be created.
+#[instrument(skip(state, payload), fields(channel = %payload.channel_id, slug = %feature_slug))]
 pub async fn handle_status(
     state: Arc<AppState>,
     payload: &SlashCommandPayload,
@@ -115,7 +127,17 @@ pub async fn handle_status(
 
     info!(channel, feature_slug, "Querying feature status");
 
-    let blocks = match engine.feature_status(feature_slug) {
+    let start = Instant::now();
+    let result = engine.feature_status(feature_slug);
+    let duration_ms = start.elapsed().as_millis();
+    debug!(
+        duration_ms,
+        feature_slug,
+        success = result.is_ok(),
+        "engine.feature_status() completed"
+    );
+
+    let blocks = match result {
         Ok(feature_state) => formatter::feature_status(&feature_state),
         Err(e) => formatter::error(&e.to_string()),
     };
@@ -135,6 +157,7 @@ pub async fn handle_status(
 ///
 /// Returns `ServerError` if the Slack API call fails or the Engine
 /// cannot be created.
+#[instrument(skip(state, payload), fields(channel = %payload.channel_id))]
 pub async fn handle_clean(
     state: Arc<AppState>,
     payload: &SlashCommandPayload,
@@ -147,7 +170,16 @@ pub async fn handle_clean(
 
     info!(channel, "Scanning for cleanable worktrees");
 
-    let blocks = match engine.scan_cleanable_worktrees() {
+    let start = Instant::now();
+    let result = engine.scan_cleanable_worktrees();
+    let duration_ms = start.elapsed().as_millis();
+    debug!(
+        duration_ms,
+        success = result.is_ok(),
+        "engine.scan_cleanable_worktrees() completed"
+    );
+
+    let blocks = match result {
         Ok(candidates) if candidates.is_empty() => formatter::no_cleanable_worktrees(),
         Ok(candidates) => {
             info!(

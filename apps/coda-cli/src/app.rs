@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use coda_core::{Engine, InitEvent, RunEvent};
-use tracing::{error, info};
+use tracing::info;
 
 use crate::fmt_utils::{format_duration, truncate_str};
 use crate::ui::PlanUi;
@@ -150,14 +150,13 @@ impl App {
                 Ok(())
             }
             (Some(Err(e)), _) => {
-                error!("Init failed: {e}");
                 println!();
                 println!("  CODA Init: {project_root_display} — FAILED");
                 println!("  ═══════════════════════════════════════");
                 println!("  Error: {e}");
                 println!("  ═══════════════════════════════════════");
                 println!();
-                Err(e.into())
+                std::process::exit(1);
             }
             (_, Err(_)) => {
                 // UI cancelled (e.g. Ctrl+C) — show friendly message
@@ -185,12 +184,22 @@ impl App {
     ///
     /// Returns an error if the planning session or UI fails.
     pub async fn plan(&self, feature_slug: &str) -> Result<()> {
-        let mut session = self.engine.plan(feature_slug)?;
+        let mut session = match self.engine.plan(feature_slug) {
+            Ok(s) => s,
+            Err(e) => {
+                println!();
+                println!("  CODA Plan: {feature_slug} — FAILED");
+                println!("  ═══════════════════════════════════════");
+                println!("  Error: {e}");
+                println!("  ═══════════════════════════════════════");
+                println!();
+                std::process::exit(1);
+            }
+        };
         let mut ui = PlanUi::new()?;
 
-        match ui.run_plan(&mut session).await? {
-            Some(output) => {
-                // UI is dropped here (restores terminal)
+        match ui.run_plan(&mut session).await {
+            Ok(Some(output)) => {
                 drop(ui);
                 println!("Planning complete!");
                 println!("  Design spec: {}", output.design_spec.display());
@@ -199,9 +208,19 @@ impl App {
                 println!("  Worktree: {}", output.worktree.display());
                 println!("\nNext step: run `coda run {feature_slug}` to execute the plan.");
             }
-            None => {
+            Ok(None) => {
                 drop(ui);
                 println!("Planning cancelled.");
+            }
+            Err(e) => {
+                drop(ui);
+                println!();
+                println!("  CODA Plan: {feature_slug} — FAILED");
+                println!("  ═══════════════════════════════════════");
+                println!("  Error: {e}");
+                println!("  ═══════════════════════════════════════");
+                println!();
+                std::process::exit(1);
             }
         }
 
@@ -561,7 +580,7 @@ impl App {
                 if let Some(url) = &summary.pr_url {
                     println!("  PR: {url}");
                 } else if !summary.success {
-                    println!("  PR creation failed. Create manually:");
+                    println!("  Error: PR creation failed. Create manually:");
                     println!("    gh pr create --base main --head feature/{feature_slug}");
                 }
                 println!("  ═══════════════════════════════════════");
@@ -569,14 +588,13 @@ impl App {
                 Ok(())
             }
             (Some(Err(e)), _) => {
-                error!("Run failed: {e}");
                 println!();
                 println!("  CODA Run: {feature_slug} — FAILED");
                 println!("  ═══════════════════════════════════════");
                 println!("  Error: {e}");
                 println!("  ═══════════════════════════════════════");
                 println!();
-                Err(e.into())
+                std::process::exit(1);
             }
             (_, Err(_)) => {
                 // UI cancelled (e.g. Ctrl+C) — show friendly message with resume hint
@@ -737,7 +755,7 @@ impl App {
                     format_duration(total_elapsed)
                 );
                 if pr_failed {
-                    println!("  PR creation failed. Create manually:");
+                    println!("  Error: PR creation failed. Create manually:");
                     println!("    gh pr create --base main --head feature/{feature_slug}");
                 }
                 println!("  ═══════════════════════════════════════");
@@ -747,12 +765,13 @@ impl App {
             }
             Err(e) => {
                 let elapsed = run_start.elapsed();
-                error!("Run failed after {}: {e}", format_duration(elapsed));
                 println!();
-                println!("  Run failed after {}", format_duration(elapsed));
+                println!("  CODA Run: {feature_slug} — FAILED");
+                println!("  ═══════════════════════════════════════");
+                println!("  Error (after {}): {e}", format_duration(elapsed));
                 println!("  ═══════════════════════════════════════");
                 println!();
-                Err(e.into())
+                std::process::exit(1);
             }
         }
     }

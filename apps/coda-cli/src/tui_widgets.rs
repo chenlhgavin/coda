@@ -26,7 +26,7 @@ pub const SPINNER_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", 
 pub const BORDER_COLOR: Color = Color::Cyan;
 
 /// Width of the left sidebar showing phase status.
-pub const SIDEBAR_WIDTH: u16 = 22;
+pub const SIDEBAR_WIDTH: u16 = 26;
 
 /// Minimum terminal width to show the sidebar alongside the content area.
 ///
@@ -70,6 +70,8 @@ pub struct PhaseDisplay {
     pub current_turn: u32,
     /// Detail text for review/verify rounds (run only).
     pub detail: String,
+    /// Compact round/attempt label for Line 2 metadata (e.g., "R4/5", "A2/3").
+    pub round_label: String,
 }
 
 /// Display status of the PR creation step (run only).
@@ -395,8 +397,8 @@ fn render_sidebar_phase(
 ) -> Vec<Line<'static>> {
     // Icon prefix "[X] " takes 4 characters
     let name_budget = (width as usize).saturating_sub(4);
-    // Sub-line indent "    " takes 4 characters
-    let meta_budget = (width as usize).saturating_sub(4);
+    // Sub-line indent "  " takes 2 characters
+    let meta_budget = (width as usize).saturating_sub(2);
 
     match &phase.status {
         PhaseDisplayStatus::Pending => {
@@ -422,21 +424,26 @@ fn render_sidebar_phase(
                 .map(|t| format_duration(t.elapsed()))
                 .unwrap_or_default();
             let meta = if phase.current_turn > 0 {
-                format!("T:{}  {elapsed}", phase.current_turn)
+                format!("T:{:>3}  {elapsed}", phase.current_turn)
             } else {
                 elapsed
             };
             let meta = truncate_str(&meta, meta_budget);
             result.push(Line::from(Span::styled(
-                format!("    {meta}"),
+                format!("  {meta}"),
                 Style::default().fg(Color::Yellow),
             )));
 
-            // Optional line 3: review/verify detail text
+            // Optional line 3: round label prefix + detail text
             if !phase.detail.is_empty() {
-                let detail = truncate_str(&phase.detail, meta_budget);
+                let detail = if phase.round_label.is_empty() {
+                    phase.detail.clone()
+                } else {
+                    format!("{:<5}  {}", phase.round_label, phase.detail)
+                };
+                let detail = truncate_str(&detail, meta_budget);
                 result.push(Line::from(Span::styled(
-                    format!("    {detail}"),
+                    format!("  {detail}"),
                     Style::default().fg(Color::Yellow),
                 )));
             }
@@ -452,19 +459,21 @@ fn render_sidebar_phase(
             ));
 
             // Line 2: indented metadata (turns + duration + cost)
+            // Pad turn+duration to 14 chars so cost aligns across phases.
             let dur = format_duration(*duration);
-            let mut parts = Vec::new();
-            if phase.current_turn > 0 {
-                parts.push(format!("T:{}", phase.current_turn));
-            }
-            parts.push(dur);
-            if let Some(cost) = cost_usd {
-                parts.push(format!("${cost:.2}"));
-            }
-            let meta = parts.join("  ");
+            let left = if phase.current_turn > 0 {
+                format!("T:{:>3}  {dur}", phase.current_turn)
+            } else {
+                dur
+            };
+            let meta = if let Some(cost) = cost_usd {
+                format!("{left:<14}  ${cost:.2}")
+            } else {
+                left
+            };
             let meta = truncate_str(&meta, meta_budget);
             let meta_line = Line::from(Span::styled(
-                format!("    {meta}"),
+                format!("  {meta}"),
                 Style::default().fg(Color::White),
             ));
 
@@ -485,7 +494,7 @@ fn render_sidebar_phase(
                         Style::default().fg(Color::Red),
                     )),
                     Line::from(Span::styled(
-                        format!("    {err_display}"),
+                        format!("  {err_display}"),
                         Style::default().fg(Color::Red),
                     )),
                 ]

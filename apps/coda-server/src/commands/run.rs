@@ -20,7 +20,7 @@ use std::time::{Duration, Instant};
 
 use coda_core::RunEvent;
 use tokio::sync::mpsc;
-use tracing::{info, warn};
+use tracing::{debug, info, instrument, warn};
 
 use crate::error::ServerError;
 use crate::formatter::{self, PhaseDisplayStatus, RunPhaseDisplay};
@@ -46,6 +46,7 @@ use super::streaming::{
 /// Returns `ServerError` if the initial Slack message post fails or
 /// the engine cannot be created. Errors during the background run
 /// are reported by updating the Slack message.
+#[instrument(skip(state, payload), fields(channel = %payload.channel_id, slug = %feature_slug))]
 pub async fn handle_run(
     state: Arc<AppState>,
     payload: &SlashCommandPayload,
@@ -118,7 +119,16 @@ async fn run_feature_task(
         rx,
     ));
 
+    debug!(slug, "Starting engine.run()");
+    let start = Instant::now();
     let result = engine.run(&slug, Some(tx)).await;
+    let duration_ms = start.elapsed().as_millis();
+    debug!(
+        duration_ms,
+        slug,
+        success = result.is_ok(),
+        "engine.run() completed"
+    );
 
     // Wait for event consumer to finish processing remaining events
     let pr_url = match event_handle.await {
@@ -130,17 +140,18 @@ async fn run_feature_task(
     };
 
     // Build final summary and completion notification
-    let (final_blocks, success, phases) = match result {
+    let (final_blocks, success, phases, error_msg) = match result {
         Ok(ref results) => {
             info!(channel, slug, "Run completed successfully");
             let phases = results_to_phases(results);
             let blocks = formatter::run_progress(&slug, &phases);
-            (blocks, true, phases)
+            (blocks, true, phases, None)
         }
         Err(ref e) => {
             warn!(channel, slug, error = %e, "Run failed");
-            let blocks = formatter::error(&format!("Run `{slug}` failed: {e}"));
-            (blocks, false, Vec::new())
+            let err_str = e.to_string();
+            let blocks = formatter::run_failure(&slug, &[], &err_str);
+            (blocks, false, Vec::new(), Some(err_str))
         }
     };
 
@@ -154,8 +165,13 @@ async fn run_feature_task(
     }
 
     // Post a new channel message as completion notification (triggers Slack notification)
-    let notification_blocks =
-        formatter::run_completion_notification(&slug, success, &phases, pr_url.as_deref());
+    let notification_blocks = formatter::run_completion_notification(
+        &slug,
+        success,
+        &phases,
+        pr_url.as_deref(),
+        error_msg.as_deref(),
+    );
     if let Err(e) = state
         .slack()
         .post_message(&channel, notification_blocks)

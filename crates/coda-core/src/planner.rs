@@ -110,12 +110,10 @@ impl PlanSession {
         let coda_md = match std::fs::read_to_string(&coda_md_path) {
             Ok(content) => content,
             Err(_) => {
-                warn!(
-                    path = %coda_md_path.display(),
-                    "Missing .coda.md — planning agent will lack repository context. \
-                     Run `coda init` to generate it."
-                );
-                String::new()
+                return Err(CoreError::PlanError(format!(
+                    "Missing .coda.md at {}. Run `coda init` first to generate it.",
+                    coda_md_path.display(),
+                )));
             }
         };
 

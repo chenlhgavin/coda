@@ -122,6 +122,7 @@ impl RunUi {
                         started_at: None,
                         current_turn: 0,
                         detail: String::new(),
+                        round_label: String::new(),
                     }
                 } else {
                     PhaseDisplay {
@@ -130,6 +131,7 @@ impl RunUi {
                         started_at: None,
                         current_turn: 0,
                         detail: String::new(),
+                        round_label: String::new(),
                     }
                 }
             })
@@ -285,6 +287,7 @@ impl RunUi {
                             started_at: None,
                             current_turn: 0,
                             detail: String::new(),
+                            round_label: String::new(),
                         })
                         .collect();
                 }
@@ -376,13 +379,12 @@ impl RunUi {
                 if let Some(idx) = self.active_phase
                     && let Some(phase) = self.phases.get_mut(idx)
                 {
-                    if issues_found == 0 {
-                        phase.detail = format!("round {round}/{max_rounds}: passed");
+                    phase.round_label = format!("R{round}/{max_rounds}");
+                    phase.detail = if issues_found == 0 {
+                        "passed".to_owned()
                     } else {
-                        phase.detail = format!(
-                            "round {round}/{max_rounds}: {issues_found} issue(s), fixing..."
-                        );
-                    }
+                        format!("{issues_found} issues")
+                    };
                 }
             }
             RunEvent::VerifyAttempt {
@@ -393,13 +395,12 @@ impl RunUi {
                 if let Some(idx) = self.active_phase
                     && let Some(phase) = self.phases.get_mut(idx)
                 {
-                    if passed {
-                        phase.detail =
-                            format!("attempt {attempt}/{max_attempts}: all checks passed");
+                    phase.round_label = format!("A{attempt}/{max_attempts}");
+                    phase.detail = if passed {
+                        "passed".to_owned()
                     } else {
-                        phase.detail =
-                            format!("attempt {attempt}/{max_attempts}: failures found, fixing...");
-                    }
+                        "fixing".to_owned()
+                    };
                 }
             }
             RunEvent::CreatingPr => {

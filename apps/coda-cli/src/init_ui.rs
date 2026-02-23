@@ -247,6 +247,7 @@ impl InitUi {
                         started_at: None,
                         current_turn: 0,
                         detail: String::new(),
+                        round_label: String::new(),
                     })
                     .collect();
             }
