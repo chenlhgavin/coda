@@ -115,33 +115,24 @@ async fn run_init_task(
 
     let result = engine.init(false, force, Some(tx)).await;
 
-    // Wait for event consumer to finish processing remaining events
-    if let Err(e) = event_handle.await {
-        warn!(error = %e, "Init event consumer task panicked");
-    }
+    // Wait for event consumer to finish and retrieve accumulated phase state
+    let display_phases = match event_handle.await {
+        Ok(phases) => phases,
+        Err(e) => {
+            warn!(error = %e, "Init event consumer task panicked");
+            Vec::new()
+        }
+    };
 
-    // Post final summary
+    // Post final summary, reusing the phase data accumulated by the consumer
     let final_blocks = match result {
         Ok(()) => {
             info!(channel, "Init completed successfully");
-            formatter::init_progress(&[
-                InitPhaseDisplay {
-                    name: "analyze-repo".to_string(),
-                    status: PhaseDisplayStatus::Completed,
-                    duration: None,
-                    cost_usd: None,
-                },
-                InitPhaseDisplay {
-                    name: "setup-project".to_string(),
-                    status: PhaseDisplayStatus::Completed,
-                    duration: None,
-                    cost_usd: None,
-                },
-            ])
+            formatter::init_success(&display_phases)
         }
         Err(e) => {
             warn!(channel, error = %e, "Init failed");
-            formatter::error(&format!("Init failed: {e}"))
+            formatter::init_failure(&display_phases, &e.to_string())
         }
     };
 
@@ -163,12 +154,15 @@ async fn run_init_task(
 ///
 /// Phase transitions trigger immediate updates. High-frequency events
 /// are batched, with updates at most every [`UPDATE_DEBOUNCE`] interval.
+///
+/// Returns the accumulated phase display state so the caller can build
+/// a final summary message with complete duration/cost data.
 async fn consume_init_events(
     slack: crate::slack_client::SlackClient,
     channel: String,
     message_ts: String,
     mut rx: mpsc::UnboundedReceiver<InitEvent>,
-) {
+) -> Vec<InitPhaseDisplay> {
     let mut display_phases: Vec<InitPhaseDisplay> = Vec::new();
     let mut last_update = Instant::now() - UPDATE_DEBOUNCE;
     let mut pending_update = false;
@@ -183,6 +177,7 @@ async fn consume_init_events(
                         status: PhaseDisplayStatus::Pending,
                         duration: None,
                         cost_usd: None,
+                        started_at: None,
                     })
                     .collect();
                 true
@@ -190,14 +185,17 @@ async fn consume_init_events(
             InitEvent::PhaseStarting {
                 ref name, index, ..
             } => {
+                let now = Instant::now();
                 if let Some(p) = display_phases.get_mut(index) {
                     p.status = PhaseDisplayStatus::Running;
+                    p.started_at = Some(now);
                 } else {
                     display_phases.push(InitPhaseDisplay {
                         name: name.clone(),
                         status: PhaseDisplayStatus::Running,
                         duration: None,
                         cost_usd: None,
+                        started_at: Some(now),
                     });
                 }
                 true
@@ -212,12 +210,18 @@ async fn consume_init_events(
                     p.status = PhaseDisplayStatus::Completed;
                     p.duration = Some(duration);
                     p.cost_usd = Some(cost_usd);
+                    p.started_at = None;
                 }
                 true
             }
             InitEvent::PhaseFailed { index, .. } => {
                 if let Some(p) = display_phases.get_mut(index) {
+                    // Record elapsed time so the failure message shows duration
+                    if let Some(started) = p.started_at {
+                        p.duration = Some(started.elapsed());
+                    }
                     p.status = PhaseDisplayStatus::Failed;
+                    p.started_at = None;
                 }
                 true
             }
@@ -244,6 +248,8 @@ async fn consume_init_events(
     if pending_update {
         send_update(&slack, &channel, &message_ts, &display_phases).await;
     }
+
+    display_phases
 }
 
 /// Sends a single `chat.update` with the current phase display state.

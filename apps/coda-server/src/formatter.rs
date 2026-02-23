@@ -5,7 +5,7 @@
 //! suitable for `chat.postMessage` or `chat.update`.
 
 use std::path::Path;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use coda_core::CleanedWorktree;
 use coda_core::state::{FeatureState, FeatureStatus, PhaseStatus};
@@ -178,6 +178,7 @@ fn truncate_str(s: &str, max_len: usize) -> &str {
 ///     status: PhaseDisplayStatus::Completed,
 ///     duration: Some(Duration::from_secs(30)),
 ///     cost_usd: Some(0.12),
+///     started_at: None,
 /// };
 /// assert_eq!(phase.name, "analyze-repo");
 /// ```
@@ -191,6 +192,8 @@ pub struct InitPhaseDisplay {
     pub duration: Option<Duration>,
     /// Cost in USD if completed.
     pub cost_usd: Option<f64>,
+    /// When the phase started executing (for live elapsed display).
+    pub started_at: Option<Instant>,
 }
 
 /// Display state for a single run phase in the progress message.
@@ -263,12 +266,14 @@ pub enum PhaseDisplayStatus {
 ///         status: PhaseDisplayStatus::Completed,
 ///         duration: Some(Duration::from_secs(30)),
 ///         cost_usd: Some(0.12),
+///         started_at: None,
 ///     },
 ///     InitPhaseDisplay {
 ///         name: "setup-project".to_string(),
 ///         status: PhaseDisplayStatus::Running,
 ///         duration: None,
 ///         cost_usd: None,
+///         started_at: None,
 ///     },
 /// ];
 /// let blocks = formatter::init_progress(&phases);
@@ -276,30 +281,86 @@ pub enum PhaseDisplayStatus {
 /// ```
 pub fn init_progress(phases: &[InitPhaseDisplay]) -> Vec<serde_json::Value> {
     let mut blocks = vec![header("CODA Init")];
+    blocks.push(section(&format_init_phase_lines(phases)));
+    blocks
+}
+
+/// Builds a Block Kit success message for a completed init operation.
+///
+/// Shows `"CODA Init \u{2705}"` header with all phase metrics and a
+/// context line summarising total duration and cost.
+pub fn init_success(phases: &[InitPhaseDisplay]) -> Vec<serde_json::Value> {
+    let mut blocks = vec![header("CODA Init \u{2705}")];
+    blocks.push(section(&format_init_phase_lines(phases)));
+
+    let total_duration: Duration = phases.iter().filter_map(|p| p.duration).sum();
+    let total_cost: f64 = phases.iter().filter_map(|p| p.cost_usd).sum();
+    blocks.push(context(&format!(
+        "Completed in {} \u{00b7} ${total_cost:.2}",
+        format_duration(total_duration.as_secs()),
+    )));
+
+    blocks
+}
+
+/// Builds a Block Kit failure message for a failed init operation.
+///
+/// Preserves completed phase metrics and appends a truncated error
+/// summary so the user can see both progress and the failure reason.
+pub fn init_failure(phases: &[InitPhaseDisplay], error: &str) -> Vec<serde_json::Value> {
+    let mut blocks = vec![header("CODA Init \u{274c}")];
+    blocks.push(section(&format_init_phase_lines(phases)));
+
+    let error_preview = truncate_str(error, 300);
+    blocks.push(section(&format!(":warning: {error_preview}")));
+
+    blocks
+}
+
+/// Formats init phase lines for reuse across progress/success/failure.
+fn format_init_phase_lines(phases: &[InitPhaseDisplay]) -> String {
+    if phases.is_empty() {
+        return "Starting\u{2026}".to_string();
+    }
 
     let mut lines = Vec::with_capacity(phases.len());
     for phase in phases {
         let icon = display_status_icon(phase.status);
         let mut line = format!("{icon} `{}`", phase.name);
 
-        if let Some(duration) = phase.duration {
-            let dur_str = format_duration(duration.as_secs());
-            line.push_str(&format!(" \u{2014} {dur_str}"));
-        }
-        if let Some(cost) = phase.cost_usd {
-            line.push_str(&format!(" \u{00b7} ${cost:.2}"));
+        match phase.status {
+            PhaseDisplayStatus::Running => {
+                if let Some(started) = phase.started_at {
+                    let elapsed = started.elapsed().as_secs();
+                    line.push_str(&format!(" \u{2014} {}", format_duration(elapsed),));
+                }
+            }
+            PhaseDisplayStatus::Completed => {
+                if let Some(duration) = phase.duration {
+                    line.push_str(&format!(
+                        " \u{2014} {}",
+                        format_duration(duration.as_secs()),
+                    ));
+                }
+                if let Some(cost) = phase.cost_usd {
+                    line.push_str(&format!(" \u{00b7} ${cost:.2}"));
+                }
+            }
+            PhaseDisplayStatus::Failed => {
+                if let Some(duration) = phase.duration {
+                    line.push_str(&format!(
+                        " \u{2014} failed after {}",
+                        format_duration(duration.as_secs()),
+                    ));
+                }
+            }
+            PhaseDisplayStatus::Pending => {}
         }
 
         lines.push(line);
     }
 
-    let text = if lines.is_empty() {
-        "Starting\u{2026}".to_string()
-    } else {
-        lines.join("\n")
-    };
-    blocks.push(section(&text));
-    blocks
+    lines.join("\n")
 }
 
 /// Builds a Block Kit progress message for a run operation.
@@ -1140,12 +1201,14 @@ mod tests {
                 status: PhaseDisplayStatus::Pending,
                 duration: None,
                 cost_usd: None,
+                started_at: None,
             },
             InitPhaseDisplay {
                 name: "setup-project".to_string(),
                 status: PhaseDisplayStatus::Pending,
                 duration: None,
                 cost_usd: None,
+                started_at: None,
             },
         ];
         let blocks = init_progress(&phases);
@@ -1166,12 +1229,14 @@ mod tests {
                 status: PhaseDisplayStatus::Completed,
                 duration: Some(Duration::from_secs(45)),
                 cost_usd: Some(0.15),
+                started_at: None,
             },
             InitPhaseDisplay {
                 name: "setup-project".to_string(),
                 status: PhaseDisplayStatus::Running,
                 duration: None,
                 cost_usd: None,
+                started_at: Some(Instant::now()),
             },
         ];
         let blocks = init_progress(&phases);
@@ -1190,11 +1255,60 @@ mod tests {
             status: PhaseDisplayStatus::Failed,
             duration: Some(Duration::from_secs(10)),
             cost_usd: None,
+            started_at: None,
         }];
         let blocks = init_progress(&phases);
         let text = blocks[1]["text"]["text"].as_str().unwrap_or("");
         assert!(text.contains(":x:"));
-        assert!(text.contains("10s"));
+        assert!(text.contains("failed after 10s"));
+    }
+
+    #[test]
+    fn test_should_build_init_success_with_totals() {
+        let phases = vec![
+            InitPhaseDisplay {
+                name: "analyze-repo".to_string(),
+                status: PhaseDisplayStatus::Completed,
+                duration: Some(Duration::from_secs(17)),
+                cost_usd: Some(0.06),
+                started_at: None,
+            },
+            InitPhaseDisplay {
+                name: "setup-project".to_string(),
+                status: PhaseDisplayStatus::Completed,
+                duration: Some(Duration::from_secs(40)),
+                cost_usd: Some(0.12),
+                started_at: None,
+            },
+        ];
+        let blocks = init_success(&phases);
+
+        let header_text = blocks[0]["text"]["text"].as_str().unwrap_or("");
+        assert!(header_text.contains("\u{2705}"));
+        let section_text = blocks[1]["text"]["text"].as_str().unwrap_or("");
+        assert!(section_text.contains("17s"));
+        assert!(section_text.contains("$0.12"));
+        // context block with totals
+        let ctx = blocks[2]["elements"][0]["text"].as_str().unwrap_or("");
+        assert!(ctx.contains("57s"));
+        assert!(ctx.contains("$0.18"));
+    }
+
+    #[test]
+    fn test_should_build_init_failure_with_error() {
+        let phases = vec![InitPhaseDisplay {
+            name: "analyze-repo".to_string(),
+            status: PhaseDisplayStatus::Failed,
+            duration: Some(Duration::from_secs(3)),
+            cost_usd: Some(0.0),
+            started_at: None,
+        }];
+        let blocks = init_failure(&phases, "agent error: Please run /login");
+
+        let header_text = blocks[0]["text"]["text"].as_str().unwrap_or("");
+        assert!(header_text.contains("\u{274c}"));
+        let error_text = blocks[2]["text"]["text"].as_str().unwrap_or("");
+        assert!(error_text.contains("Please run /login"));
     }
 
     #[test]
