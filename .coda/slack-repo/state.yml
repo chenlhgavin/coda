@@ -2,7 +2,7 @@ feature:
   slug: slack-repo
   created_at: 2026-02-23T05:45:01.491526162Z
   updated_at: 2026-02-23T05:45:01.491526162Z
-status: planned
+status: in_progress
 current_phase: 0
 git:
   worktree_path: .trees/slack-repo
@@ -11,7 +11,8 @@ git:
 phases:
 - name: stable-clone-path
   kind: dev
-  status: pending
+  status: running
+  started_at: 2026-02-23T05:45:37.837140885Z
   turns: 0
   cost_usd: 0.0
   cost:

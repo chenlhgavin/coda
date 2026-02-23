@@ -9,7 +9,6 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use chrono::Local;
 use serde::Deserialize;
 use tracing::{info, warn};
 
@@ -264,16 +263,31 @@ async fn list_github_repos() -> Result<Vec<RepoInfo>, String> {
     Ok(repos)
 }
 
-/// Builds the clone path: `<workspace>/<repo>-<YYYYMMDD-HHMMSS>`.
+/// Builds a stable, deterministic clone path from a workspace and repo name.
 ///
-/// Extracts the repo name from `owner/repo` format and appends a
-/// timestamp to ensure unique clone directories.
+/// For `nameWithOwner` format (`owner/repo`), produces `<workspace>/<owner>/<repo>`.
+/// For plain names without a `/`, produces `<workspace>/<name>`.
+///
+/// This path is reused across repeated selections of the same repository,
+/// eliminating directory clutter from timestamped paths.
+///
+/// # Examples
+///
+/// ```
+/// # use std::path::Path;
+/// // owner/repo format
+/// # // build_clone_path is private, so this is illustrative:
+/// // build_clone_path(Path::new("/ws"), "myorg/my-repo")
+/// //   => PathBuf::from("/ws/myorg/my-repo")
+///
+/// // plain name
+/// // build_clone_path(Path::new("/ws"), "my-repo")
+/// //   => PathBuf::from("/ws/my-repo")
+/// ```
 fn build_clone_path(workspace: &Path, repo_name: &str) -> PathBuf {
-    let short_name = repo_name
-        .rsplit_once('/')
-        .map_or(repo_name, |(_, repo)| repo);
-    let timestamp = Local::now().format("%Y%m%d-%H%M%S");
-    workspace.join(format!("{short_name}-{timestamp}"))
+    // For "owner/repo", join both segments to get <workspace>/<owner>/<repo>.
+    // For plain names, join as a single segment.
+    workspace.join(repo_name)
 }
 
 /// Clones a GitHub repository using the `gh` CLI.
@@ -377,37 +391,24 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_should_build_clone_path_with_timestamp() {
+    fn test_should_build_clone_path_with_owner() {
         let workspace = Path::new("/home/user/workspace");
         let path = build_clone_path(workspace, "org/my-repo");
-        let name = path.file_name().unwrap().to_str().unwrap();
-        assert!(name.starts_with("my-repo-"), "got: {name}");
-        // Verify timestamp format: YYYYMMDD-HHMMSS (15 chars)
-        let suffix = &name["my-repo-".len()..];
-        assert_eq!(suffix.len(), 15, "timestamp should be YYYYMMDD-HHMMSS");
-        assert_eq!(path.parent().unwrap(), Path::new("/home/user/workspace"));
+        assert_eq!(path, PathBuf::from("/home/user/workspace/org/my-repo"));
     }
 
     #[test]
-    fn test_should_build_clone_path_without_owner_prefix() {
+    fn test_should_build_clone_path_with_nested_owner() {
         let workspace = Path::new("/ws");
         let path = build_clone_path(workspace, "deep-org/sub-repo");
-        let name = path.file_name().unwrap().to_str().unwrap();
-        assert!(
-            name.starts_with("sub-repo-"),
-            "should strip owner prefix, got: {name}"
-        );
+        assert_eq!(path, PathBuf::from("/ws/deep-org/sub-repo"));
     }
 
     #[test]
     fn test_should_build_clone_path_plain_name() {
         let workspace = Path::new("/ws");
         let path = build_clone_path(workspace, "my-repo");
-        let name = path.file_name().unwrap().to_str().unwrap();
-        assert!(
-            name.starts_with("my-repo-"),
-            "should handle plain repo names, got: {name}"
-        );
+        assert_eq!(path, PathBuf::from("/ws/my-repo"));
     }
 
     #[test]
