@@ -204,6 +204,34 @@ Use `--dry-run` to preview what would be removed, or `--yes` / `-y` to skip the 
 - No consecutive hyphens
 - Maximum 64 characters
 
+## Slack Server
+
+CODA also ships a Slack-integrated server (`coda-server`) that provides team workflows via Slack slash commands. Configure it in `~/.coda-server/config.yml` with your Slack app and bot tokens.
+
+### Slack Commands
+
+| Command | Description |
+|---------|-------------|
+| `/coda repos` | List GitHub repos and bind one to the channel |
+| `/coda init` | Initialize the bound repo as a CODA project |
+| `/coda plan <slug>` | Start interactive planning in a Slack thread |
+| `/coda run <slug>` | Execute feature development with live progress |
+| `/coda switch <branch>` | Switch the bound repo's branch |
+| `/coda list` | List all features in the bound repo |
+| `/coda status <slug>` | Show detailed feature status |
+| `/coda clean` | Clean up merged worktrees |
+
+### Repository Management
+
+When a user selects a repository via `/coda repos`, the server clones it to a stable path under the configured workspace directory:
+
+- **Path format**: `<workspace>/<owner>/<repo>` (e.g., `/home/user/workspace/myorg/my-repo`)
+- **Reuse**: If the directory already exists with a `.git` folder, the server updates the existing clone instead of creating a new one
+- **Auto-update**: On every bind, the server runs `git fetch` → detects the default branch → `git checkout --force` → `git pull` to ensure the code is current before downstream commands
+- **Locking**: Concurrent clone/update operations on the same path are serialized via `RepoLocks`
+
+This eliminates workspace clutter from repeated selections and ensures `coda init` always analyzes up-to-date code.
+
 ## Configuration
 
 Location: `.coda/config.yml` (created by `coda init`).
@@ -249,22 +277,27 @@ version: 1
 Each feature runs in an isolated git worktree. State is tracked in `state.yml` for crash recovery — if a run is interrupted, re-running `coda run` resumes from the last completed phase. Cost is tracked per phase and displayed in real time.
 
 ```
-┌─────────────────────────────────────────────────────┐
-│                   coda-cli (app)                    │
-│  Ratatui TUI · Clap CLI · Line Editor · App Driver  │
-└──────────────────────┬──────────────────────────────┘
-                       │
-┌──────────────────────▼──────────────────────────────┐
-│                  coda-core (lib)                    │
-│  Engine · Planner · Runner · Reviewer               │
-│  FeatureScanner · GitOps · GhOps (traits)           │
-└──────────┬───────────────────────┬──────────────────┘
-           │                       │
-┌──────────▼──────────┐  ┌─────────▼──────────────────┐
-│    coda-pm (lib)    │  │  claude-agent-sdk-rs        │
-│  Prompt Manager     │  │  Claude AI client           │
-│  MiniJinja templates│  │  Streaming, hooks, MCP      │
-└─────────────────────┘  └────────────────────────────┘
+┌─────────────────────────────────────────────────────────┐
+│                    coda-cli (app)                        │
+│  Ratatui TUI · Clap CLI · Line Editor · App Driver      │
+└───────────────────────┬─────────────────────────────────┘
+                        │
+┌───────────────────────▼─────────────────────────────────┐
+│                   coda-server (app)                      │
+│  Slack Integration · Repo Clone/Update · RepoLocks      │
+└───────────────────────┬─────────────────────────────────┘
+                        │
+┌───────────────────────▼─────────────────────────────────┐
+│                   coda-core (lib)                        │
+│  Engine · Planner · Runner · Reviewer                   │
+│  FeatureScanner · GitOps · GhOps (traits)               │
+└──────────┬────────────────────────┬─────────────────────┘
+           │                        │
+┌──────────▼───────────┐  ┌────────▼─────────────────────┐
+│    coda-pm (lib)     │  │  claude-agent-sdk-rs          │
+│  Prompt Manager      │  │  Claude AI client             │
+│  MiniJinja templates │  │  Streaming, hooks, MCP        │
+└──────────────────────┘  └──────────────────────────────┘
 ```
 
 See `.coda.md` for the full repository overview.
@@ -288,6 +321,7 @@ cargo audit                              # Security audit
 | Path | Purpose |
 |------|---------|
 | `apps/coda-cli` | CLI binary — TUI, argument parsing, app logic |
+| `apps/coda-server` | Server binary — Slack integration, repo management, command dispatch |
 | `crates/coda-core` | Core library — engine, planner, runner, reviewer, state |
 | `crates/coda-pm` | Prompt manager — Jinja2 template loading and rendering |
 | `vendors/claude-agent-sdk-rs` | Vendored Claude Agent SDK |
