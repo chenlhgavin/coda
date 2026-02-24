@@ -19,6 +19,23 @@ pub enum CoreError {
     #[error("Agent error: {0}")]
     AgentError(String),
 
+    /// The agent was idle for too long with no response, even after
+    /// reconnection attempts.
+    ///
+    /// Distinct from [`AgentError`](Self::AgentError) so callers can
+    /// match on this variant for retry logic at the phase level.
+    #[error(
+        "Agent idle for {total_idle_secs}s with no response ({retries_exhausted} retries \
+         exhausted) — possible API issue. Check network and API status. \
+         Adjust `agent.idle_timeout_secs` / `agent.idle_retries` in config."
+    )]
+    IdleTimeout {
+        /// Total seconds of silence before giving up.
+        total_idle_secs: u64,
+        /// Number of reconnection retries that were exhausted.
+        retries_exhausted: u32,
+    },
+
     /// The session budget has been exhausted.
     ///
     /// Emitted when `total_cost_usd` reaches or exceeds the configured

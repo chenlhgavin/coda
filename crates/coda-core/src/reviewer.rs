@@ -21,7 +21,7 @@ pub use crate::runner::ReviewSummary;
 ///     summary: ReviewSummary {
 ///         rounds: 2,
 ///         issues_found: 3,
-///         issues_resolved: 3,
+///         issues_fix_attempted: 3,
 ///     },
 ///     all_resolved: true,
 /// };

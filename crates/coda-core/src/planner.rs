@@ -211,6 +211,10 @@ impl PlanSession {
     /// wrapped in a timeout (from `agent.idle_timeout_secs`) with retry
     /// logic (from `agent.idle_retries`) to prevent indefinite hangs when
     /// the Claude subprocess or API becomes unresponsive.
+    ///
+    /// On idle timeout, performs a full subprocess reconnection: disconnects
+    /// the stalled subprocess, spawns a fresh one, and re-sends the message.
+    /// Partial response data from the stalled session is discarded.
     async fn send_inner(
         &mut self,
         message: &str,
@@ -230,7 +234,8 @@ impl PlanSession {
         let mut consecutive_timeouts: u32 = 0;
 
         let mut response = String::new();
-        {
+
+        'outer: loop {
             let mut stream = self.client.receive_response();
             loop {
                 let result = match tokio::time::timeout(idle_timeout, stream.next()).await {
@@ -238,7 +243,7 @@ impl PlanSession {
                         consecutive_timeouts = 0;
                         result
                     }
-                    Ok(None) => break,
+                    Ok(None) => break 'outer,
                     Err(_) => {
                         consecutive_timeouts += 1;
                         if consecutive_timeouts <= max_idle_retries {
@@ -246,9 +251,22 @@ impl PlanSession {
                                 idle_secs = self.config.agent.idle_timeout_secs,
                                 attempt = consecutive_timeouts,
                                 max_retries = max_idle_retries,
-                                "Plan agent idle timeout — retrying",
+                                "Plan agent idle timeout — reconnecting subprocess",
                             );
-                            continue;
+
+                            // Drop stream before reconnecting (releases borrow on self.client)
+                            drop(stream);
+
+                            self.plan_reconnect_and_resend(message, consecutive_timeouts)
+                                .await?;
+
+                            // Reset accumulator — partial data from stalled session is unreliable
+                            response.clear();
+                            if let Some(ref tx) = update_tx {
+                                let _ = tx.send(PlanStreamUpdate::Text(String::new()));
+                            }
+
+                            continue 'outer;
                         }
                         let total_secs =
                             self.config.agent.idle_timeout_secs * u64::from(max_idle_retries + 1);
@@ -256,13 +274,10 @@ impl PlanSession {
                             total_idle_secs = total_secs,
                             "Plan agent idle timeout — all retries exhausted",
                         );
-                        return Err(CoreError::AgentError(format!(
-                            "Plan agent idle for {total_secs}s with no response \
-                                 ({max_idle_retries} retries exhausted) — possible API issue. \
-                                 Check network and API status. \
-                                 Adjust `agent.idle_timeout_secs` / `agent.idle_retries` \
-                                 in config.",
-                        )));
+                        return Err(CoreError::IdleTimeout {
+                            total_idle_secs: total_secs,
+                            retries_exhausted: max_idle_retries,
+                        });
                     }
                 };
                 let msg = result.map_err(|e| CoreError::AgentError(e.to_string()))?;
@@ -293,7 +308,7 @@ impl PlanSession {
                             self.planning_cost_usd += cost;
                         }
                         self.planning_turns += result_msg.num_turns;
-                        break;
+                        break 'outer;
                     }
                     _ => {}
                 }
@@ -301,6 +316,50 @@ impl PlanSession {
         }
 
         Ok(response)
+    }
+
+    /// Reconnects the subprocess and re-sends the message after an idle timeout.
+    ///
+    /// Disconnects the stalled subprocess, waits with exponential backoff,
+    /// reconnects, and re-sends the message.
+    ///
+    /// # Errors
+    ///
+    /// Returns `CoreError::AgentError` if disconnect, connect, or query fails.
+    async fn plan_reconnect_and_resend(
+        &mut self,
+        message: &str,
+        attempt: u32,
+    ) -> Result<(), CoreError> {
+        // Disconnect old subprocess
+        let _ = self.client.disconnect().await;
+        self.connected = false;
+
+        // Exponential backoff: 5s, 15s, 45s, ...
+        let backoff_secs = 5u64 * 3u64.saturating_pow(attempt.saturating_sub(1));
+        info!(
+            backoff_secs,
+            attempt, "Plan session: waiting before reconnecting subprocess",
+        );
+        tokio::time::sleep(Duration::from_secs(backoff_secs)).await;
+
+        // Reconnect
+        self.client
+            .connect()
+            .await
+            .map_err(|e| CoreError::AgentError(format!("Plan reconnect failed: {e}")))?;
+        self.connected = true;
+
+        // Re-send message
+        self.client.query(message).await.map_err(|e| {
+            CoreError::AgentError(format!("Plan re-query after reconnect failed: {e}"))
+        })?;
+
+        info!(
+            attempt,
+            "Plan session: subprocess reconnected and message re-sent"
+        );
+        Ok(())
     }
 
     /// Formalizes the approved design and generates a verification plan.

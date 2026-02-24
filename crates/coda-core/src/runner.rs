@@ -181,6 +181,18 @@ pub enum RunEvent {
         /// How many seconds of silence elapsed.
         idle_secs: u64,
     },
+    /// Emitted when the agent subprocess is being reconnected after an
+    /// idle timeout.
+    ///
+    /// The old subprocess is killed, a new one is spawned, and the
+    /// prompt is re-sent. This is a recovery mechanism — partial data
+    /// from the stalled session is discarded.
+    Reconnecting {
+        /// Which reconnection attempt this is (1-based).
+        attempt: u32,
+        /// Maximum reconnection attempts before aborting.
+        max_retries: u32,
+    },
 }
 
 /// Progress tracking for a multi-phase feature development run.
@@ -211,8 +223,8 @@ pub struct ReviewSummary {
     pub rounds: u32,
     /// Total issues found across all rounds.
     pub issues_found: u32,
-    /// Total issues resolved.
-    pub issues_resolved: u32,
+    /// Total issues for which a fix was attempted (not necessarily resolved).
+    pub issues_fix_attempted: u32,
 }
 
 /// Summary of verification results.
@@ -862,6 +874,11 @@ impl Runner {
             });
         }
 
+        // Circuit breaker: abort if consecutive phases complete with
+        // zero cost and minimal turns, indicating a non-functional session.
+        let mut consecutive_zero_cost_phases: u32 = 0;
+        const MAX_CONSECUTIVE_ZERO_COST: u32 = 2;
+
         for phase_idx in start_phase..total_phases {
             let phase_name = self.state.phases[phase_idx].name.clone();
             let phase_kind = self.state.phases[phase_idx].kind.clone();
@@ -909,6 +926,31 @@ impl Runner {
                         turns: task_result.turns,
                         cost_usd: task_result.cost_usd,
                     });
+
+                    // Circuit breaker: track consecutive zero-cost phases.
+                    if task_result.cost_usd == 0.0 && task_result.turns <= 1 {
+                        consecutive_zero_cost_phases += 1;
+                        if consecutive_zero_cost_phases >= MAX_CONSECUTIVE_ZERO_COST {
+                            error!(
+                                consecutive = consecutive_zero_cost_phases,
+                                "Circuit breaker triggered: {} consecutive phases \
+                                 completed with zero cost and minimal turns",
+                                consecutive_zero_cost_phases,
+                            );
+                            self.state.phases[phase_idx].status = PhaseStatus::Failed;
+                            self.state.status = FeatureStatus::Failed;
+                            self.save_state()?;
+                            return Err(CoreError::AgentError(format!(
+                                "Circuit breaker: {consecutive_zero_cost_phases} \
+                                 consecutive phases completed with zero cost and \
+                                 ≤1 turn. The agent session appears non-functional \
+                                 (possible API rate-limit or authentication failure).",
+                            )));
+                        }
+                    } else {
+                        consecutive_zero_cost_phases = 0;
+                    }
+
                     results.push(task_result);
 
                     // Advance current_phase as a secondary checkpoint
@@ -1056,6 +1098,27 @@ impl Runner {
         }
         acc.record(&resp, incremental);
 
+        // Validate that the agent did meaningful work. A dev phase that
+        // completes with zero cost and no tool usage indicates the agent
+        // returned a text-only response without modifying any files.
+        if incremental.cost_usd == 0.0
+            && incremental.input_tokens == 0
+            && incremental.output_tokens == 0
+            && resp.tool_output.is_empty()
+        {
+            let preview = resp.text.chars().take(200).collect::<String>();
+            error!(
+                phase = %phase_name,
+                text_preview = %preview,
+                "Dev phase produced no meaningful work (zero cost, no tool usage)",
+            );
+            return Err(CoreError::AgentError(format!(
+                "Dev phase '{phase_name}' produced no meaningful work \
+                 (zero cost, no tool usage). The agent session may be \
+                 non-functional. Response: {preview}",
+            )));
+        }
+
         let outcome = acc.into_outcome(serde_json::json!({}));
         let task_result = TaskResult {
             task: Task::DevPhase {
@@ -1192,7 +1255,7 @@ impl Runner {
             info!(issues = issue_count, "Found issues, asking agent to fix");
             self.ask_claude_to_fix(&issues, issue_count, &mut acc)
                 .await?;
-            self.review_summary.issues_resolved += issue_count;
+            self.review_summary.issues_fix_attempted += issue_count;
         }
 
         self.finalize_review_phase(phase_idx, acc)
@@ -1248,7 +1311,7 @@ impl Runner {
             let formatted = format_issues(&codex_issues);
             self.ask_claude_to_fix(&formatted, issue_count, &mut acc)
                 .await?;
-            self.review_summary.issues_resolved += issue_count;
+            self.review_summary.issues_fix_attempted += issue_count;
         }
 
         self.finalize_review_phase(phase_idx, acc)
@@ -1349,7 +1412,7 @@ impl Runner {
             let formatted = format_issues(&combined);
             self.ask_claude_to_fix(&formatted, issue_count, &mut acc)
                 .await?;
-            self.review_summary.issues_resolved += issue_count;
+            self.review_summary.issues_fix_attempted += issue_count;
         }
 
         self.finalize_review_phase(phase_idx, acc)
@@ -1400,7 +1463,7 @@ impl Runner {
         let outcome = acc.into_outcome(serde_json::json!({
             "rounds": self.review_summary.rounds,
             "issues_found": self.review_summary.issues_found,
-            "issues_resolved": self.review_summary.issues_resolved,
+            "issues_fix_attempted": self.review_summary.issues_fix_attempted,
         }));
         let task_result = TaskResult {
             task: Task::Review {
@@ -1469,6 +1532,17 @@ impl Runner {
             }
 
             if attempt == max_attempts {
+                if self.config.verify.fail_on_max_attempts {
+                    error!(
+                        "Max verification attempts reached with failing checks \
+                         (fail_on_max_attempts=true)",
+                    );
+                    return Err(CoreError::AgentError(
+                        "Verification failed: checks still failing after all retry \
+                         attempts (fail_on_max_attempts is enabled)"
+                            .to_string(),
+                    ));
+                }
                 warn!("Max verification attempts reached, proceeding with failures");
                 break;
             }
@@ -1804,15 +1878,27 @@ impl Runner {
     /// creation that don't need prior context and would otherwise overflow
     /// the prompt size limit after a long run.
     ///
+    /// On idle timeout, performs a full subprocess reconnection: disconnects
+    /// the stalled subprocess, spawns a fresh one, and re-sends the prompt.
+    /// Partial data from the stalled session is discarded. Uses exponential
+    /// backoff between reconnection attempts (5s, 15s, ...).
+    ///
     /// # Errors
     ///
-    /// Returns `CoreError::AgentError` if the agent returns an empty response
-    /// (no text and no tool output), which indicates a broken session.
+    /// Returns `CoreError::IdleTimeout` if all reconnection retries are
+    /// exhausted. Returns `CoreError::AgentError` if the agent returns an
+    /// empty response or an error result.
     async fn send_and_collect(
         &mut self,
         prompt: &str,
         session_id: Option<&str>,
     ) -> Result<AgentResponse, CoreError> {
+        let base_timeout = Duration::from_secs(self.config.agent.idle_timeout_secs);
+        let tool_timeout = Duration::from_secs(self.config.agent.tool_execution_timeout_secs);
+        let max_idle_retries = self.config.agent.idle_retries;
+        let mut consecutive_timeouts: u32 = 0;
+
+        // Initial query
         match session_id {
             Some(id) => self.client.query_with_session(prompt, id).await,
             None => self.client.query(prompt).await,
@@ -1821,57 +1907,84 @@ impl Runner {
 
         let mut resp = AgentResponse::default();
         let mut turn_count: u32 = 0;
-        let idle_timeout = Duration::from_secs(self.config.agent.idle_timeout_secs);
-        let max_idle_retries = self.config.agent.idle_retries;
-        let mut consecutive_timeouts: u32 = 0;
+        let mut in_tool_execution = false;
 
-        {
+        'outer: loop {
             let mut stream = self.client.receive_response();
             loop {
-                let result = match tokio::time::timeout(idle_timeout, stream.next()).await {
+                let timeout = if in_tool_execution {
+                    tool_timeout
+                } else {
+                    base_timeout
+                };
+
+                let result = match tokio::time::timeout(timeout, stream.next()).await {
                     Ok(Some(result)) => {
-                        // Reset counter on any successful message
                         consecutive_timeouts = 0;
                         result
                     }
-                    Ok(None) => break,
+                    Ok(None) => break 'outer,
                     Err(_) => {
                         consecutive_timeouts += 1;
+                        let idle_secs = if in_tool_execution {
+                            self.config.agent.tool_execution_timeout_secs
+                        } else {
+                            self.config.agent.idle_timeout_secs
+                        };
+
                         if consecutive_timeouts <= max_idle_retries {
                             warn!(
-                                idle_secs = self.config.agent.idle_timeout_secs,
+                                idle_secs,
                                 attempt = consecutive_timeouts,
                                 max_retries = max_idle_retries,
                                 turns = turn_count,
-                                "Agent idle timeout — retrying",
+                                in_tool_execution,
+                                "Agent idle timeout — reconnecting subprocess",
                             );
                             self.emit_event(RunEvent::IdleWarning {
                                 attempt: consecutive_timeouts,
                                 max_retries: max_idle_retries,
-                                idle_secs: self.config.agent.idle_timeout_secs,
+                                idle_secs,
                             });
-                            continue;
+
+                            // Drop stream before reconnecting (releases borrow on self.client)
+                            drop(stream);
+
+                            self.reconnect_and_resend(
+                                prompt,
+                                session_id,
+                                consecutive_timeouts,
+                                max_idle_retries,
+                            )
+                            .await?;
+
+                            // Reset accumulator — partial data from stalled session is unreliable
+                            resp = AgentResponse::default();
+                            turn_count = 0;
+                            in_tool_execution = false;
+                            // Reset metrics — new subprocess has fresh cumulative counters
+                            self.metrics = MetricsTracker::default();
+
+                            continue 'outer;
                         }
-                        let total_secs =
-                            self.config.agent.idle_timeout_secs * u64::from(max_idle_retries + 1);
+
+                        let total_secs = idle_secs * u64::from(max_idle_retries + 1);
                         error!(
                             total_idle_secs = total_secs,
                             turns = turn_count,
                             "Agent idle timeout — all retries exhausted",
                         );
-                        return Err(CoreError::AgentError(format!(
-                            "Agent idle for {total_secs}s with no response \
-                             ({} retries exhausted) — possible API issue. \
-                             Check network and API status. \
-                             Adjust `agent.idle_timeout_secs` / `agent.idle_retries` in config.",
-                            max_idle_retries,
-                        )));
+                        return Err(CoreError::IdleTimeout {
+                            total_idle_secs: total_secs,
+                            retries_exhausted: max_idle_retries,
+                        });
                     }
                 };
                 let msg = result.map_err(|e| CoreError::AgentError(e.to_string()))?;
                 match msg {
                     Message::Assistant(assistant) => {
                         turn_count += 1;
+                        in_tool_execution = false;
                         self.emit_event(RunEvent::TurnCompleted {
                             current_turn: turn_count,
                         });
@@ -1881,6 +1994,7 @@ impl Runner {
                                     resp.text.push_str(&text.text);
                                 }
                                 ContentBlock::ToolUse(tu) => {
+                                    in_tool_execution = true;
                                     let summary = summarize_tool_input(&tu.name, &tu.input);
                                     trace!(
                                         tool = %tu.name,
@@ -1893,6 +2007,7 @@ impl Runner {
                                     });
                                 }
                                 ContentBlock::ToolResult(tr) => {
+                                    in_tool_execution = false;
                                     collect_tool_result_text(
                                         tr.content.as_ref(),
                                         &mut resp.tool_output,
@@ -1903,6 +2018,7 @@ impl Runner {
                         }
                     }
                     Message::User(user) => {
+                        in_tool_execution = false;
                         if let Some(blocks) = &user.content {
                             for block in blocks {
                                 if let ContentBlock::ToolResult(tr) = block {
@@ -1923,13 +2039,54 @@ impl Runner {
                     }
                     Message::Result(r) => {
                         resp.result = Some(r);
-                        break;
+                        break 'outer;
                     }
                     _ => {}
                 }
             }
         }
 
+        // 1. Check ResultMessage.is_error flag — the SDK signals API-level
+        //    failures (auth, rate-limit, server errors) through this flag.
+        if let Some(ref result) = resp.result
+            && result.is_error
+        {
+            let detail = resp.text.chars().take(200).collect::<String>();
+            error!(
+                is_error = result.is_error,
+                turns = result.num_turns,
+                text_preview = %detail,
+                "Agent session returned error result",
+            );
+            if let Some(logger) = &mut self.run_logger {
+                logger.log_message(&format!("⚠ AGENT ERROR (is_error=true)\n  text: {detail}",));
+            }
+            return Err(CoreError::AgentError(format!(
+                "Agent session returned error: {detail}",
+            )));
+        }
+
+        // 2. Detect API errors returned as text content. Some API proxies
+        //    surface authentication/rate-limit failures as assistant text
+        //    rather than SDK-level errors. Check for known error patterns
+        //    when the response has no tool usage (no actual work done).
+        if resp.tool_output.is_empty() && contains_api_error_pattern(&resp.text) {
+            let detail = resp.text.chars().take(200).collect::<String>();
+            error!(
+                text_preview = %detail,
+                "Agent response contains API error pattern",
+            );
+            if let Some(logger) = &mut self.run_logger {
+                logger.log_message(&format!(
+                    "⚠ API ERROR detected in response text\n  text: {detail}",
+                ));
+            }
+            return Err(CoreError::AgentError(format!(
+                "API error detected in agent response: {detail}",
+            )));
+        }
+
+        // 3. Detect empty responses (original check).
         if resp.text.is_empty() && resp.tool_output.is_empty() {
             // Check if the empty response is due to budget exhaustion.
             // The SDK enforces the budget via max_budget_usd in options,
@@ -1980,6 +2137,76 @@ impl Runner {
         }
 
         Ok(resp)
+    }
+
+    /// Reconnects the subprocess and re-sends the prompt after an idle timeout.
+    ///
+    /// 1. Saves state (crash safety)
+    /// 2. Emits [`RunEvent::Reconnecting`]
+    /// 3. Disconnects the old subprocess
+    /// 4. Waits with exponential backoff (5s first, 15s second, ...)
+    /// 5. Reconnects with a fresh subprocess
+    /// 6. Re-sends the prompt
+    ///
+    /// The prompt already contains the design spec and resume context, and
+    /// the worktree contains all file changes from completed phases, so the
+    /// new subprocess can discover and continue from the current state.
+    ///
+    /// # Errors
+    ///
+    /// Returns `CoreError::AgentError` if disconnect, connect, or query fails.
+    async fn reconnect_and_resend(
+        &mut self,
+        prompt: &str,
+        session_id: Option<&str>,
+        attempt: u32,
+        max_retries: u32,
+    ) -> Result<(), CoreError> {
+        // Save state for crash safety
+        if let Err(e) = self.save_state() {
+            warn!(error = %e, "Failed to save state before reconnect");
+        }
+
+        self.emit_event(RunEvent::Reconnecting {
+            attempt,
+            max_retries,
+        });
+
+        if let Some(logger) = &mut self.run_logger {
+            logger.log_message(&format!(
+                "⚠ RECONNECTING (attempt {attempt}/{max_retries}) — \
+                 killing stalled subprocess and spawning fresh one",
+            ));
+        }
+
+        // Disconnect old subprocess
+        let _ = self.client.disconnect().await;
+        self.connected = false;
+
+        // Exponential backoff: 5s, 15s, 45s, ...
+        let backoff_secs = 5u64 * 3u64.saturating_pow(attempt.saturating_sub(1));
+        info!(
+            backoff_secs,
+            attempt, "Waiting before reconnecting subprocess",
+        );
+        tokio::time::sleep(Duration::from_secs(backoff_secs)).await;
+
+        // Reconnect
+        self.client
+            .connect()
+            .await
+            .map_err(|e| CoreError::AgentError(format!("Reconnect failed: {e}")))?;
+        self.connected = true;
+
+        // Re-send prompt
+        match session_id {
+            Some(id) => self.client.query_with_session(prompt, id).await,
+            None => self.client.query(prompt).await,
+        }
+        .map_err(|e| CoreError::AgentError(format!("Re-query after reconnect failed: {e}")))?;
+
+        info!(attempt, "Subprocess reconnected and prompt re-sent");
+        Ok(())
     }
 
     /// Marks a phase as running and saves state.
@@ -2125,11 +2352,16 @@ impl Runner {
             }
             match phase.name.as_str() {
                 "review" => {
+                    // Support both current key and legacy "issues_resolved"
+                    // from state files written before the rename.
+                    let fix_attempted = phase.details["issues_fix_attempted"]
+                        .as_u64()
+                        .or_else(|| phase.details["issues_resolved"].as_u64())
+                        .unwrap_or(0) as u32;
                     self.review_summary = ReviewSummary {
                         rounds: phase.details["rounds"].as_u64().unwrap_or(0) as u32,
                         issues_found: phase.details["issues_found"].as_u64().unwrap_or(0) as u32,
-                        issues_resolved: phase.details["issues_resolved"].as_u64().unwrap_or(0)
-                            as u32,
+                        issues_fix_attempted: fix_attempted,
                     };
                 }
                 "verify" => {
@@ -2317,6 +2549,34 @@ fn build_doc_fix_prompt(missing: &[&str]) -> String {
          Refer to the instructions from the previous prompt.",
         missing.join(", "),
     )
+}
+
+/// Known error patterns that API proxies may embed in assistant text
+/// instead of signaling through the SDK error channel.
+///
+/// These patterns indicate that the agent session is non-functional and
+/// any response text is an error message, not useful work output.
+const API_ERROR_PATTERNS: &[&str] = &[
+    "Failed to authenticate",
+    "API Error: 401",
+    "API Error: 403",
+    "API Error: 429",
+    "API Error: 500",
+    "API Error: 502",
+    "API Error: 503",
+    "rate limit",
+    "quota exceeded",
+];
+
+/// Returns `true` if the response text contains a known API error pattern.
+///
+/// Used to detect situations where the API proxy returns authentication
+/// or rate-limiting errors as assistant text rather than SDK-level errors.
+fn contains_api_error_pattern(text: &str) -> bool {
+    let lower = text.to_lowercase();
+    API_ERROR_PATTERNS
+        .iter()
+        .any(|pattern| lower.contains(&pattern.to_lowercase()))
 }
 
 #[cfg(test)]
@@ -2595,5 +2855,51 @@ mod tests {
     #[test]
     fn test_should_handle_exact_length_truncation() {
         assert_eq!(truncate_str("hello", 5), "hello");
+    }
+
+    #[test]
+    fn test_should_detect_api_error_403_in_text() {
+        let text =
+            "I'll start reading the files. Failed to authenticate. API Error: 403 rate limited";
+        assert!(contains_api_error_pattern(text));
+    }
+
+    #[test]
+    fn test_should_detect_rate_limit_in_text() {
+        let text = "The API has hit a rate limit, please try again later.";
+        assert!(contains_api_error_pattern(text));
+    }
+
+    #[test]
+    fn test_should_detect_auth_failure_in_text() {
+        let text = "Failed to authenticate. Please check your API key.";
+        assert!(contains_api_error_pattern(text));
+    }
+
+    #[test]
+    fn test_should_detect_api_error_429_in_text() {
+        let text = "API Error: 429 Too Many Requests";
+        assert!(contains_api_error_pattern(text));
+    }
+
+    #[test]
+    fn test_should_not_flag_normal_response_text() {
+        let text = "I've updated the error handling in the authentication module. \
+                    The code now properly validates API responses.";
+        assert!(!contains_api_error_pattern(text));
+    }
+
+    #[test]
+    fn test_should_not_flag_empty_text() {
+        assert!(!contains_api_error_pattern(""));
+    }
+
+    #[test]
+    fn test_should_detect_case_insensitive_patterns() {
+        assert!(contains_api_error_pattern("FAILED TO AUTHENTICATE"));
+        assert!(contains_api_error_pattern("Rate Limit exceeded"));
+        assert!(contains_api_error_pattern(
+            "Quota Exceeded for this account"
+        ));
     }
 }

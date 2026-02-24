@@ -634,6 +634,7 @@ async fn consume_run_events(
                         }
                         true
                     }
+                    RunEvent::Reconnecting { .. } => true,
                     RunEvent::RunFinished { .. } => true,
                     RunEvent::TurnCompleted { current_turn } => {
                         // Update turn count on the currently running phase

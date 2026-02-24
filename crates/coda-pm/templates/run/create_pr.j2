@@ -26,7 +26,7 @@ You are creating a pull request for a completed feature using the GitHub CLI (`g
 ### Review Summary
 - Rounds: {{ review_summary.rounds }}
 - Issues found: {{ review_summary.issues_found }}
-- Issues resolved: {{ review_summary.issues_resolved }}
+- Issues resolved: {{ review_summary.issues_fix_attempted }}
 
 ### Verification Summary
 - Checks passed: {{ verification_summary.checks_passed }}/{{ verification_summary.checks_total }}
@@ -117,7 +117,7 @@ See [\`.coda/{{ state.feature.slug }}/specs/design.md\`](.coda/{{ state.feature.
 {% endfor %}
 - [ ] Functional verification incomplete — manual review required
 {% endif %}
-- [x] Code review completed ({{ review_summary.rounds }} round(s), {{ review_summary.issues_found }} issue(s) found and resolved)
+- [x] Code review completed ({{ review_summary.rounds }} round(s), {{ review_summary.issues_found }} issue(s) found, {{ review_summary.issues_fix_attempted }} fix(es) attempted)
 
 ## Test Plan
 
@@ -141,7 +141,7 @@ See [\`.coda/{{ state.feature.slug }}/specs/design.md\`](.coda/{{ state.feature.
 | Total cost | \${{ state.total.cost_usd }} |
 | Duration | {{ state.total.duration_secs }}s |
 | Review rounds | {{ review_summary.rounds }} |
-| Issues found/resolved | {{ review_summary.issues_found }}/{{ review_summary.issues_resolved }} |
+| Issues found/fix attempted | {{ review_summary.issues_found }}/{{ review_summary.issues_fix_attempted }} |
 | Checks passed | {{ verification_summary.checks_passed }}/{{ verification_summary.checks_total }} |
 
 ---

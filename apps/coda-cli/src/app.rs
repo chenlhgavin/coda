@@ -720,6 +720,14 @@ impl App {
                             "  [warn] Agent idle for {idle_secs}s — retry {attempt}/{max_retries}",
                         );
                     }
+                    RunEvent::Reconnecting {
+                        attempt,
+                        max_retries,
+                    } => {
+                        println!(
+                            "  [warn] Agent unresponsive — reconnecting (attempt {attempt}/{max_retries})",
+                        );
+                    }
                     _ => {}
                 }
             }

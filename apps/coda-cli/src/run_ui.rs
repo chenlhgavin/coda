@@ -458,6 +458,19 @@ impl RunUi {
                     self.scroll_offset = self.max_scroll_offset();
                 }
             }
+            RunEvent::Reconnecting {
+                attempt,
+                max_retries,
+            } => {
+                tui_widgets::append_tool_activity(
+                    &mut self.content_lines,
+                    "[warn]",
+                    &format!("Agent unresponsive — reconnecting (attempt {attempt}/{max_retries})",),
+                );
+                if self.auto_scroll {
+                    self.scroll_offset = self.max_scroll_offset();
+                }
+            }
             // Future variants added to the non_exhaustive enum
             _ => {}
         }

@@ -42,6 +42,9 @@ pub struct CodaConfig {
 
     /// Code review configuration.
     pub review: ReviewConfig,
+
+    /// Verification phase configuration.
+    pub verify: VerifyConfig,
 }
 
 /// Agent configuration controlling model and budget limits.
@@ -65,8 +68,16 @@ pub struct AgentConfig {
     /// unresponsive.
     pub idle_timeout_secs: u64,
 
+    /// Maximum seconds of silence during tool execution (e.g., `cargo build`,
+    /// `cargo test`) before counting as one idle timeout. Tool executions
+    /// can produce long legitimate silence periods, so this is typically
+    /// longer than `idle_timeout_secs`.
+    pub tool_execution_timeout_secs: u64,
+
     /// How many consecutive idle timeouts to tolerate before aborting.
-    /// Total maximum silence = `idle_timeout_secs * (idle_retries + 1)`.
+    /// Each timeout triggers a full subprocess reconnection attempt.
+    /// Total maximum silence ≈ `idle_timeout_secs * (idle_retries + 1)`
+    /// (plus backoff delays between reconnection attempts).
     pub idle_retries: u32,
 }
 
@@ -130,6 +141,17 @@ impl std::fmt::Display for ReviewEngine {
     }
 }
 
+/// Verification phase configuration.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct VerifyConfig {
+    /// When `true`, the verify phase returns an error if any check still
+    /// fails after all retry attempts, causing the run to abort. When
+    /// `false` (default), a warning is logged and the run continues with
+    /// a draft PR.
+    pub fail_on_max_attempts: bool,
+}
+
 /// Code review configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -165,6 +187,7 @@ impl Default for CodaConfig {
             prompts: PromptsConfig::default(),
             git: GitConfig::default(),
             review: ReviewConfig::default(),
+            verify: VerifyConfig::default(),
         }
     }
 }
@@ -177,6 +200,7 @@ impl Default for AgentConfig {
             max_retries: 3,
             max_turns: 100,
             idle_timeout_secs: 300,
+            tool_execution_timeout_secs: 600,
             idle_retries: 2,
         }
     }
