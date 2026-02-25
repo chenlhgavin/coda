@@ -19,6 +19,12 @@ pub const CLEAN_CONFIRM_ACTION: &str = "coda_clean_confirm";
 /// and the interaction handler for routing.
 pub const REPO_SELECT_ACTION: &str = "coda_repo_select";
 
+/// Action ID for the config key select dropdown.
+pub const CONFIG_KEY_SELECT_ACTION: &str = "coda_config_key_select";
+
+/// Action ID for the config value select dropdown.
+pub const CONFIG_VALUE_SELECT_ACTION: &str = "coda_config_value_select";
+
 /// Serializable representation of a clean candidate for button payloads.
 ///
 /// Encoded as JSON in the clean confirm button's `value` field and
@@ -1104,6 +1110,109 @@ pub(crate) fn format_duration(secs: u64) -> String {
     format!("{hours}h{mins}m")
 }
 
+// ── Config interactive select ──────────────────────────────────────
+
+/// Builds a config key selection dropdown.
+///
+/// Shows all settable keys with their current values as descriptions.
+/// The selected key is sent as the option value and routed via
+/// [`CONFIG_KEY_SELECT_ACTION`].
+pub fn config_key_select(keys: &[coda_core::ConfigKeyDescriptor]) -> Vec<serde_json::Value> {
+    let options: Vec<serde_json::Value> = keys
+        .iter()
+        .map(|d| {
+            let label = truncate_str(&d.key, SELECT_OPTION_TEXT_MAX);
+            let desc = format!("{} [current: {}]", d.label, d.current_value);
+            let desc_truncated = truncate_str(&desc, SELECT_OPTION_TEXT_MAX);
+            serde_json::json!({
+                "text": { "type": "plain_text", "text": label },
+                "description": { "type": "plain_text", "text": desc_truncated },
+                "value": &d.key,
+            })
+        })
+        .collect();
+
+    vec![
+        header("Config Set"),
+        serde_json::json!({
+            "type": "actions",
+            "elements": [{
+                "type": "static_select",
+                "placeholder": { "type": "plain_text", "text": "Select a config key..." },
+                "action_id": CONFIG_KEY_SELECT_ACTION,
+                "options": options,
+            }],
+        }),
+        context("_Select a key, then choose a value_"),
+    ]
+}
+
+/// Builds a config value selection dropdown for a specific key.
+///
+/// For `Enum` and `Bool` types, produces a `static_select` with the
+/// valid options. For `Suggest` types, adds suggestions plus a hint
+/// about free-text input. For `String`/numeric types, shows usage
+/// instructions since Slack has no free-text input in dropdowns.
+pub fn config_value_select(descriptor: &coda_core::ConfigKeyDescriptor) -> Vec<serde_json::Value> {
+    match &descriptor.value_type {
+        coda_core::ConfigValueType::Enum(options) => {
+            config_value_dropdown(&descriptor.key, &descriptor.label, options)
+        }
+        coda_core::ConfigValueType::Bool => {
+            let options = vec!["true".to_string(), "false".to_string()];
+            config_value_dropdown(&descriptor.key, &descriptor.label, &options)
+        }
+        coda_core::ConfigValueType::Suggest(suggestions) => {
+            let mut blocks = config_value_dropdown(&descriptor.key, &descriptor.label, suggestions);
+            blocks.push(context(&format!(
+                "_Or type `/coda config set {} <custom-value>`_",
+                descriptor.key,
+            )));
+            blocks
+        }
+        coda_core::ConfigValueType::U32
+        | coda_core::ConfigValueType::F64
+        | coda_core::ConfigValueType::String => vec![
+            section(&format!(
+                "*{}* (`{}`)\nCurrent: `{}`",
+                descriptor.label, descriptor.key, descriptor.current_value,
+            )),
+            context(&format!(
+                "_Type `/coda config set {} <value>` to update_",
+                descriptor.key,
+            )),
+        ],
+    }
+}
+
+/// Builds a `static_select` dropdown for config value options.
+fn config_value_dropdown(key: &str, label: &str, options: &[String]) -> Vec<serde_json::Value> {
+    let select_options: Vec<serde_json::Value> = options
+        .iter()
+        .map(|opt| {
+            // Encode "key=value" in the option value for the interaction handler
+            let encoded = format!("{key}={opt}");
+            serde_json::json!({
+                "text": { "type": "plain_text", "text": truncate_str(opt, SELECT_OPTION_TEXT_MAX) },
+                "value": encoded,
+            })
+        })
+        .collect();
+
+    vec![
+        section(&format!("*{label}* (`{key}`)")),
+        serde_json::json!({
+            "type": "actions",
+            "elements": [{
+                "type": "static_select",
+                "placeholder": { "type": "plain_text", "text": "Select a value..." },
+                "action_id": CONFIG_VALUE_SELECT_ACTION,
+                "options": select_options,
+            }],
+        }),
+    ]
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::{Path, PathBuf};
@@ -1951,5 +2060,115 @@ mod tests {
         let text = blocks[1]["text"]["text"].as_str().unwrap_or("");
         assert!(text.contains(":x:"));
         assert!(text.contains("failed after 15s"));
+    }
+
+    // ── Config interactive select ──────────────────────────────────────
+
+    #[test]
+    fn test_should_build_config_key_select_with_action_id() {
+        let keys = vec![
+            coda_core::ConfigKeyDescriptor {
+                key: "agents.run.backend".to_string(),
+                label: "Run backend".to_string(),
+                value_type: coda_core::ConfigValueType::Enum(vec![
+                    "claude".to_string(),
+                    "codex".to_string(),
+                ]),
+                current_value: "claude".to_string(),
+            },
+            coda_core::ConfigKeyDescriptor {
+                key: "agent.model".to_string(),
+                label: "Default model".to_string(),
+                value_type: coda_core::ConfigValueType::Suggest(vec![
+                    "claude-opus-4-6".to_string(),
+                ]),
+                current_value: "claude-opus-4-6".to_string(),
+            },
+        ];
+        let blocks = config_key_select(&keys);
+        // header + actions + context = 3 blocks
+        assert_eq!(blocks.len(), 3);
+
+        let select = &blocks[1]["elements"][0];
+        assert_eq!(select["action_id"], CONFIG_KEY_SELECT_ACTION);
+        let options = select["options"].as_array().expect("options array");
+        assert_eq!(options.len(), 2);
+        assert_eq!(options[0]["value"], "agents.run.backend");
+        assert_eq!(options[1]["value"], "agent.model");
+    }
+
+    #[test]
+    fn test_should_build_config_value_select_for_enum() {
+        let descriptor = coda_core::ConfigKeyDescriptor {
+            key: "agents.run.backend".to_string(),
+            label: "Run backend".to_string(),
+            value_type: coda_core::ConfigValueType::Enum(vec![
+                "claude".to_string(),
+                "codex".to_string(),
+                "cursor".to_string(),
+            ]),
+            current_value: "claude".to_string(),
+        };
+        let blocks = config_value_select(&descriptor);
+        // section + actions = 2 blocks
+        assert_eq!(blocks.len(), 2);
+
+        let select = &blocks[1]["elements"][0];
+        assert_eq!(select["action_id"], CONFIG_VALUE_SELECT_ACTION);
+        let options = select["options"].as_array().expect("options array");
+        assert_eq!(options.len(), 3);
+        // Encoded as "key=value"
+        assert_eq!(options[0]["value"], "agents.run.backend=claude");
+    }
+
+    #[test]
+    fn test_should_build_config_value_select_for_bool() {
+        let descriptor = coda_core::ConfigKeyDescriptor {
+            key: "git.auto_commit".to_string(),
+            label: "Auto commit".to_string(),
+            value_type: coda_core::ConfigValueType::Bool,
+            current_value: "true".to_string(),
+        };
+        let blocks = config_value_select(&descriptor);
+        let select = &blocks[1]["elements"][0];
+        let options = select["options"].as_array().expect("options array");
+        assert_eq!(options.len(), 2);
+        assert_eq!(options[0]["value"], "git.auto_commit=true");
+        assert_eq!(options[1]["value"], "git.auto_commit=false");
+    }
+
+    #[test]
+    fn test_should_build_config_value_select_for_suggest_with_hint() {
+        let descriptor = coda_core::ConfigKeyDescriptor {
+            key: "agent.model".to_string(),
+            label: "Default model".to_string(),
+            value_type: coda_core::ConfigValueType::Suggest(vec![
+                "claude-opus-4-6".to_string(),
+                "claude-sonnet-4-6".to_string(),
+            ]),
+            current_value: "claude-opus-4-6".to_string(),
+        };
+        let blocks = config_value_select(&descriptor);
+        // section + actions + context hint = 3 blocks
+        assert_eq!(blocks.len(), 3);
+
+        // Check hint text
+        let hint = blocks[2]["elements"][0]["text"].as_str().unwrap_or("");
+        assert!(hint.contains("/coda config set agent.model"));
+    }
+
+    #[test]
+    fn test_should_build_config_value_text_for_string_type() {
+        let descriptor = coda_core::ConfigKeyDescriptor {
+            key: "git.branch_prefix".to_string(),
+            label: "Branch prefix".to_string(),
+            value_type: coda_core::ConfigValueType::String,
+            current_value: "feature".to_string(),
+        };
+        let blocks = config_value_select(&descriptor);
+        // section + context = 2 blocks (no dropdown for free-text)
+        assert_eq!(blocks.len(), 2);
+        let text = blocks[0]["text"]["text"].as_str().unwrap_or("");
+        assert!(text.contains("feature"));
     }
 }

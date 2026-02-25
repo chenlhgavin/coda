@@ -24,7 +24,7 @@
 //! ```no_run
 //! # async fn example() -> Result<(), coda_core::CoreError> {
 //! use coda_core::session::{AgentSession, SessionConfig};
-//! use code_agent_sdk::AgentSdkClient;
+//! use coda_agent_sdk::AgentSdkClient;
 //!
 //! let config = SessionConfig {
 //!     idle_timeout_secs: 300,
@@ -42,7 +42,7 @@
 
 use std::time::Duration;
 
-use code_agent_sdk::{AgentSdkClient, ContentBlock, Message, ResultMessage, UserContent};
+use coda_agent_sdk::{AgentSdkClient, ContentBlock, Message, ResultMessage, UserContent};
 use futures::StreamExt;
 use tokio::sync::mpsc::UnboundedSender;
 use tokio_util::sync::CancellationToken;
@@ -232,7 +232,7 @@ impl AgentSession {
     ///
     /// ```no_run
     /// use coda_core::session::{AgentSession, SessionConfig};
-    /// use code_agent_sdk::AgentSdkClient;
+    /// use coda_agent_sdk::AgentSdkClient;
     ///
     /// # fn example(client: AgentSdkClient) {
     /// let config = SessionConfig {
@@ -288,7 +288,7 @@ impl AgentSession {
     ///
     /// ```no_run
     /// use coda_core::session::{AgentSession, SessionConfig};
-    /// use code_agent_sdk::AgentSdkClient;
+    /// use coda_agent_sdk::AgentSdkClient;
     /// use tokio_util::sync::CancellationToken;
     ///
     /// # fn example(client: AgentSdkClient) {
@@ -1178,7 +1178,7 @@ mod tests {
         let session = AgentSession::new(
             AgentSdkClient::new(
                 Some(
-                    code_agent_sdk::AgentOptions::builder()
+                    coda_agent_sdk::AgentOptions::builder()
                         .system_prompt("test")
                         .build(),
                 ),
@@ -1205,7 +1205,7 @@ mod tests {
         let session = AgentSession::new(
             AgentSdkClient::new(
                 Some(
-                    code_agent_sdk::AgentOptions::builder()
+                    coda_agent_sdk::AgentOptions::builder()
                         .system_prompt("test")
                         .build(),
                 ),
@@ -1244,7 +1244,7 @@ mod tests {
         let session = AgentSession::new(
             AgentSdkClient::new(
                 Some(
-                    code_agent_sdk::AgentOptions::builder()
+                    coda_agent_sdk::AgentOptions::builder()
                         .system_prompt("test")
                         .build(),
                 ),
@@ -1272,7 +1272,7 @@ mod tests {
         let session = AgentSession::new(
             AgentSdkClient::new(
                 Some(
-                    code_agent_sdk::AgentOptions::builder()
+                    coda_agent_sdk::AgentOptions::builder()
                         .system_prompt("test")
                         .build(),
                 ),
@@ -1311,7 +1311,7 @@ mod tests {
         let session = AgentSession::new(
             AgentSdkClient::new(
                 Some(
-                    code_agent_sdk::AgentOptions::builder()
+                    coda_agent_sdk::AgentOptions::builder()
                         .system_prompt("test")
                         .build(),
                 ),
@@ -1341,7 +1341,7 @@ mod tests {
         let mut session = AgentSession::new(
             AgentSdkClient::new(
                 Some(
-                    code_agent_sdk::AgentOptions::builder()
+                    coda_agent_sdk::AgentOptions::builder()
                         .system_prompt("test")
                         .build(),
                 ),
@@ -1411,7 +1411,7 @@ mod tests {
 
     /// Helper to build a test AgentSession with default config.
     fn test_session() -> AgentSession {
-        let options = code_agent_sdk::AgentOptions::builder()
+        let options = coda_agent_sdk::AgentOptions::builder()
             .system_prompt("test")
             .build();
         let config = SessionConfig {

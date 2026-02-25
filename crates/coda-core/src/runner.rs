@@ -340,7 +340,7 @@ impl Runner {
             }));
         }
 
-        let client = code_agent_sdk::AgentSdkClient::new(Some(options), None);
+        let client = coda_agent_sdk::AgentSdkClient::new(Some(options), None);
         let session_config = SessionConfig {
             idle_timeout_secs: config.agent.idle_timeout_secs,
             tool_execution_timeout_secs: config.agent.tool_execution_timeout_secs,

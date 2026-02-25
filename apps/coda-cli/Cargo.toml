@@ -18,6 +18,7 @@ path = "src/main.rs"
 coda-core = { workspace = true }
 coda-pm = { workspace = true }
 clap = { workspace = true }
+dialoguer = { workspace = true }
 ratatui = { workspace = true }
 crossterm = { workspace = true }
 unicode-width = { workspace = true }

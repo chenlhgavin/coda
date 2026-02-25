@@ -10,8 +10,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use coda_agent_sdk::AgentSdkClient;
 use coda_pm::PromptManager;
-use code_agent_sdk::AgentSdkClient;
 use futures::StreamExt;
 use serde::Serialize;
 use tokio_util::sync::CancellationToken;
@@ -908,6 +908,14 @@ impl Engine {
     ///
     /// Each row shows the effective backend, model, and effort after
     /// merging per-operation overrides with global defaults.
+    /// Returns descriptors for all settable config keys.
+    ///
+    /// Delegates to [`CodaConfig::config_keys()`] to provide the full
+    /// schema with types, valid options, and current values.
+    pub fn config_schema(&self) -> Vec<crate::config::ConfigKeyDescriptor> {
+        self.config.config_keys()
+    }
+
     pub fn config_show(&self) -> ResolvedConfigSummary {
         ResolvedConfigSummary {
             init: self.config.resolve_init(),

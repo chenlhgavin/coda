@@ -14,7 +14,7 @@ include = ["src/**/*.rs", "Cargo.toml"]
 coda-pm = { workspace = true }
 tokio = { workspace = true }
 tokio-util = { workspace = true }
-code-agent-sdk = { workspace = true }
+coda-agent-sdk = { workspace = true }
 minijinja = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

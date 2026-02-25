@@ -40,6 +40,11 @@ impl PhaseExecutor for VerifyPhaseExecutor {
         let verification_spec = ctx.load_spec("verification.md")?;
         let checks = ctx.config.checks.clone();
         let max_retries = ctx.config.verify.max_verify_retries;
+        let session_id = if ctx.config.agent.isolate_quality_phases {
+            Some("verify")
+        } else {
+            None
+        };
         // Total attempts = 1 initial + max_retries
         let max_attempts = 1 + max_retries;
         let mut acc = PhaseMetricsAccumulator::new();
@@ -61,7 +66,7 @@ impl PhaseExecutor for VerifyPhaseExecutor {
                 ),
             )?;
 
-            let resp = ctx.send_and_collect(&verify_prompt, None).await?;
+            let resp = ctx.send_and_collect(&verify_prompt, session_id).await?;
             let m = ctx.metrics.record(&resp.result);
             if let Some(logger) = &mut ctx.run_logger {
                 logger.log_interaction(&verify_prompt, &resp, &m);
@@ -119,7 +124,7 @@ impl PhaseExecutor for VerifyPhaseExecutor {
                  Refer to the design specification and verification plan provided earlier.",
             );
 
-            let fix_resp = ctx.send_and_collect(&fix_prompt, None).await?;
+            let fix_resp = ctx.send_and_collect(&fix_prompt, session_id).await?;
             let fm = ctx.metrics.record(&fix_resp.result);
             if let Some(logger) = &mut ctx.run_logger {
                 logger.log_interaction(&fix_prompt, &fix_resp, &fm);

@@ -92,6 +92,11 @@ async fn run_review_claude(
 ) -> Result<TaskResult, CoreError> {
     let design_spec = ctx.load_spec("design.md")?;
     let max_rounds = ctx.config.review.max_review_rounds;
+    let session_id = if ctx.config.agent.isolate_quality_phases {
+        Some("review")
+    } else {
+        None
+    };
     let mut acc = PhaseMetricsAccumulator::new();
 
     for round in 0..max_rounds {
@@ -106,7 +111,7 @@ async fn run_review_claude(
             ),
         )?;
 
-        let resp = ctx.send_and_collect(&review_prompt, None).await?;
+        let resp = ctx.send_and_collect(&review_prompt, session_id).await?;
         let m = ctx.metrics.record(&resp.result);
         if let Some(logger) = &mut ctx.run_logger {
             logger.log_interaction(&review_prompt, &resp, &m);
@@ -135,7 +140,7 @@ async fn run_review_claude(
         }
 
         info!(issues = issue_count, "Found issues, asking agent to fix");
-        ask_claude_to_fix(ctx, &issues, issue_count, &mut acc).await?;
+        ask_claude_to_fix(ctx, &issues, issue_count, session_id, &mut acc).await?;
         ctx.review_summary.issues_fix_attempted += issue_count;
     }
 
@@ -150,10 +155,13 @@ async fn run_review_codex(
 ) -> Result<TaskResult, CoreError> {
     let max_rounds = ctx.config.review.max_review_rounds;
     let codex_model = resolved.model.clone();
-    let codex_effort = resolved
-        .effort
-        .unwrap_or(crate::config::ReasoningEffort::High);
+    let codex_effort = resolved.effort;
     let spec_path = ctx.spec_relative_path("design.md");
+    let session_id = if ctx.config.agent.isolate_quality_phases {
+        Some("review")
+    } else {
+        None
+    };
     let mut acc = PhaseMetricsAccumulator::new();
 
     for round in 0..max_rounds {
@@ -197,7 +205,7 @@ async fn run_review_codex(
             "Codex found issues, asking Claude to fix"
         );
         let formatted = format_issues(&codex_issues);
-        ask_claude_to_fix(ctx, &formatted, issue_count, &mut acc).await?;
+        ask_claude_to_fix(ctx, &formatted, issue_count, session_id, &mut acc).await?;
         ctx.review_summary.issues_fix_attempted += issue_count;
     }
 
@@ -209,6 +217,7 @@ async fn ask_claude_to_fix(
     ctx: &mut PhaseContext,
     issues: &[String],
     issue_count: u32,
+    session_id: Option<&str>,
     acc: &mut PhaseMetricsAccumulator,
 ) -> Result<(), CoreError> {
     let issues_list = issues
@@ -227,7 +236,7 @@ async fn ask_claude_to_fix(
          Refer to the design specification provided earlier for the intended behavior.",
     );
 
-    let fix_resp = ctx.send_and_collect(&fix_prompt, None).await?;
+    let fix_resp = ctx.send_and_collect(&fix_prompt, session_id).await?;
     let fm = ctx.metrics.record(&fix_resp.result);
     if let Some(logger) = &mut ctx.run_logger {
         logger.log_interaction(&fix_prompt, &fix_resp, &fm);

@@ -2,7 +2,11 @@ You are implementing a new feature in an existing codebase. This is **developmen
 
 ## Design Specification
 
+{% if is_first %}
 {{ design_spec }}
+{% else %}
+Refer to the full design specification provided in the first development phase above. The spec file is at `.coda/{{ feature_slug }}/specs/design.md` if you need to re-read any section.
+{% endif %}
 
 {% if resume_context %}
 ## Resume Context
@@ -28,14 +32,50 @@ The `.coda/{{ feature_slug }}/` directory contains the design spec, verification
 
 ## Task
 
-Implement all code changes described in this phase:
+Implement all code changes described in this phase using **Test-Driven Development (TDD)**.
+Tests MUST be written BEFORE the production code they verify.
 
-1. Follow the interface design from the spec exactly
-2. Handle all error cases properly — no `unwrap()` or `expect()` in production code
-3. Add appropriate logging with `tracing` macros
-4. Write unit tests for new public functions in `#[cfg(test)] mod tests`
-5. Use descriptive test names: `test_should_<expected_behavior>_when_<condition>`
-6. Add doc comments (`///`) for all public items with at least one example
+### Assess Scope
+
+Before starting, read the phase requirements and assess the code volume:
+- **Large scope** (multiple sub-components, new modules, or significant logic): Use the per-component TDD cycle below
+- **Small scope** (single component, minor additions): Write all tests upfront, then implement
+
+### TDD Workflow — Per-Component Cycle (Large Scope)
+
+For each sub-component or logical unit in this phase:
+
+1. **Red** — Write failing unit tests in `#[cfg(test)] mod tests`
+   - Use descriptive names: `test_should_<expected_behavior>_when_<condition>`
+   - Cover happy path, error cases, and edge cases
+   - Confirm the tests fail (implementation does not exist yet)
+2. **Green** — Write the minimum production code to make the tests pass
+   - Follow the interface design from the spec exactly
+   - Handle all error cases properly — no `unwrap()` or `expect()` in production code
+   - Add appropriate logging with `tracing` macros
+3. **Refactor** — Clean up while keeping tests green
+   - Add doc comments (`///`) for all public items with at least one example
+   - Remove duplication, improve naming, simplify logic
+
+Repeat this cycle for each sub-component before moving to the next.
+
+### TDD Workflow — Tests First (Small Scope)
+
+1. **Write all tests first** — Create unit tests in `#[cfg(test)] mod tests` for every public function and type in this phase
+   - Use descriptive names: `test_should_<expected_behavior>_when_<condition>`
+   - Cover happy path, error cases, and edge cases
+   - Confirm the tests fail
+2. **Implement** all production code to make tests pass
+   - Follow the interface design from the spec exactly
+   - Handle all error cases properly — no `unwrap()` or `expect()` in production code
+   - Add appropriate logging with `tracing` macros
+3. **Refactor** — Add doc comments, clean up code
+
+### Key TDD Rules
+
+- **Never write production code without a failing test that demands it**
+- If you discover missing test coverage during implementation, write the test first, confirm it fails, then fix
+- Tests drive the design — they are not an afterthought
 
 ## After Implementation
 

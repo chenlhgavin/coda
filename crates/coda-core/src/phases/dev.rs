@@ -40,7 +40,13 @@ impl PhaseExecutor for DevPhaseExecutor {
 
         let mut acc = PhaseMetricsAccumulator::new();
 
-        let design_spec = ctx.load_spec("design.md")?;
+        // Only load full design spec for the first dev phase; subsequent
+        // phases reference it from conversation history to reduce token usage.
+        let design_spec = if phase_idx == 0 {
+            ctx.load_spec("design.md")?
+        } else {
+            String::new()
+        };
         let checks = &ctx.config.checks;
         let feature_slug = ctx.state().feature.slug.clone();
         let phase_name = ctx.state().phases[phase_idx].name.clone();

@@ -274,12 +274,9 @@ impl App {
                     ("run", &summary.run),
                     ("review", &summary.review),
                 ] {
-                    let effort = resolved
-                        .effort
-                        .map_or_else(|| "-".to_string(), |e| e.to_string());
                     println!(
                         "  {:<12} {:<10} {:<26} {:<8}",
-                        name, resolved.backend, resolved.model, effort,
+                        name, resolved.backend, resolved.model, resolved.effort,
                     );
                 }
                 println!();
@@ -295,18 +292,55 @@ impl App {
                     std::process::exit(1);
                 }
             },
-            crate::cli::ConfigAction::Set { key, value } => {
-                match self.engine.config_set(&key, &value) {
+            crate::cli::ConfigAction::Set { key, value } => match (key, value) {
+                (Some(k), Some(v)) => match self.engine.config_set(&k, &v) {
                     Ok(()) => {
-                        println!("Updated {key} = {value}");
+                        println!("Updated {k} = {v}");
                         Ok(())
                     }
                     Err(e) => {
                         println!("Error: {e}");
                         std::process::exit(1);
                     }
+                },
+                (Some(k), None) => {
+                    let schema = self.engine.config_schema();
+                    let descriptor = schema.iter().find(|d| d.key == k);
+                    match descriptor {
+                        Some(d) => {
+                            let value = crate::interactive_config::prompt_value(d)?;
+                            match self.engine.config_set(&k, &value) {
+                                Ok(()) => {
+                                    println!("Updated {k} = {value}");
+                                    Ok(())
+                                }
+                                Err(e) => {
+                                    println!("Error: {e}");
+                                    std::process::exit(1);
+                                }
+                            }
+                        }
+                        None => {
+                            println!("Error: Unknown config key: {k}");
+                            std::process::exit(1);
+                        }
+                    }
                 }
-            }
+                (None, _) => {
+                    let schema = self.engine.config_schema();
+                    let (key, value) = crate::interactive_config::prompt_key_and_value(&schema)?;
+                    match self.engine.config_set(&key, &value) {
+                        Ok(()) => {
+                            println!("Updated {key} = {value}");
+                            Ok(())
+                        }
+                        Err(e) => {
+                            println!("Error: {e}");
+                            std::process::exit(1);
+                        }
+                    }
+                }
+            },
         }
     }
 

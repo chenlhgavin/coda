@@ -7,6 +7,7 @@ mod app;
 mod cli;
 pub(crate) mod fmt_utils;
 pub(crate) mod init_ui;
+mod interactive_config;
 mod line_editor;
 pub mod markdown;
 mod run_ui;

@@ -10,10 +10,10 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use code_agent_sdk::options::{
+use coda_agent_sdk::options::{
     CodexOptions, HookCallback, HookJSONOutput, SystemPromptConfig, ToolsConfig,
 };
-use code_agent_sdk::{AgentOptions, HookEvent, HookMatcher, PermissionMode};
+use coda_agent_sdk::{AgentOptions, HookEvent, HookMatcher, PermissionMode};
 use regex::Regex;
 use tracing::debug;
 
@@ -87,17 +87,13 @@ impl AgentProfile {
         // Configure effort and backend-specific options
         match resolved.backend {
             AgentBackend::Claude => {
-                if let Some(effort) = resolved.effort {
-                    options.effort = Some(effort.to_sdk_effort());
-                }
+                options.effort = Some(resolved.effort.to_sdk_effort());
             }
             AgentBackend::Codex => {
-                if let Some(effort) = resolved.effort {
-                    options.extra_args.insert(
-                        "model_reasoning_effort".to_string(),
-                        Some(effort.to_string()),
-                    );
-                }
+                options.extra_args.insert(
+                    "model_reasoning_effort".to_string(),
+                    Some(resolved.effort.to_string()),
+                );
                 let sandbox_mode = match self {
                     Self::Planner => "read-only",
                     Self::Coder => "danger-full-access",
@@ -108,9 +104,7 @@ impl AgentProfile {
                 });
             }
             AgentBackend::Cursor => {
-                if let Some(effort) = resolved.effort {
-                    options.effort = Some(effort.to_sdk_effort());
-                }
+                options.effort = Some(resolved.effort.to_sdk_effort());
             }
         }
 
@@ -283,10 +277,12 @@ mod tests {
     }
 
     fn default_resolved() -> ResolvedAgentConfig {
+        use crate::config::ReasoningEffort;
+
         ResolvedAgentConfig {
             backend: AgentBackend::Claude,
             model: "claude-opus-4-6".to_string(),
-            effort: None,
+            effort: ReasoningEffort::High,
         }
     }
 
@@ -348,13 +344,13 @@ mod tests {
         let resolved = ResolvedAgentConfig {
             backend: AgentBackend::Codex,
             model: "gpt-5.3-codex".to_string(),
-            effort: Some(ReasoningEffort::High),
+            effort: ReasoningEffort::High,
         };
         let options = profile.to_options("Test", PathBuf::from("/tmp"), 10, 5.0, &resolved);
 
         assert_eq!(
             options.backend,
-            Some(code_agent_sdk::backend::BackendKind::Codex)
+            Some(coda_agent_sdk::backend::BackendKind::Codex)
         );
         assert_eq!(options.model, Some("gpt-5.3-codex".to_string()));
         assert_eq!(
@@ -374,7 +370,7 @@ mod tests {
         let resolved = ResolvedAgentConfig {
             backend: AgentBackend::Codex,
             model: "gpt-5.3-codex".to_string(),
-            effort: Some(ReasoningEffort::Medium),
+            effort: ReasoningEffort::Medium,
         };
         let options = profile.to_options("Test", PathBuf::from("/tmp"), 10, 5.0, &resolved);
 
@@ -390,11 +386,11 @@ mod tests {
         let resolved = ResolvedAgentConfig {
             backend: AgentBackend::Claude,
             model: "claude-opus-4-6".to_string(),
-            effort: Some(ReasoningEffort::High),
+            effort: ReasoningEffort::High,
         };
         let options = profile.to_options("Test", PathBuf::from("/tmp"), 10, 5.0, &resolved);
 
-        assert_eq!(options.effort, Some(code_agent_sdk::options::Effort::High));
+        assert_eq!(options.effort, Some(coda_agent_sdk::options::Effort::High));
         assert!(options.codex.is_none());
     }
 }

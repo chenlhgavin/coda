@@ -60,12 +60,9 @@ pub async fn handle_config(
                 ("run", &summary.run),
                 ("review", &summary.review),
             ] {
-                let effort = resolved
-                    .effort
-                    .map_or_else(|| "-".to_string(), |e| e.to_string());
                 lines.push(format!(
                     "`{:<10}` `{:<10}` `{:<26}` `{:<8}`",
-                    name, resolved.backend, resolved.model, effort,
+                    name, resolved.backend, resolved.model, resolved.effort,
                 ));
             }
             vec![serde_json::json!({
@@ -88,10 +85,23 @@ pub async fn handle_config(
             }
         }
         "set" => {
-            if rest.is_empty() || value.is_empty() {
-                formatter::error(
-                    "Usage: `/coda config set <key> <value>` — provide a key and value",
-                )
+            if rest.is_empty() {
+                // No key provided — show key picker
+                info!(channel, "Showing interactive config key select");
+                let schema = engine.config_schema();
+                formatter::config_key_select(&schema)
+            } else if value.is_empty() {
+                // Key provided but no value — show value picker
+                info!(
+                    channel,
+                    key = rest,
+                    "Showing interactive config value select"
+                );
+                let schema = engine.config_schema();
+                match schema.iter().find(|d| d.key == rest) {
+                    Some(descriptor) => formatter::config_value_select(descriptor),
+                    None => formatter::error(&format!("Unknown config key: `{rest}`")),
+                }
             } else {
                 info!(channel, key = rest, value, "Setting config value");
                 match engine.config_set(rest, value) {

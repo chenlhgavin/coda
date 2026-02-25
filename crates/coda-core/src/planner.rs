@@ -12,8 +12,8 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use coda_agent_sdk::AgentSdkClient;
 use coda_pm::PromptManager;
-use code_agent_sdk::AgentSdkClient;
 use tracing::{debug, info, warn};
 
 use crate::CoreError;

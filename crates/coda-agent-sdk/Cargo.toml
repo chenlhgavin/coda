@@ -1,0 +1,53 @@
+[package]
+name = "coda-agent-sdk"
+version = "0.1.0"
+edition = "2024"
+description = "Rust SDK for Claude Code Agent"
+license = "MIT"
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+anyhow = "1"
+async-trait = "0.1"
+tracing = "0.1"
+futures = "0.3"
+tokio-stream = "0.1"
+async-stream = "0.3"
+
+[target.'cfg(unix)'.dependencies]
+nix = { version = "~0.31", features = ["user"] }
+
+[dev-dependencies]
+tokio-test = "0.4"
+mockall = "0.14"
+
+[[example]]
+name = "quick_start"
+path = "examples/quick_start.rs"
+
+[[example]]
+name = "streaming_mode"
+path = "examples/streaming_mode.rs"
+
+[[example]]
+name = "mcp_calculator"
+path = "examples/mcp_calculator.rs"
+
+[[example]]
+name = "hooks"
+path = "examples/hooks.rs"
+
+[[example]]
+name = "system_prompt"
+path = "examples/system_prompt.rs"
+
+[[example]]
+name = "tools_option"
+path = "examples/tools_option.rs"
+
+[[example]]
+name = "tool_permission_callback"
+path = "examples/tool_permission_callback.rs"

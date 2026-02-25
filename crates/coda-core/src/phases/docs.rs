@@ -41,6 +41,11 @@ impl PhaseExecutor for DocsPhaseExecutor {
 
         let design_spec = ctx.load_spec("design.md")?;
         let max_retries = ctx.config.agent.max_retries;
+        let session_id = if ctx.config.agent.isolate_quality_phases {
+            Some("update-docs")
+        } else {
+            None
+        };
         let mut acc = PhaseMetricsAccumulator::new();
         let mut docs_valid = false;
 
@@ -54,7 +59,7 @@ impl PhaseExecutor for DocsPhaseExecutor {
             ),
         )?;
 
-        let resp = ctx.send_and_collect(&prompt, None).await?;
+        let resp = ctx.send_and_collect(&prompt, session_id).await?;
         let m = ctx.metrics.record(&resp.result);
         if let Some(logger) = &mut ctx.run_logger {
             logger.log_interaction(&prompt, &resp, &m);
@@ -82,7 +87,7 @@ impl PhaseExecutor for DocsPhaseExecutor {
 
             let fix_prompt = build_doc_fix_prompt(&missing);
 
-            let fix_resp = ctx.send_and_collect(&fix_prompt, None).await?;
+            let fix_resp = ctx.send_and_collect(&fix_prompt, session_id).await?;
             let fm = ctx.metrics.record(&fix_resp.result);
             if let Some(logger) = &mut ctx.run_logger {
                 logger.log_interaction(&fix_prompt, &fix_resp, &fm);

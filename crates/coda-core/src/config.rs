@@ -12,8 +12,8 @@
 
 use std::str::FromStr;
 
-use code_agent_sdk::backend::BackendKind;
-use code_agent_sdk::options::Effort;
+use coda_agent_sdk::backend::BackendKind;
+use coda_agent_sdk::options::Effort;
 use serde::{Deserialize, Serialize};
 
 /// Top-level CODA project configuration loaded from `.coda/config.yml`.
@@ -97,6 +97,24 @@ pub struct AgentConfig {
     /// Total maximum silence ≈ `idle_timeout_secs * (idle_retries + 1)`
     /// (plus backoff delays between reconnection attempts).
     pub idle_retries: u32,
+
+    /// When `true` (default), quality phases (review, verify, update-docs)
+    /// use isolated session IDs instead of the main dev session. This
+    /// significantly reduces input token consumption because quality phases
+    /// do not carry the accumulated dev conversation history. Their prompt
+    /// templates are self-contained with all necessary context.
+    ///
+    /// Set to `false` to revert to the legacy behavior where all phases
+    /// share a single conversation context.
+    pub isolate_quality_phases: bool,
+
+    /// Default reasoning effort level applied to all operations when no
+    /// per-operation override is set via `agents.<op>.effort`. Controls
+    /// how much reasoning the model applies — higher levels produce more
+    /// thorough results but cost more.
+    ///
+    /// Defaults to `High` for a good balance of quality and cost.
+    pub default_effort: ReasoningEffort,
 }
 
 /// Configuration for prompt template directories.
@@ -333,6 +351,67 @@ impl FromStr for ReasoningEffort {
     }
 }
 
+// ── Config Schema ──────────────────────────────────────────────────
+
+/// Well-known models for the Claude backend, shown as suggestions
+/// in interactive config. Updated with each CODA release.
+const CLAUDE_MODELS: &[&str] = &["claude-opus-4-6", "claude-sonnet-4-6", "claude-haiku-4-5"];
+
+/// Well-known models for the Codex backend.
+const CODEX_MODELS: &[&str] = &["gpt-5.3-codex", "o4-mini"];
+
+/// Well-known models for the Cursor backend.
+const CURSOR_MODELS: &[&str] = &["claude-sonnet-4-6"];
+
+/// Returns suggested model names for the given backend.
+///
+/// Falls back to Claude suggestions when the backend is `None`.
+fn model_suggestions_for(backend: Option<AgentBackend>) -> Vec<String> {
+    let models = match backend.unwrap_or_default() {
+        AgentBackend::Claude => CLAUDE_MODELS,
+        AgentBackend::Codex => CODEX_MODELS,
+        AgentBackend::Cursor => CURSOR_MODELS,
+    };
+    models.iter().map(|s| (*s).to_string()).collect()
+}
+
+/// The type of value a config key accepts.
+///
+/// Used by interactive config UIs to decide which input widget to show
+/// (dropdown, text input, boolean toggle, etc.).
+#[derive(Debug, Clone, PartialEq)]
+pub enum ConfigValueType {
+    /// Fixed set of string options (e.g., backend: claude|codex|cursor).
+    Enum(Vec<String>),
+    /// Suggested options + free-form input (e.g., model names per backend).
+    Suggest(Vec<String>),
+    /// Boolean: true or false.
+    Bool,
+    /// Unsigned 32-bit integer.
+    U32,
+    /// 64-bit floating point.
+    F64,
+    /// Free-form string.
+    String,
+}
+
+/// Describes a single settable config key for interactive UIs.
+///
+/// Returned by [`CodaConfig::config_keys()`] and consumed by CLI
+/// (dialoguer) and Slack (Block Kit) frontends to present interactive
+/// config selection.
+#[derive(Debug, Clone)]
+pub struct ConfigKeyDescriptor {
+    /// Dot-path key (e.g., `"agents.run.backend"`).
+    pub key: String,
+    /// Human-readable label (e.g., `"Run backend"`).
+    pub label: String,
+    /// What type of value this key accepts.
+    pub value_type: ConfigValueType,
+    /// Current effective value as a display string.
+    pub current_value: String,
+}
+
 /// Verification phase configuration.
 ///
 /// # Examples
@@ -401,6 +480,8 @@ impl Default for AgentConfig {
             idle_timeout_secs: 300,
             tool_execution_timeout_secs: 600,
             idle_retries: 2,
+            isolate_quality_phases: true,
+            default_effort: ReasoningEffort::High,
         }
     }
 }
@@ -502,14 +583,15 @@ pub struct ResolvedAgentConfig {
     pub backend: AgentBackend,
     /// Model identifier (e.g., `"claude-opus-4-6"` or `"gpt-5.3-codex"`).
     pub model: String,
-    /// Reasoning effort level, if applicable for the backend.
-    pub effort: Option<ReasoningEffort>,
+    /// Reasoning effort level for this operation.
+    pub effort: ReasoningEffort,
 }
 
 impl CodaConfig {
     /// Resolves agent configuration for the `init` operation.
     ///
-    /// Falls back to `agent.model` for model and `Claude` for backend.
+    /// Falls back to `agent.model` for model, `Claude` for backend,
+    /// and `agent.default_effort` for effort.
     pub fn resolve_init(&self) -> ResolvedAgentConfig {
         ResolvedAgentConfig {
             backend: self.agents.init.backend.unwrap_or_default(),
@@ -519,13 +601,14 @@ impl CodaConfig {
                 .model
                 .clone()
                 .unwrap_or_else(|| self.agent.model.clone()),
-            effort: self.agents.init.effort,
+            effort: self.agents.init.effort.unwrap_or(self.agent.default_effort),
         }
     }
 
     /// Resolves agent configuration for the `plan` operation.
     ///
-    /// Falls back to `agent.model` for model and `Claude` for backend.
+    /// Falls back to `agent.model` for model, `Claude` for backend,
+    /// and `agent.default_effort` for effort.
     pub fn resolve_plan(&self) -> ResolvedAgentConfig {
         ResolvedAgentConfig {
             backend: self.agents.plan.backend.unwrap_or_default(),
@@ -535,13 +618,14 @@ impl CodaConfig {
                 .model
                 .clone()
                 .unwrap_or_else(|| self.agent.model.clone()),
-            effort: self.agents.plan.effort,
+            effort: self.agents.plan.effort.unwrap_or(self.agent.default_effort),
         }
     }
 
     /// Resolves agent configuration for the `run` operation.
     ///
-    /// Falls back to `agent.model` for model and `Claude` for backend.
+    /// Falls back to `agent.model` for model, `Claude` for backend,
+    /// and `agent.default_effort` for effort.
     pub fn resolve_run(&self) -> ResolvedAgentConfig {
         ResolvedAgentConfig {
             backend: self.agents.run.backend.unwrap_or_default(),
@@ -551,7 +635,7 @@ impl CodaConfig {
                 .model
                 .clone()
                 .unwrap_or_else(|| self.agent.model.clone()),
-            effort: self.agents.run.effort,
+            effort: self.agents.run.effort.unwrap_or(self.agent.default_effort),
         }
     }
 
@@ -564,7 +648,7 @@ impl CodaConfig {
     /// - **model**: `agents.review.model` → legacy `review.codex_model` (for codex)
     ///   or `agent.model` (for claude/cursor)
     /// - **effort**: `agents.review.effort` → legacy `review.codex_reasoning_effort`
-    ///   (for codex) or `None` (for claude/cursor)
+    ///   (for codex) or `agent.default_effort` (for claude/cursor)
     pub fn resolve_review(&self) -> ResolvedAgentConfig {
         let backend = self
             .agents
@@ -585,9 +669,9 @@ impl CodaConfig {
                 _ => self.agent.model.clone(),
             });
 
-        let effort = self.agents.review.effort.or(match backend {
-            AgentBackend::Codex => Some(self.review.codex_reasoning_effort),
-            _ => None,
+        let effort = self.agents.review.effort.unwrap_or(match backend {
+            AgentBackend::Codex => self.review.codex_reasoning_effort,
+            _ => self.agent.default_effort,
         });
 
         ResolvedAgentConfig {
@@ -595,6 +679,170 @@ impl CodaConfig {
             model,
             effort,
         }
+    }
+
+    /// Returns descriptors for all settable config keys.
+    ///
+    /// Each descriptor includes the dot-path key, a human-readable label,
+    /// the expected value type (with valid options where applicable), and
+    /// the current effective value. Used by interactive config UIs (CLI
+    /// dialoguer prompts and Slack Block Kit dropdowns).
+    ///
+    /// For per-operation model fields, suggestions are derived from the
+    /// operation's current backend. The current value shows `"(default)"`
+    /// when no per-operation override is set.
+    pub fn config_keys(&self) -> Vec<ConfigKeyDescriptor> {
+        let backend_options = vec![
+            "claude".to_string(),
+            "codex".to_string(),
+            "cursor".to_string(),
+        ];
+        let effort_options = vec![
+            "low".to_string(),
+            "medium".to_string(),
+            "high".to_string(),
+            "max".to_string(),
+        ];
+
+        let ops: &[(&str, &str, &OperationAgentConfig)] = &[
+            ("init", "Init", &self.agents.init),
+            ("plan", "Plan", &self.agents.plan),
+            ("run", "Run", &self.agents.run),
+            ("review", "Review", &self.agents.review),
+        ];
+
+        let mut keys = Vec::new();
+
+        // Per-operation keys: agents.<op>.backend, .model, .effort
+        for &(op, label, op_config) in ops {
+            keys.push(ConfigKeyDescriptor {
+                key: format!("agents.{op}.backend"),
+                label: format!("{label} backend"),
+                value_type: ConfigValueType::Enum(backend_options.clone()),
+                current_value: op_config
+                    .backend
+                    .map_or("(default)".to_string(), |b| b.to_string()),
+            });
+
+            keys.push(ConfigKeyDescriptor {
+                key: format!("agents.{op}.model"),
+                label: format!("{label} model"),
+                value_type: ConfigValueType::Suggest(model_suggestions_for(op_config.backend)),
+                current_value: op_config
+                    .model
+                    .clone()
+                    .unwrap_or_else(|| "(default)".to_string()),
+            });
+
+            keys.push(ConfigKeyDescriptor {
+                key: format!("agents.{op}.effort"),
+                label: format!("{label} effort"),
+                value_type: ConfigValueType::Enum(effort_options.clone()),
+                current_value: op_config
+                    .effort
+                    .map_or("(default)".to_string(), |e| e.to_string()),
+            });
+        }
+
+        // Global agent keys
+        keys.push(ConfigKeyDescriptor {
+            key: "agent.model".to_string(),
+            label: "Default model".to_string(),
+            value_type: ConfigValueType::Suggest(model_suggestions_for(None)),
+            current_value: self.agent.model.clone(),
+        });
+        keys.push(ConfigKeyDescriptor {
+            key: "agent.default_effort".to_string(),
+            label: "Default effort".to_string(),
+            value_type: ConfigValueType::Enum(effort_options.clone()),
+            current_value: self.agent.default_effort.to_string(),
+        });
+        keys.push(ConfigKeyDescriptor {
+            key: "agent.max_budget_usd".to_string(),
+            label: "Max budget (USD)".to_string(),
+            value_type: ConfigValueType::F64,
+            current_value: self.agent.max_budget_usd.to_string(),
+        });
+        keys.push(ConfigKeyDescriptor {
+            key: "agent.max_retries".to_string(),
+            label: "Max retries".to_string(),
+            value_type: ConfigValueType::U32,
+            current_value: self.agent.max_retries.to_string(),
+        });
+        keys.push(ConfigKeyDescriptor {
+            key: "agent.max_turns".to_string(),
+            label: "Max turns".to_string(),
+            value_type: ConfigValueType::U32,
+            current_value: self.agent.max_turns.to_string(),
+        });
+        keys.push(ConfigKeyDescriptor {
+            key: "agent.isolate_quality_phases".to_string(),
+            label: "Isolate quality phases".to_string(),
+            value_type: ConfigValueType::Bool,
+            current_value: self.agent.isolate_quality_phases.to_string(),
+        });
+
+        // Git keys
+        keys.push(ConfigKeyDescriptor {
+            key: "git.auto_commit".to_string(),
+            label: "Auto commit".to_string(),
+            value_type: ConfigValueType::Bool,
+            current_value: self.git.auto_commit.to_string(),
+        });
+        keys.push(ConfigKeyDescriptor {
+            key: "git.squash_before_push".to_string(),
+            label: "Squash before push".to_string(),
+            value_type: ConfigValueType::Bool,
+            current_value: self.git.squash_before_push.to_string(),
+        });
+        keys.push(ConfigKeyDescriptor {
+            key: "git.branch_prefix".to_string(),
+            label: "Branch prefix".to_string(),
+            value_type: ConfigValueType::String,
+            current_value: self.git.branch_prefix.clone(),
+        });
+        keys.push(ConfigKeyDescriptor {
+            key: "git.base_branch".to_string(),
+            label: "Base branch".to_string(),
+            value_type: ConfigValueType::String,
+            current_value: self.git.base_branch.clone(),
+        });
+
+        // Review keys
+        keys.push(ConfigKeyDescriptor {
+            key: "review.enabled".to_string(),
+            label: "Review enabled".to_string(),
+            value_type: ConfigValueType::Bool,
+            current_value: self.review.enabled.to_string(),
+        });
+        keys.push(ConfigKeyDescriptor {
+            key: "review.engine".to_string(),
+            label: "Review engine".to_string(),
+            value_type: ConfigValueType::Enum(vec!["claude".to_string(), "codex".to_string()]),
+            current_value: self.review.engine.to_string(),
+        });
+        keys.push(ConfigKeyDescriptor {
+            key: "review.max_review_rounds".to_string(),
+            label: "Max review rounds".to_string(),
+            value_type: ConfigValueType::U32,
+            current_value: self.review.max_review_rounds.to_string(),
+        });
+
+        // Verify keys
+        keys.push(ConfigKeyDescriptor {
+            key: "verify.fail_on_max_attempts".to_string(),
+            label: "Fail on max attempts".to_string(),
+            value_type: ConfigValueType::Bool,
+            current_value: self.verify.fail_on_max_attempts.to_string(),
+        });
+        keys.push(ConfigKeyDescriptor {
+            key: "verify.max_verify_retries".to_string(),
+            label: "Max verify retries".to_string(),
+            value_type: ConfigValueType::U32,
+            current_value: self.verify.max_verify_retries.to_string(),
+        });
+
+        keys
     }
 }
 
@@ -1051,7 +1299,7 @@ agents:
         let resolved = config.resolve_init();
         assert_eq!(resolved.backend, AgentBackend::Claude);
         assert_eq!(resolved.model, "claude-opus-4-6");
-        assert!(resolved.effort.is_none());
+        assert_eq!(resolved.effort, ReasoningEffort::High);
     }
 
     #[test]
@@ -1063,7 +1311,7 @@ agents:
         let resolved = config.resolve_init();
         assert_eq!(resolved.backend, AgentBackend::Codex);
         assert_eq!(resolved.model, "gpt-5.3-codex");
-        assert_eq!(resolved.effort, Some(ReasoningEffort::Max));
+        assert_eq!(resolved.effort, ReasoningEffort::Max);
     }
 
     #[test]
@@ -1073,6 +1321,7 @@ agents:
         let resolved = config.resolve_plan();
         assert_eq!(resolved.backend, AgentBackend::Claude);
         assert_eq!(resolved.model, "claude-sonnet-4-6");
+        assert_eq!(resolved.effort, ReasoningEffort::High);
     }
 
     #[test]
@@ -1080,7 +1329,7 @@ agents:
         let mut config = CodaConfig::default();
         config.agents.run.effort = Some(ReasoningEffort::High);
         let resolved = config.resolve_run();
-        assert_eq!(resolved.effort, Some(ReasoningEffort::High));
+        assert_eq!(resolved.effort, ReasoningEffort::High);
     }
 
     #[test]
@@ -1090,7 +1339,7 @@ agents:
         // Default review.engine is Codex
         assert_eq!(resolved.backend, AgentBackend::Codex);
         assert_eq!(resolved.model, "gpt-5.3-codex");
-        assert_eq!(resolved.effort, Some(ReasoningEffort::High));
+        assert_eq!(resolved.effort, ReasoningEffort::High);
     }
 
     #[test]
@@ -1100,7 +1349,7 @@ agents:
         let resolved = config.resolve_review();
         assert_eq!(resolved.backend, AgentBackend::Claude);
         assert_eq!(resolved.model, "claude-opus-4-6");
-        assert!(resolved.effort.is_none());
+        assert_eq!(resolved.effort, ReasoningEffort::High);
     }
 
     #[test]
@@ -1112,7 +1361,7 @@ agents:
         let resolved = config.resolve_review();
         assert_eq!(resolved.backend, AgentBackend::Claude);
         assert_eq!(resolved.model, "claude-sonnet-4-6");
-        assert_eq!(resolved.effort, Some(ReasoningEffort::Medium));
+        assert_eq!(resolved.effort, ReasoningEffort::Medium);
     }
 
     #[test]
@@ -1123,7 +1372,7 @@ agents:
         let resolved = config.resolve_review();
         assert_eq!(resolved.backend, AgentBackend::Codex);
         assert_eq!(resolved.model, "o4-mini");
-        assert_eq!(resolved.effort, Some(ReasoningEffort::Low));
+        assert_eq!(resolved.effort, ReasoningEffort::Low);
     }
 
     #[test]
@@ -1136,7 +1385,7 @@ agents:
         // Model falls back to review.codex_model since backend is Codex
         assert_eq!(resolved.model, "gpt-5.3-codex");
         // Effort falls back to review.codex_reasoning_effort since backend is Codex
-        assert_eq!(resolved.effort, Some(ReasoningEffort::High));
+        assert_eq!(resolved.effort, ReasoningEffort::High);
     }
 
     #[test]
@@ -1147,7 +1396,155 @@ agents:
         assert_eq!(resolved.backend, AgentBackend::Cursor);
         // Cursor falls back to agent.model
         assert_eq!(resolved.model, "claude-opus-4-6");
-        // Cursor has no default effort
-        assert!(resolved.effort.is_none());
+        // Cursor falls back to agent.default_effort
+        assert_eq!(resolved.effort, ReasoningEffort::High);
+    }
+
+    #[test]
+    fn test_should_resolve_init_with_custom_default_effort() {
+        let mut config = CodaConfig::default();
+        config.agent.default_effort = ReasoningEffort::Medium;
+        let resolved = config.resolve_init();
+        assert_eq!(resolved.effort, ReasoningEffort::Medium);
+    }
+
+    #[test]
+    fn test_should_resolve_run_per_op_effort_overrides_default() {
+        let mut config = CodaConfig::default();
+        config.agent.default_effort = ReasoningEffort::Low;
+        config.agents.run.effort = Some(ReasoningEffort::Max);
+        let resolved = config.resolve_run();
+        assert_eq!(resolved.effort, ReasoningEffort::Max);
+    }
+
+    #[test]
+    fn test_should_deserialize_default_effort_from_yaml() {
+        let yaml = "version: 1\nagent:\n  default_effort: medium\n";
+        let config: CodaConfig = serde_yaml_ng::from_str(yaml).unwrap();
+        assert_eq!(config.agent.default_effort, ReasoningEffort::Medium);
+    }
+
+    // ── Config Schema ──────────────────────────────────────────────────
+
+    #[test]
+    fn test_should_return_config_keys_for_default_config() {
+        let config = CodaConfig::default();
+        let keys = config.config_keys();
+        // 4 ops * 3 keys + 6 agent + 4 git + 3 review + 2 verify = 27
+        assert_eq!(keys.len(), 27);
+    }
+
+    #[test]
+    fn test_should_return_enum_type_for_backend_keys() {
+        let config = CodaConfig::default();
+        let keys = config.config_keys();
+        let backend_key = keys
+            .iter()
+            .find(|k| k.key == "agents.run.backend")
+            .expect("agents.run.backend key should exist");
+        assert!(matches!(&backend_key.value_type, ConfigValueType::Enum(opts) if opts.len() == 3));
+        assert_eq!(backend_key.current_value, "(default)");
+    }
+
+    #[test]
+    fn test_should_return_suggest_type_for_model_keys() {
+        let config = CodaConfig::default();
+        let keys = config.config_keys();
+        let model_key = keys
+            .iter()
+            .find(|k| k.key == "agents.run.model")
+            .expect("agents.run.model key should exist");
+        assert!(matches!(&model_key.value_type, ConfigValueType::Suggest(_)));
+        assert_eq!(model_key.current_value, "(default)");
+    }
+
+    #[test]
+    fn test_should_suggest_codex_models_when_backend_is_codex() {
+        let mut config = CodaConfig::default();
+        config.agents.run.backend = Some(AgentBackend::Codex);
+        let keys = config.config_keys();
+        let model_key = keys
+            .iter()
+            .find(|k| k.key == "agents.run.model")
+            .expect("agents.run.model key should exist");
+        match &model_key.value_type {
+            ConfigValueType::Suggest(suggestions) => {
+                assert!(suggestions.contains(&"gpt-5.3-codex".to_string()));
+                assert!(suggestions.contains(&"o4-mini".to_string()));
+            }
+            other => panic!("Expected Suggest, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_should_return_model_suggestions_for_each_backend() {
+        let claude = model_suggestions_for(Some(AgentBackend::Claude));
+        assert!(claude.contains(&"claude-opus-4-6".to_string()));
+
+        let codex = model_suggestions_for(Some(AgentBackend::Codex));
+        assert!(codex.contains(&"gpt-5.3-codex".to_string()));
+
+        let cursor = model_suggestions_for(Some(AgentBackend::Cursor));
+        assert!(cursor.contains(&"claude-sonnet-4-6".to_string()));
+
+        // None defaults to Claude
+        let default = model_suggestions_for(None);
+        assert_eq!(default, claude);
+    }
+
+    #[test]
+    fn test_should_show_current_values_for_set_overrides() {
+        let mut config = CodaConfig::default();
+        config.agents.init.backend = Some(AgentBackend::Codex);
+        config.agents.init.model = Some("gpt-5.3-codex".to_string());
+        config.agents.init.effort = Some(ReasoningEffort::Max);
+        let keys = config.config_keys();
+
+        let backend = keys
+            .iter()
+            .find(|k| k.key == "agents.init.backend")
+            .unwrap();
+        assert_eq!(backend.current_value, "codex");
+
+        let model = keys.iter().find(|k| k.key == "agents.init.model").unwrap();
+        assert_eq!(model.current_value, "gpt-5.3-codex");
+
+        let effort = keys.iter().find(|k| k.key == "agents.init.effort").unwrap();
+        assert_eq!(effort.current_value, "max");
+    }
+
+    #[test]
+    fn test_should_return_bool_type_for_boolean_keys() {
+        let config = CodaConfig::default();
+        let keys = config.config_keys();
+        let auto_commit = keys
+            .iter()
+            .find(|k| k.key == "git.auto_commit")
+            .expect("git.auto_commit key should exist");
+        assert_eq!(auto_commit.value_type, ConfigValueType::Bool);
+        assert_eq!(auto_commit.current_value, "true");
+    }
+
+    #[test]
+    fn test_should_return_f64_type_for_budget_key() {
+        let config = CodaConfig::default();
+        let keys = config.config_keys();
+        let budget = keys
+            .iter()
+            .find(|k| k.key == "agent.max_budget_usd")
+            .expect("agent.max_budget_usd key should exist");
+        assert_eq!(budget.value_type, ConfigValueType::F64);
+    }
+
+    #[test]
+    fn test_should_return_u32_type_for_retry_keys() {
+        let config = CodaConfig::default();
+        let keys = config.config_keys();
+        let retries = keys
+            .iter()
+            .find(|k| k.key == "agent.max_retries")
+            .expect("agent.max_retries key should exist");
+        assert_eq!(retries.value_type, ConfigValueType::U32);
+        assert_eq!(retries.current_value, "3");
     }
 }

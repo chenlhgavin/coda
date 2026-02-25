@@ -1,12 +1,12 @@
 //! Codex CLI integration for independent code review.
 //!
-//! Provides a wrapper around the Codex CLI (via `code-agent-sdk`) to perform
+//! Provides a wrapper around the Codex CLI (via `coda-agent-sdk`) to perform
 //! read-only code reviews using a different LLM (e.g., GPT-5.3 Codex).
 //!
 //! # Architecture
 //!
 //! - [`ReviewIssue`] is the normalized issue representation shared by both engines
-//! - [`run_codex_review`] uses `code_agent_sdk::query()` to drive `codex exec`
+//! - [`run_codex_review`] uses `coda_agent_sdk::query()` to drive `codex exec`
 //!   with filesystem access (`sandbox read-only`). The prompt provides only
 //!   metadata (base branch, spec path, changed file list) and Codex reads
 //!   files and runs `git diff` on its own.
@@ -16,7 +16,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
-use code_agent_sdk::{AgentOptions, BackendKind, CodexOptions, ContentBlock, Message, Prompt};
+use coda_agent_sdk::{AgentOptions, BackendKind, CodexOptions, ContentBlock, Message, Prompt};
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc::UnboundedSender;
@@ -82,12 +82,12 @@ pub struct ReviewIssue {
 /// let available = is_codex_available();
 /// ```
 pub fn is_codex_available() -> bool {
-    code_agent_sdk::backend::codex::exec_transport::find_codex_cli(&AgentOptions::default()).is_ok()
+    coda_agent_sdk::backend::codex::exec_transport::find_codex_cli(&AgentOptions::default()).is_ok()
 }
 
 /// Runs a Codex CLI review using filesystem access.
 ///
-/// Uses `code_agent_sdk::query()` to drive `codex exec` with read-only
+/// Uses `coda_agent_sdk::query()` to drive `codex exec` with read-only
 /// filesystem access. Instead of inlining the entire diff in the prompt
 /// (which overflows the context window on large changesets), the prompt
 /// provides only lightweight metadata — base branch, spec file path, and
@@ -135,7 +135,7 @@ pub async fn run_codex_review(
         ..AgentOptions::default()
     };
 
-    let mut stream = std::pin::pin!(code_agent_sdk::query(Prompt::Text(prompt), Some(options)));
+    let mut stream = std::pin::pin!(coda_agent_sdk::query(Prompt::Text(prompt), Some(options)));
     let mut agent_texts: Vec<String> = Vec::new();
 
     while let Some(result) = stream.next().await {
@@ -148,7 +148,7 @@ pub async fn run_codex_review(
                     agent_texts.push(text);
                 }
             }
-            Err(code_agent_sdk::Error::Process { exit_code, stderr }) => {
+            Err(coda_agent_sdk::Error::Process { exit_code, stderr }) => {
                 let error_detail = stderr.unwrap_or_default();
                 warn!(
                     exit_code = exit_code,
@@ -625,7 +625,7 @@ issues:
 
     #[test]
     fn test_should_extract_text_from_sdk_assistant_message() {
-        let content = vec![ContentBlock::Text(code_agent_sdk::TextBlock {
+        let content = vec![ContentBlock::Text(coda_agent_sdk::TextBlock {
             text: "Review output here".to_string(),
         })];
         let texts = extract_text_blocks(&content);
@@ -635,15 +635,15 @@ issues:
     #[test]
     fn test_should_skip_non_text_content_blocks() {
         let content = vec![
-            ContentBlock::ToolUse(code_agent_sdk::ToolUseBlock {
+            ContentBlock::ToolUse(coda_agent_sdk::ToolUseBlock {
                 id: "id".to_string(),
                 name: "Bash".to_string(),
                 input: serde_json::json!({}),
             }),
-            ContentBlock::Text(code_agent_sdk::TextBlock {
+            ContentBlock::Text(coda_agent_sdk::TextBlock {
                 text: "kept".to_string(),
             }),
-            ContentBlock::ToolResult(code_agent_sdk::ToolResultBlock {
+            ContentBlock::ToolResult(coda_agent_sdk::ToolResultBlock {
                 tool_use_id: "id".to_string(),
                 content: None,
                 is_error: None,
@@ -656,10 +656,10 @@ issues:
     #[test]
     fn test_should_skip_empty_text_blocks() {
         let content = vec![
-            ContentBlock::Text(code_agent_sdk::TextBlock {
+            ContentBlock::Text(coda_agent_sdk::TextBlock {
                 text: String::new(),
             }),
-            ContentBlock::Text(code_agent_sdk::TextBlock {
+            ContentBlock::Text(coda_agent_sdk::TextBlock {
                 text: "non-empty".to_string(),
             }),
         ];

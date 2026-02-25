@@ -96,11 +96,15 @@ pub enum ConfigAction {
     },
 
     /// Set a config value by dot-path key.
+    ///
+    /// When both key and value are omitted, launches interactive mode
+    /// with a selection UI. When only the value is omitted, prompts
+    /// for the value interactively.
     Set {
-        /// Dot-path key (e.g., `agents.run.backend`).
-        key: String,
-        /// Value to set.
-        value: String,
+        /// Dot-path key (e.g., `agents.run.backend`). Omit for interactive selection.
+        key: Option<String>,
+        /// Value to set. Omit for interactive input.
+        value: Option<String>,
     },
 }
 

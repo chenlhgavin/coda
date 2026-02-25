@@ -10,7 +10,10 @@ use serde::Deserialize;
 use tracing::{debug, info, instrument, warn};
 
 use crate::commands;
-use crate::formatter::{self, CLEAN_CONFIRM_ACTION, CleanTarget, REPO_SELECT_ACTION};
+use crate::formatter::{
+    self, CLEAN_CONFIRM_ACTION, CONFIG_KEY_SELECT_ACTION, CONFIG_VALUE_SELECT_ACTION, CleanTarget,
+    REPO_SELECT_ACTION,
+};
 use crate::state::AppState;
 
 /// Channel reference from an interaction payload.
@@ -107,6 +110,30 @@ pub async fn handle_interaction(state: Arc<AppState>, payload: serde_json::Value
             } else {
                 debug!("Repo select action received without selected_option");
             }
+        } else if action.action_id == CONFIG_KEY_SELECT_ACTION {
+            if let Some(ref selected) = action.selected_option {
+                handle_config_key_select(
+                    &state,
+                    &interaction.channel.id,
+                    &interaction.message.ts,
+                    &selected.value,
+                )
+                .await;
+            } else {
+                debug!("Config key select action received without selected_option");
+            }
+        } else if action.action_id == CONFIG_VALUE_SELECT_ACTION {
+            if let Some(ref selected) = action.selected_option {
+                handle_config_value_select(
+                    &state,
+                    &interaction.channel.id,
+                    &interaction.message.ts,
+                    &selected.value,
+                )
+                .await;
+            } else {
+                debug!("Config value select action received without selected_option");
+            }
         } else {
             debug!(action_id = %action.action_id, "Unknown interaction action, ignoring");
         }
@@ -196,6 +223,116 @@ async fn execute_clean(
     result
 }
 
+/// Handles config key selection: finds the descriptor for the selected
+/// key and updates the message with the value picker.
+async fn handle_config_key_select(
+    state: &AppState,
+    channel_id: &str,
+    message_ts: &str,
+    selected_key: &str,
+) {
+    let blocks = match resolve_config_descriptor(state, channel_id, selected_key).await {
+        Ok(descriptor) => {
+            info!(channel_id, key = selected_key, "Config key selected");
+            formatter::config_value_select(&descriptor)
+        }
+        Err(msg) => {
+            warn!(channel_id, error = %msg, "Config key select failed");
+            formatter::error(&msg)
+        }
+    };
+
+    if let Err(e) = state
+        .slack()
+        .update_message(channel_id, message_ts, blocks)
+        .await
+    {
+        warn!(error = %e, channel_id, "Failed to update config key select message");
+    }
+}
+
+/// Handles config value selection: parses `key=value` from the option,
+/// applies the config change, and updates the message with the result.
+async fn handle_config_value_select(
+    state: &AppState,
+    channel_id: &str,
+    message_ts: &str,
+    encoded_value: &str,
+) {
+    let blocks = match execute_config_set(state, channel_id, encoded_value).await {
+        Ok((key, value)) => {
+            info!(channel_id, key = %key, value = %value, "Config value set via interaction");
+            vec![serde_json::json!({
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": format!(":white_check_mark: Updated `{key}` = `{value}`")
+                }
+            })]
+        }
+        Err(msg) => {
+            warn!(channel_id, error = %msg, "Config value select failed");
+            formatter::error(&msg)
+        }
+    };
+
+    if let Err(e) = state
+        .slack()
+        .update_message(channel_id, message_ts, blocks)
+        .await
+    {
+        warn!(error = %e, channel_id, "Failed to update config value select message");
+    }
+}
+
+/// Resolves the config descriptor for a selected key by creating an
+/// Engine from the channel binding.
+async fn resolve_config_descriptor(
+    state: &AppState,
+    channel_id: &str,
+    key: &str,
+) -> Result<coda_core::ConfigKeyDescriptor, String> {
+    let repo_path = state.bindings().get(channel_id).ok_or(
+        "Channel binding was removed. Use `/coda repos` to clone and bind a repository first.",
+    )?;
+
+    let engine = coda_core::Engine::new(repo_path)
+        .await
+        .map_err(|e| format!("Failed to initialize engine: {e}"))?;
+
+    let schema = engine.config_schema();
+    schema
+        .into_iter()
+        .find(|d| d.key == key)
+        .ok_or_else(|| format!("Unknown config key: `{key}`"))
+}
+
+/// Parses `key=value` from the encoded option, creates an Engine, and
+/// applies the config change.
+async fn execute_config_set(
+    state: &AppState,
+    channel_id: &str,
+    encoded: &str,
+) -> Result<(String, String), String> {
+    let (key, value) = encoded
+        .split_once('=')
+        .ok_or_else(|| format!("Invalid config value encoding: `{encoded}`"))?;
+
+    let repo_path = state.bindings().get(channel_id).ok_or(
+        "Channel binding was removed. Use `/coda repos` to clone and bind a repository first.",
+    )?;
+
+    let engine = coda_core::Engine::new(repo_path)
+        .await
+        .map_err(|e| format!("Failed to initialize engine: {e}"))?;
+
+    engine
+        .config_set(key, value)
+        .map_err(|e| format!("Failed to set config: {e}"))?;
+
+    Ok((key.to_string(), value.to_string()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -275,5 +412,60 @@ mod tests {
         let parsed: Vec<CleanTarget> = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.len(), 1);
         assert_eq!(parsed[0].slug, "add-auth");
+    }
+
+    #[test]
+    fn test_should_deserialize_config_key_select_action() {
+        let json = serde_json::json!({
+            "type": "block_actions",
+            "actions": [{
+                "action_id": CONFIG_KEY_SELECT_ACTION,
+                "type": "static_select",
+                "selected_option": {
+                    "text": { "type": "plain_text", "text": "agents.run.backend" },
+                    "value": "agents.run.backend"
+                }
+            }],
+            "channel": { "id": "C123" },
+            "message": { "ts": "123.456" }
+        });
+
+        let payload: InteractionPayload = serde_json::from_value(json).unwrap();
+        assert_eq!(payload.actions.len(), 1);
+        assert_eq!(payload.actions[0].action_id, CONFIG_KEY_SELECT_ACTION);
+        let selected = payload.actions[0]
+            .selected_option
+            .as_ref()
+            .expect("selected_option");
+        assert_eq!(selected.value, "agents.run.backend");
+    }
+
+    #[test]
+    fn test_should_deserialize_config_value_select_action() {
+        let json = serde_json::json!({
+            "type": "block_actions",
+            "actions": [{
+                "action_id": CONFIG_VALUE_SELECT_ACTION,
+                "type": "static_select",
+                "selected_option": {
+                    "text": { "type": "plain_text", "text": "codex" },
+                    "value": "agents.run.backend=codex"
+                }
+            }],
+            "channel": { "id": "C123" },
+            "message": { "ts": "123.456" }
+        });
+
+        let payload: InteractionPayload = serde_json::from_value(json).unwrap();
+        assert_eq!(payload.actions.len(), 1);
+        assert_eq!(payload.actions[0].action_id, CONFIG_VALUE_SELECT_ACTION);
+        let selected = payload.actions[0]
+            .selected_option
+            .as_ref()
+            .expect("selected_option");
+        // Verify key=value encoding
+        let (key, value) = selected.value.split_once('=').expect("key=value split");
+        assert_eq!(key, "agents.run.backend");
+        assert_eq!(value, "codex");
     }
 }
