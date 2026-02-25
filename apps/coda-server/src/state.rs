@@ -3,13 +3,16 @@
 //! [`AppState`] is the central state container passed (as `Arc<AppState>`) to
 //! all handlers. [`BindingStore`] manages channel-to-repository mappings with
 //! concurrent access via [`DashMap`] and persistence to the config file.
-//! [`RunningTasks`] tracks in-flight init/run tasks to prevent duplicates.
+//! [`RunningTasks`] tracks in-flight init/run tasks to prevent duplicates
+//! and supports graceful cancellation via stored
+//! [`CancellationToken`](tokio_util::sync::CancellationToken)s.
 //! [`SessionManager`](crate::session::SessionManager) tracks active plan sessions.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use dashmap::DashMap;
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, info};
 
 use crate::config::ServerConfig;
@@ -224,11 +227,21 @@ impl std::fmt::Debug for BindingStore {
     }
 }
 
-/// Tracks in-flight init/run tasks to prevent duplicate executions.
+/// A running task entry storing both the join handle and cancellation token.
+#[derive(Debug)]
+struct TaskEntry {
+    handle: tokio::task::JoinHandle<()>,
+    cancel_token: CancellationToken,
+}
+
+/// Tracks in-flight init/run tasks to prevent duplicate executions and
+/// supports graceful cancellation via stored
+/// [`CancellationToken`](tokio_util::sync::CancellationToken)s.
 ///
-/// Keys follow the convention `"init:{channel_id}"` or `"run:{slug}"`.
-/// Each entry stores a [`tokio::task::JoinHandle`] for the spawned task,
-/// allowing status checks and cleanup when the task completes.
+/// Keys follow the convention `"init:{repo_path}"` or `"run:{repo_path}:{slug}"`.
+/// Each entry stores both a [`tokio::task::JoinHandle`] and a
+/// [`CancellationToken`] so the task can be cancelled during server shutdown
+/// or by explicit user action.
 ///
 /// # Examples
 ///
@@ -240,7 +253,7 @@ impl std::fmt::Debug for BindingStore {
 /// ```
 #[derive(Debug)]
 pub struct RunningTasks {
-    tasks: DashMap<String, tokio::task::JoinHandle<()>>,
+    tasks: DashMap<String, TaskEntry>,
 }
 
 impl RunningTasks {
@@ -257,7 +270,7 @@ impl RunningTasks {
     /// it is removed and `false` is returned.
     pub fn is_running(&self, key: &str) -> bool {
         if let Some(entry) = self.tasks.get(key) {
-            if entry.value().is_finished() {
+            if entry.value().handle.is_finished() {
                 drop(entry);
                 self.tasks.remove(key);
                 return false;
@@ -267,17 +280,74 @@ impl RunningTasks {
         false
     }
 
-    /// Inserts a running task with the given key.
+    /// Inserts a running task with the given key and cancellation token.
     ///
     /// If a previous task existed under this key, it is replaced (the old
     /// handle is dropped but the task itself continues running).
-    pub fn insert(&self, key: String, handle: tokio::task::JoinHandle<()>) {
-        self.tasks.insert(key, handle);
+    pub fn insert(
+        &self,
+        key: String,
+        handle: tokio::task::JoinHandle<()>,
+        cancel_token: CancellationToken,
+    ) {
+        self.tasks.insert(
+            key,
+            TaskEntry {
+                handle,
+                cancel_token,
+            },
+        );
     }
 
     /// Removes a task entry by key.
     pub fn remove(&self, key: &str) {
         self.tasks.remove(key);
+    }
+
+    /// Cancels a specific running task by its key.
+    ///
+    /// Returns `true` if the task was found and its cancellation token
+    /// was triggered. Returns `false` if no running task exists under
+    /// the given key (or it has already finished).
+    pub fn cancel(&self, key: &str) -> bool {
+        if let Some(entry) = self.tasks.get(key)
+            && !entry.value().handle.is_finished()
+        {
+            entry.value().cancel_token.cancel();
+            info!(key, "Cancelled running task");
+            return true;
+        }
+        false
+    }
+
+    /// Returns all keys of currently running (non-finished) tasks.
+    pub fn running_keys(&self) -> Vec<String> {
+        self.tasks
+            .iter()
+            .filter(|e| !e.value().handle.is_finished())
+            .map(|e| e.key().clone())
+            .collect()
+    }
+
+    /// Cancels all running tasks by triggering their cancellation tokens.
+    ///
+    /// Called during server shutdown to ensure in-flight init/run tasks
+    /// can perform their cleanup (state persistence, session disconnect)
+    /// before the process exits.
+    ///
+    /// Returns the number of tasks that were cancelled.
+    pub fn cancel_all(&self) -> usize {
+        let mut count = 0;
+        for entry in self.tasks.iter() {
+            if !entry.value().handle.is_finished() {
+                entry.value().cancel_token.cancel();
+                count += 1;
+            }
+        }
+        if count > 0 {
+            info!(count, "Cancelled running tasks");
+        }
+        count
     }
 }
 
@@ -502,7 +572,8 @@ mod tests {
         let handle = _rt.spawn(async {
             tokio::time::sleep(std::time::Duration::from_secs(60)).await;
         });
-        tasks.insert("run:add-auth".to_string(), handle);
+        let token = CancellationToken::new();
+        tasks.insert("run:add-auth".to_string(), handle, token);
         assert!(tasks.is_running("run:add-auth"));
     }
 
@@ -517,7 +588,8 @@ mod tests {
         let handle = _rt.spawn(async {
             tokio::time::sleep(std::time::Duration::from_secs(60)).await;
         });
-        tasks.insert("run:add-auth".to_string(), handle);
+        let token = CancellationToken::new();
+        tasks.insert("run:add-auth".to_string(), handle, token);
         tasks.remove("run:add-auth");
         assert!(!tasks.is_running("run:add-auth"));
     }
@@ -531,9 +603,10 @@ mod tests {
         let tasks = RunningTasks::new();
         // Spawn a task that completes immediately
         let handle = rt.spawn(async {});
+        let token = CancellationToken::new();
         // Wait for it to finish
         rt.block_on(async { tokio::time::sleep(std::time::Duration::from_millis(10)).await });
-        tasks.insert("run:done".to_string(), handle);
+        tasks.insert("run:done".to_string(), handle, token);
         // is_running should detect it's finished and clean up
         assert!(!tasks.is_running("run:done"));
     }
@@ -542,6 +615,34 @@ mod tests {
     fn test_should_default_running_tasks() {
         let tasks = RunningTasks::default();
         assert!(!tasks.is_running("anything"));
+    }
+
+    #[test]
+    fn test_should_cancel_all_running_tasks() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let tasks = RunningTasks::new();
+
+        let token1 = CancellationToken::new();
+        let token1_clone = token1.clone();
+        let handle1 = rt.spawn(async move {
+            token1_clone.cancelled().await;
+        });
+        tasks.insert("run:task1".to_string(), handle1, token1.clone());
+
+        let token2 = CancellationToken::new();
+        let token2_clone = token2.clone();
+        let handle2 = rt.spawn(async move {
+            token2_clone.cancelled().await;
+        });
+        tasks.insert("run:task2".to_string(), handle2, token2.clone());
+
+        let cancelled = tasks.cancel_all();
+        assert_eq!(cancelled, 2);
+        assert!(token1.is_cancelled());
+        assert!(token2.is_cancelled());
     }
 
     #[test]

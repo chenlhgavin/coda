@@ -13,6 +13,7 @@ include = ["src/**/*.rs", "Cargo.toml"]
 [dependencies]
 coda-pm = { workspace = true }
 tokio = { workspace = true }
+tokio-util = { workspace = true }
 claude-agent-sdk-rs = { workspace = true }
 minijinja = { workspace = true }
 serde = { workspace = true }

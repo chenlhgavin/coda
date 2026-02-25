@@ -6,9 +6,21 @@ An AI-driven CLI that orchestrates the full feature development lifecycle: analy
 
 CODA orchestrates feature development using Claude AI. You describe a feature, CODA plans it interactively via a TUI, then executes the full development cycle — coding, reviewing, verifying, and opening a pull request — autonomously.
 
-Each feature gets an isolated git worktree and branch. Execution proceeds through dynamic development phases (derived from the design spec), followed by fixed review and verify phases. State is persisted to `state.yml` so interrupted runs can resume from the last completed phase.
+Each feature gets an isolated git worktree and branch. Execution proceeds through dynamic development phases (derived from the design spec), followed by fixed review, verify, and update-docs phases. State is persisted to `state.yml` so interrupted runs can resume from the last completed phase.
 
-CODA turns a feature description into a reviewed, tested pull request with minimal human intervention. It supports parallel features via worktrees, cost tracking per phase, and configurable quality checks.
+CODA turns a feature description into a reviewed, tested pull request with minimal human intervention. It supports parallel features via worktrees, cost tracking per phase, graceful cancellation with Ctrl+C, and configurable quality checks.
+
+## Features
+
+- **Interactive planning** — Multi-turn TUI conversation with Claude to produce a design spec and verification plan
+- **Phased execution** — Dynamic development phases followed by review, verify, update-docs, and PR creation
+- **Crash recovery** — State persisted after each phase; interrupted runs resume from the last completed phase
+- **Budget tracking** — Per-phase cost tracking with budget limits, accurate across resumed sessions
+- **Graceful cancellation** — Ctrl+C saves progress and exits cleanly; resume with `coda run`
+- **Multiple review engines** — Claude self-review, Codex independent review, or hybrid mode
+- **Configurable verification** — Run build, format, lint, and test checks with bounded retry loops
+- **Isolated worktrees** — Each feature gets its own git worktree and branch
+- **Slack integration** — Team-based workflows via slash commands in Slack threads
 
 ## Prerequisites
 
@@ -93,22 +105,31 @@ coda run add-user-auth
   CODA Run: add-user-auth
   ═══════════════════════════════════════
 
-  Phases: auth-types → auth-middleware → review → verify → PR
+  Phases: auth-types → auth-middleware → review → verify → update-docs → PR
 
-  [▸] auth-types              Running...  (1/4)
+  [▸] auth-types              Running...  (1/5)
   [✓] auth-types              5m 12s    3 turns  $0.1200
-  [▸] auth-middleware          Running...  (2/4)
+  [▸] auth-middleware          Running...  (2/5)
   [✓] auth-middleware          12m 03s   12 turns  $1.8500
-  [▸] review                  Running...  (3/4)
+  [▸] review                  Running...  (3/5)
   [✓] review                  3m 45s    5 turns  $0.5200
-  [▸] verify                  Running...  (4/4)
+  [▸] verify                  Running...  (4/5)
   [✓] verify                  2m 30s    4 turns  $0.3800
+  [▸] update-docs             Running...  (5/5)
+  [✓] update-docs             1m 15s    2 turns  $0.1500
   [▸] create-pr              Running...
   [✓] create-pr              PR: https://github.com/org/repo/pull/42
 
   ─────────────────────────────────────
-  Total: 23m 30s elapsed, 24 turns, $2.8700 USD
+  Total: 24m 45s elapsed, 26 turns, $3.0200 USD
   ═══════════════════════════════════════
+```
+
+Press Ctrl+C at any time to cancel gracefully. Progress is saved and the run can be resumed:
+
+```
+  CODA Run: add-user-auth — cancelled
+  Progress has been saved. Run `coda run add-user-auth` to resume.
 ```
 
 ### Step 4: List features
@@ -120,7 +141,7 @@ coda list
 ```
   Feature                      Status         Branch                          Turns     Cost
   ──────────────────────────────────────────────────────────────────────────────────────────
-  add-user-auth                ● completed    feature/add-user-auth              24   $2.8700
+  add-user-auth                ● completed    feature/add-user-auth              26   $3.0200
 
   1 feature(s) total
 ```
@@ -137,7 +158,7 @@ coda status add-user-auth
 
   Status:     ● completed
   Created:    2026-02-18 10:00:00 UTC
-  Updated:    2026-02-18 10:24:00 UTC
+  Updated:    2026-02-18 10:25:00 UTC
 
   Git
   ─────────────────────────────────────
@@ -152,6 +173,7 @@ coda status add-user-auth
   auth-middl…  ● completed        12   $1.8500   12m 03s
   review       ● completed         5   $0.5200    3m 45s
   verify       ● completed         4   $0.3800    2m 30s
+  update-docs  ● completed         2   $0.1500    1m 15s
 
   Pull Request
   ─────────────────────────────────────
@@ -160,10 +182,10 @@ coda status add-user-auth
 
   Summary
   ─────────────────────────────────────
-  Total turns:    24
-  Total cost:     $2.8700 USD
-  Total duration: 23m 30s
-  Tokens:         150000 in / 45000 out
+  Total turns:    26
+  Total cost:     $3.0200 USD
+  Total duration: 24m 45s
+  Tokens:         160000 in / 48000 out
   ═══════════════════════════════════════
 ```
 
@@ -191,7 +213,7 @@ Use `--dry-run` to preview what would be removed, or `--yes` / `-y` to skip the 
 
 | Command | Description | Arguments / Flags |
 |---------|-------------|-------------------|
-| `coda init` | Initialize repo as a CODA project | — |
+| `coda init` | Initialize repo as a CODA project | `--force`, `--no-commit` |
 | `coda plan <slug>` | Interactive feature planning | `slug`: feature identifier |
 | `coda run <slug>` | Execute feature development | `slug`: feature to run |
 | `coda list` | List all features with status | — |
@@ -241,11 +263,11 @@ version: 1
 
 agent:
   model: "claude-opus-4-6"       # Claude model to use
-  max_budget_usd: 20.0           # Max spend per `coda run`
+  max_budget_usd: 20.0           # Max spend per `coda run` (tracked across resumes)
   max_retries: 3                 # Retries per phase on failure
   max_turns: 100                 # Max agent turns per phase
 
-checks:                          # Commands run after each phase
+checks:                          # Commands run during verification
   - "cargo build"
   - "cargo +nightly fmt -- --check"
   - "cargo clippy -- -D warnings"
@@ -256,12 +278,20 @@ prompts:
 
 git:
   auto_commit: true              # Commit after each phase
+  squash_before_push: true       # Squash commits before pushing
   branch_prefix: "feature"       # Branch: feature/<slug>
   base_branch: "auto"            # Auto-detect default branch
 
 review:
   enabled: true                  # Enable code review phase
   max_review_rounds: 5           # Max review iterations
+  engine: "claude"               # Review engine: claude, codex, or hybrid
+  codex_model: "gpt-5.3-codex"   # Model for Codex reviews
+  codex_reasoning_effort: "high" # Reasoning effort: low, medium, high
+
+verify:
+  max_verify_retries: 3          # Retries after initial verification (4 total attempts)
+  fail_on_max_attempts: false    # Fail the run if all retries exhausted
 ```
 
 All fields have sensible defaults. A minimal config can be as simple as:
@@ -270,11 +300,13 @@ All fields have sensible defaults. A minimal config can be as simple as:
 version: 1
 ```
 
+**Backward compatibility:** The `verify.max_retries` field name is accepted as an alias for `verify.max_verify_retries`. The `review.codex_reasoning_effort` field accepts legacy values (`minimal`, `moderate`, `xhigh`) in addition to canonical values (`low`, `medium`, `high`).
+
 ## How It Works
 
-`coda init` analyzes the repository and generates a project overview. `coda plan` opens an interactive design session where you collaborate with Claude to produce a design spec and verification plan. `coda run` executes the development phases, runs configurable quality checks between phases, performs code review, verifies the result, and opens a pull request.
+`coda init` analyzes the repository and generates a project overview. `coda plan` opens an interactive design session where you collaborate with Claude to produce a design spec and verification plan. `coda run` executes the development phases, runs configurable quality checks between phases, performs code review, verifies the result, updates documentation, and opens a pull request.
 
-Each feature runs in an isolated git worktree. State is tracked in `state.yml` for crash recovery — if a run is interrupted, re-running `coda run` resumes from the last completed phase. Cost is tracked per phase and displayed in real time.
+Each feature runs in an isolated git worktree. State is tracked in `state.yml` for crash recovery — if a run is interrupted (or cancelled with Ctrl+C), re-running `coda run` resumes from the last completed phase with accurate budget tracking.
 
 ```
 ┌─────────────────────────────────────────────────────────┐
@@ -289,8 +321,8 @@ Each feature runs in an isolated git worktree. State is tracked in `state.yml` f
                         │
 ┌───────────────────────▼─────────────────────────────────┐
 │                   coda-core (lib)                        │
-│  Engine · Planner · Runner · Reviewer                   │
-│  FeatureScanner · GitOps · GhOps (traits)               │
+│  Engine · Runner · Phase Executors · Reviewer           │
+│  AgentSession · StateManager · GitOps · GhOps           │
 └──────────┬────────────────────────┬─────────────────────┘
            │                        │
 ┌──────────▼───────────┐  ┌────────▼─────────────────────┐
@@ -322,7 +354,7 @@ cargo audit                              # Security audit
 |------|---------|
 | `apps/coda-cli` | CLI binary — TUI, argument parsing, app logic |
 | `apps/coda-server` | Server binary — Slack integration, repo management, command dispatch |
-| `crates/coda-core` | Core library — engine, planner, runner, reviewer, state |
+| `crates/coda-core` | Core library — engine, runner, phase executors, agent session, state manager |
 | `crates/coda-pm` | Prompt manager — Jinja2 template loading and rendering |
 | `vendors/claude-agent-sdk-rs` | Vendored Claude Agent SDK |
 | `specs/` | Feature specs and design documents |

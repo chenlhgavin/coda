@@ -9,10 +9,15 @@ use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use coda_core::{Engine, InitEvent, RunEvent};
+use tokio_util::sync::CancellationToken;
 use tracing::info;
 
 use crate::fmt_utils::{format_duration, truncate_str};
 use crate::ui::PlanUi;
+
+/// Maximum time to wait for the engine to complete its cancellation
+/// cleanup (state persistence, session disconnect) after Ctrl+C.
+const CANCEL_CLEANUP_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Application state holding the core engine.
 pub struct App {
@@ -75,7 +80,10 @@ impl App {
 
         let mut ui = crate::init_ui::InitUi::new(&project_root_display)?;
 
-        let engine_future = self.engine.init(no_commit, force, Some(tx));
+        let cancel_token = CancellationToken::new();
+        let engine_future = self
+            .engine
+            .init(no_commit, force, Some(tx), cancel_token.clone());
 
         tokio::pin!(engine_future);
 
@@ -106,10 +114,25 @@ impl App {
         // If engine completed but select! picked the UI branch first (both
         // were ready simultaneously), await the engine future now — it will
         // return immediately since it already completed.
-        // Guard: skip if UI errored (e.g. Ctrl+C) to avoid blocking on the
-        // engine future while the user wants to cancel.
         if engine_result.is_none() && ui_result.is_ok() {
-            engine_result = Some(engine_future.await);
+            engine_result = Some(engine_future.as_mut().await);
+        }
+
+        // If UI errored (Ctrl+C), cancel the engine and await its cleanup
+        // (state persistence, session disconnect) with a bounded timeout.
+        if ui_result.is_err() && engine_result.is_none() {
+            cancel_token.cancel();
+            match tokio::time::timeout(CANCEL_CLEANUP_TIMEOUT, engine_future).await {
+                Ok(result) => {
+                    engine_result = Some(result);
+                }
+                Err(_) => {
+                    info!(
+                        "Engine cleanup timed out after {}s, proceeding with cancellation",
+                        CANCEL_CLEANUP_TIMEOUT.as_secs(),
+                    );
+                }
+            }
         }
 
         // Drop UI to restore terminal before printing final output
@@ -149,6 +172,15 @@ impl App {
                 );
                 Ok(())
             }
+            // Cancellation from engine (Ctrl+C propagated) — friendly message, not FAILED
+            (Some(Err(coda_core::CoreError::Cancelled)), _) | (_, Err(_)) => {
+                info!("Init cancelled by user");
+                println!();
+                println!("  CODA Init: {project_root_display} — cancelled");
+                println!("  Run `coda init` again to retry.");
+                println!();
+                Ok(())
+            }
             (Some(Err(e)), _) => {
                 println!();
                 println!("  CODA Init: {project_root_display} — FAILED");
@@ -157,15 +189,6 @@ impl App {
                 println!("  ═══════════════════════════════════════");
                 println!();
                 std::process::exit(1);
-            }
-            (_, Err(_)) => {
-                // UI cancelled (e.g. Ctrl+C) — show friendly message
-                info!("Init cancelled by user");
-                println!();
-                println!("  CODA Init: {project_root_display} — cancelled");
-                println!("  Run `coda init` again to retry.");
-                println!();
-                Ok(())
             }
             (None, _) => {
                 // Should never happen: engine_future is awaited above as fallback
@@ -518,9 +541,11 @@ impl App {
 
         let slug = feature_slug.to_string();
 
+        let cancel_token = CancellationToken::new();
+
         // We cannot move `engine` into a spawned task (it's borrowed),
         // so we run the engine concurrently via `tokio::select!`.
-        let engine_future = self.engine.run(&slug, Some(tx));
+        let engine_future = self.engine.run(&slug, Some(tx), cancel_token.clone());
 
         tokio::pin!(engine_future);
 
@@ -552,10 +577,25 @@ impl App {
         // If engine completed but select! picked the UI branch first (both
         // were ready simultaneously), await the engine future now — it will
         // return immediately since it already completed.
-        // Guard: skip if UI errored (e.g. Ctrl+C) to avoid blocking on the
-        // engine future while the user wants to cancel.
         if engine_result.is_none() && ui_result.is_ok() {
-            engine_result = Some(engine_future.await);
+            engine_result = Some(engine_future.as_mut().await);
+        }
+
+        // If UI errored (Ctrl+C), cancel the engine and await its cleanup
+        // (state persistence, session disconnect) with a bounded timeout.
+        if ui_result.is_err() && engine_result.is_none() {
+            cancel_token.cancel();
+            match tokio::time::timeout(CANCEL_CLEANUP_TIMEOUT, engine_future).await {
+                Ok(result) => {
+                    engine_result = Some(result);
+                }
+                Err(_) => {
+                    info!(
+                        "Engine cleanup timed out after {}s, proceeding with cancellation",
+                        CANCEL_CLEANUP_TIMEOUT.as_secs(),
+                    );
+                }
+            }
         }
 
         // Drop UI to restore terminal before printing final output
@@ -587,6 +627,15 @@ impl App {
                 println!();
                 Ok(())
             }
+            // Cancellation from engine (Ctrl+C propagated) — friendly message, not FAILED
+            (Some(Err(coda_core::CoreError::Cancelled)), _) | (_, Err(_)) => {
+                info!("Run cancelled by user");
+                println!();
+                println!("  CODA Run: {feature_slug} — cancelled");
+                println!("  Progress has been saved. Run `coda run {feature_slug}` to resume.");
+                println!();
+                Ok(())
+            }
             (Some(Err(e)), _) => {
                 println!();
                 println!("  CODA Run: {feature_slug} — FAILED");
@@ -595,15 +644,6 @@ impl App {
                 println!("  ═══════════════════════════════════════");
                 println!();
                 std::process::exit(1);
-            }
-            (_, Err(_)) => {
-                // UI cancelled (e.g. Ctrl+C) — show friendly message with resume hint
-                info!("Run cancelled by user");
-                println!();
-                println!("  CODA Run: {feature_slug} — cancelled");
-                println!("  Progress has been saved. Run `coda run {feature_slug}` to resume.");
-                println!();
-                Ok(())
             }
             (None, _) => {
                 // Should never happen: engine_future is awaited above as fallback
@@ -622,6 +662,8 @@ impl App {
         println!();
 
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<RunEvent>();
+
+        let cancel_token = CancellationToken::new();
 
         // Spawn a lightweight task to display progress events in real-time
         let display_handle = tokio::spawn(async move {
@@ -734,7 +776,7 @@ impl App {
         });
 
         // Run the engine in the current task (sender is dropped when done)
-        let run_result = self.engine.run(feature_slug, Some(tx)).await;
+        let run_result = self.engine.run(feature_slug, Some(tx), cancel_token).await;
 
         // Wait for all progress events to be displayed
         let _ = display_handle.await;
@@ -769,6 +811,15 @@ impl App {
                 println!("  ═══════════════════════════════════════");
                 println!();
 
+                Ok(())
+            }
+            // Cancellation — friendly message with resume hint, not FAILED
+            Err(coda_core::CoreError::Cancelled) => {
+                info!("Run cancelled by user");
+                println!();
+                println!("  CODA Run: {feature_slug} — cancelled");
+                println!("  Progress has been saved. Run `coda run {feature_slug}` to resume.");
+                println!();
                 Ok(())
             }
             Err(e) => {

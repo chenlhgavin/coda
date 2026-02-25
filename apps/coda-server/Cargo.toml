@@ -17,6 +17,7 @@ path = "src/main.rs"
 [dependencies]
 coda-core = { workspace = true }
 tokio = { workspace = true, features = ["signal"] }
+tokio-util = { workspace = true }
 reqwest = { workspace = true, features = ["multipart"] }
 tokio-tungstenite = { workspace = true }
 dashmap = { workspace = true }

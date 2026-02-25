@@ -3,7 +3,7 @@
 //! Each submodule implements one or more related commands:
 //! - [`init`] — `/coda init` with live progress updates
 //! - [`plan`] — `/coda plan` with interactive Slack thread sessions
-//! - [`query`] — `/coda help`, `/coda list`, `/coda status`, `/coda clean`
+//! - [`query`] — `/coda help`, `/coda list`, `/coda status`, `/coda clean`, `/coda cancel`
 //! - [`repos`] — `/coda repos` and `/coda switch`
 //! - [`run`] — `/coda run` with live progress updates
 //!

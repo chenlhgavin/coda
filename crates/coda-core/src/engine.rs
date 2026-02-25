@@ -10,22 +10,25 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use claude_agent_sdk_rs::{Message, ResultMessage};
+use claude_agent_sdk_rs::ClaudeClient;
 use coda_pm::PromptManager;
 use futures::StreamExt;
 use serde::Serialize;
-use tracing::{debug, error, info, warn};
+use tokio_util::sync::CancellationToken;
+use tracing::{debug, info, warn};
 
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::CoreError;
+use crate::async_ops::AsyncGitOps;
 use crate::config::CodaConfig;
-use crate::gh::{DefaultGhOps, GhOps};
+use crate::gh::{DefaultGhOps, GhOps, PrState};
 use crate::git::{DefaultGitOps, GitOps};
 use crate::planner::PlanSession;
 use crate::profile::AgentProfile;
 use crate::runner::RunEvent;
 use crate::scanner::FeatureScanner;
+use crate::session::{AgentSession, SessionConfig, SessionEvent};
 use crate::task::TaskResult;
 
 /// Directories to skip when building the repository tree.
@@ -277,10 +280,10 @@ impl Engine {
 
     /// Initializes the current repository as a CODA project.
     ///
-    /// The init flow performs two streaming agent calls:
-    /// 1. `query_stream(Planner)` with `init/analyze_repo` to analyze the
+    /// The init flow uses two temporary [`AgentSession`]s:
+    /// 1. Planner profile with `init/analyze_repo` to analyze the
     ///    repository structure, tech stack, and architecture.
-    /// 2. `query_stream(Coder)` with `init/setup_project` to create `.coda/`,
+    /// 2. Coder profile with `init/setup_project` to create `.coda/`,
     ///    `.trees/`, `config.yml`, `.coda.md`, and update `.gitignore`.
     ///
     /// When `force` is `true`, skips the `.coda/` existence check and
@@ -291,8 +294,12 @@ impl Engine {
     /// progress display. When `None`, the function behaves silently (useful
     /// for testing or CI).
     ///
+    /// The `cancel_token` enables graceful cancellation between phases
+    /// and during agent streaming.
+    ///
     /// # Errors
     ///
+    /// Returns `CoreError::Cancelled` if the cancellation token is triggered.
     /// Returns `CoreError::ConfigError` if the project is already initialized
     /// (`.coda/` exists) and `force` is `false`, or `CoreError::AgentError`
     /// if agent calls fail.
@@ -301,6 +308,7 @@ impl Engine {
         no_commit: bool,
         force: bool,
         progress_tx: Option<UnboundedSender<InitEvent>>,
+        cancel_token: CancellationToken,
     ) -> Result<(), CoreError> {
         // 1. Check if .coda/ already exists (skip when force=true)
         if self.project_root.join(".coda").exists() && !force {
@@ -321,7 +329,10 @@ impl Engine {
         let system_prompt = self.pm.render("init/system", minijinja::context!())?;
 
         // 3. Analyze repository structure (phase 0)
-        let analysis_result = match self.run_analyze_phase(&system_prompt, &progress_tx).await {
+        let analysis_result = match self
+            .run_analyze_phase(&system_prompt, &progress_tx, &cancel_token)
+            .await
+        {
             Ok(result) => result,
             Err(e) => {
                 emit(
@@ -337,9 +348,21 @@ impl Engine {
             }
         };
 
+        // Check cancellation between phases
+        if cancel_token.is_cancelled() {
+            emit(&progress_tx, InitEvent::InitFinished { success: false });
+            return Err(CoreError::Cancelled);
+        }
+
         // 4. Setup project structure (phase 1)
         if let Err(e) = self
-            .run_setup_phase(&system_prompt, &analysis_result, force, &progress_tx)
+            .run_setup_phase(
+                &system_prompt,
+                &analysis_result,
+                force,
+                &progress_tx,
+                &cancel_token,
+            )
             .await
         {
             emit(
@@ -371,9 +394,28 @@ impl Engine {
             return Err(CoreError::AgentError(msg));
         }
 
+        // Check cancellation before committing init artifacts
+        if cancel_token.is_cancelled() {
+            emit(&progress_tx, InitEvent::InitFinished { success: false });
+            return Err(CoreError::Cancelled);
+        }
+
         // 5. Auto-commit init artifacts unless --no-commit
+        // Wrapped in spawn_blocking because git operations block the thread.
         if !no_commit {
-            self.commit_init_artifacts(force)?;
+            let git = Arc::clone(&self.git);
+            let root = self.project_root.clone();
+            tokio::task::spawn_blocking(move || {
+                let paths: &[&str] = &[".coda/", ".coda.md", "CLAUDE.md", ".gitignore"];
+                let message = if force {
+                    "chore: reinitialize CODA project"
+                } else {
+                    "chore: initialize CODA project"
+                };
+                commit_coda_artifacts(git.as_ref(), &root, paths, message)
+            })
+            .await
+            .map_err(|e| CoreError::AgentError(format!("spawn_blocking join error: {e}")))??;
         }
 
         emit(&progress_tx, InitEvent::InitFinished { success: true });
@@ -381,105 +423,16 @@ impl Engine {
         Ok(())
     }
 
-    /// Commits init artifacts (`.coda/`, `.coda.md`, `CLAUDE.md`, `.gitignore`)
-    /// to the current branch so that `coda plan` worktrees inherit them.
+    /// Runs the analyze-repo phase using a temporary [`AgentSession`].
     ///
-    /// Uses `--no-verify` because these are CODA-internal files that should
-    /// not be gated by project-specific pre-commit hooks.
-    ///
-    /// When `force` is `true`, the commit message reflects re-initialization.
-    ///
-    /// # Errors
-    ///
-    /// Returns `CoreError` if staging or committing fails.
-    fn commit_init_artifacts(&self, force: bool) -> Result<(), CoreError> {
-        let paths: &[&str] = &[".coda/", ".coda.md", "CLAUDE.md", ".gitignore"];
-        let message = if force {
-            "chore: reinitialize CODA project"
-        } else {
-            "chore: initialize CODA project"
-        };
-        commit_coda_artifacts(self.git.as_ref(), &self.project_root, paths, message)
-    }
-
-    /// Validates the agent `ResultMessage` for errors and budget exhaustion.
-    ///
-    /// Always emits a `debug!` log with the full `ResultMessage` fields for
-    /// post-mortem diagnostics. When `is_error` is set, emits an `error!`
-    /// log and returns `CoreError::AgentError` containing the `result` JSON
-    /// (truncated to 500 chars) so the detail surfaces in journal and Slack.
-    ///
-    /// # Errors
-    ///
-    /// Returns `CoreError::AgentError` when `is_error` is true, or
-    /// `CoreError::BudgetExhausted` when cost reaches the configured limit.
-    fn validate_agent_result(
-        &self,
-        result_msg: &ResultMessage,
-        phase_name: &str,
-    ) -> Result<(), CoreError> {
-        let result_detail = result_msg
-            .result
-            .as_ref()
-            .map(|v| v.to_string())
-            .unwrap_or_default();
-
-        debug!(
-            phase = phase_name,
-            subtype = %result_msg.subtype,
-            is_error = result_msg.is_error,
-            num_turns = result_msg.num_turns,
-            session_id = %result_msg.session_id,
-            duration_ms = result_msg.duration_ms,
-            cost = ?result_msg.total_cost_usd,
-            result = %result_detail,
-            "Agent phase result",
-        );
-
-        if result_msg.is_error {
-            error!(
-                phase = phase_name,
-                subtype = %result_msg.subtype,
-                num_turns = result_msg.num_turns,
-                session_id = %result_msg.session_id,
-                duration_ms = result_msg.duration_ms,
-                cost = ?result_msg.total_cost_usd,
-                result = %result_detail,
-                "Agent reported error",
-            );
-            let detail_preview = if result_detail.len() > 500 {
-                format!("{}…", &result_detail[..500])
-            } else {
-                result_detail
-            };
-            return Err(CoreError::AgentError(format!(
-                "{phase_name}: agent error \
-                 (subtype={}, turns={}, cost={:?}, session={}, detail={detail_preview})",
-                result_msg.subtype,
-                result_msg.num_turns,
-                result_msg.total_cost_usd,
-                result_msg.session_id,
-            )));
-        }
-
-        let budget_limit = self.config.agent.max_budget_usd;
-        if let Some(spent) = result_msg.total_cost_usd
-            && spent >= budget_limit
-        {
-            return Err(CoreError::BudgetExhausted {
-                spent,
-                limit: budget_limit,
-            });
-        }
-
-        Ok(())
-    }
-
-    /// Runs the analyze-repo phase: streams the AI analysis and collects text.
+    /// Creates a Planner-profile session, streams the analysis, and
+    /// maps [`SessionEvent::TextDelta`] to [`InitEvent::StreamText`]
+    /// for real-time progress display.
     async fn run_analyze_phase(
         &self,
         system_prompt: &str,
         progress_tx: &Option<UnboundedSender<InitEvent>>,
+        cancel_token: &CancellationToken,
     ) -> Result<String, CoreError> {
         let repo_tree = gather_repo_tree(&self.project_root)?;
         let file_samples = gather_file_samples(&self.project_root)?;
@@ -503,62 +456,47 @@ impl Engine {
 
         debug!("Analyzing repository structure...");
 
-        let planner_options = AgentProfile::Planner.to_options(
+        let phase_start = Instant::now();
+
+        let mut options = AgentProfile::Planner.to_options(
             system_prompt,
             self.project_root.clone(),
             5, // max_turns for analysis
             self.config.agent.max_budget_usd,
             &self.config.agent.model,
         );
+        options.include_partial_messages = true;
+        let mut session = AgentSession::new(ClaudeClient::new(options), self.init_session_config());
+        session.set_cancellation_token(cancel_token.clone());
 
-        let phase_start = Instant::now();
-
-        let mut stream = claude_agent_sdk_rs::query_stream(analyze_prompt, Some(planner_options))
-            .await
-            .map_err(|e| CoreError::AgentError(e.to_string()))?;
-
-        let mut text_parts: Vec<String> = Vec::new();
-        let mut cost_usd = 0.0;
-
-        while let Some(result) = stream.next().await {
-            let message = result.map_err(|e| CoreError::AgentError(e.to_string()))?;
-            match message {
-                Message::Assistant(ref assistant) => {
-                    for block in &assistant.message.content {
-                        if let claude_agent_sdk_rs::ContentBlock::Text(text_block) = block {
-                            emit(
-                                progress_tx,
-                                InitEvent::StreamText {
-                                    text: text_block.text.clone(),
-                                },
-                            );
-                            text_parts.push(text_block.text.clone());
-                        }
+        // Map SessionEvent::TextDelta → InitEvent::StreamText
+        if let Some(ref init_tx) = *progress_tx {
+            let (session_tx, mut session_rx) = tokio::sync::mpsc::unbounded_channel();
+            let init_tx = init_tx.clone();
+            tokio::spawn(async move {
+                while let Some(event) = session_rx.recv().await {
+                    if let SessionEvent::TextDelta { text } = event {
+                        let _ = init_tx.send(InitEvent::StreamText { text });
                     }
                 }
-                Message::Result(ref result_msg) => {
-                    if let Some(c) = result_msg.total_cost_usd {
-                        cost_usd = c;
-                    }
-                    if result_msg.is_error {
-                        let text_len: usize = text_parts.iter().map(String::len).sum();
-                        warn!(
-                            phase = INIT_PHASE_ANALYZE,
-                            agent_text_len = text_len,
-                            "Agent errored; collected text may contain diagnostics",
-                        );
-                    }
-                    self.validate_agent_result(result_msg, INIT_PHASE_ANALYZE)?;
-                }
-                _ => {}
-            }
+            });
+            session.set_event_sender(session_tx);
         }
 
+        session.connect().await?;
+        let result = session.send(&analyze_prompt, None).await;
+        session.disconnect().await;
+        let resp = result?;
+
         let duration = phase_start.elapsed();
-        let analysis_result = text_parts.join("\n");
+        let cost_usd = resp
+            .result
+            .as_ref()
+            .and_then(|r| r.total_cost_usd)
+            .unwrap_or(0.0);
 
         debug!(
-            analysis_len = analysis_result.len(),
+            analysis_len = resp.text.len(),
             "Repository analysis complete"
         );
 
@@ -572,16 +510,20 @@ impl Engine {
             },
         );
 
-        Ok(analysis_result)
+        Ok(resp.text)
     }
 
-    /// Runs the setup-project phase: streams the AI setup and collects cost.
+    /// Runs the setup-project phase using a temporary [`AgentSession`].
+    ///
+    /// Creates a Coder-profile session that can invoke tools to create
+    /// `.coda/`, `.trees/`, config files, and update `.gitignore`.
     async fn run_setup_phase(
         &self,
         system_prompt: &str,
         analysis_result: &str,
         force: bool,
         progress_tx: &Option<UnboundedSender<InitEvent>>,
+        cancel_token: &CancellationToken,
     ) -> Result<(), CoreError> {
         let setup_prompt = self.pm.render(
             "init/setup_project",
@@ -603,58 +545,44 @@ impl Engine {
 
         debug!("Setting up project structure...");
 
-        let coder_options = AgentProfile::Coder.to_options(
+        let phase_start = Instant::now();
+
+        let mut options = AgentProfile::Coder.to_options(
             system_prompt,
             self.project_root.clone(),
             10, // max_turns for setup
             self.config.agent.max_budget_usd,
             &self.config.agent.model,
         );
+        options.include_partial_messages = true;
+        let mut session = AgentSession::new(ClaudeClient::new(options), self.init_session_config());
+        session.set_cancellation_token(cancel_token.clone());
 
-        let phase_start = Instant::now();
-
-        let mut stream = claude_agent_sdk_rs::query_stream(setup_prompt, Some(coder_options))
-            .await
-            .map_err(|e| CoreError::AgentError(e.to_string()))?;
-
-        let mut text_parts: Vec<String> = Vec::new();
-        let mut cost_usd = 0.0;
-
-        while let Some(result) = stream.next().await {
-            let message = result.map_err(|e| CoreError::AgentError(e.to_string()))?;
-            match message {
-                Message::Assistant(ref assistant) => {
-                    for block in &assistant.message.content {
-                        if let claude_agent_sdk_rs::ContentBlock::Text(text_block) = block {
-                            emit(
-                                progress_tx,
-                                InitEvent::StreamText {
-                                    text: text_block.text.clone(),
-                                },
-                            );
-                            text_parts.push(text_block.text.clone());
-                        }
+        // Map SessionEvent::TextDelta → InitEvent::StreamText
+        if let Some(ref init_tx) = *progress_tx {
+            let (session_tx, mut session_rx) = tokio::sync::mpsc::unbounded_channel();
+            let init_tx = init_tx.clone();
+            tokio::spawn(async move {
+                while let Some(event) = session_rx.recv().await {
+                    if let SessionEvent::TextDelta { text } = event {
+                        let _ = init_tx.send(InitEvent::StreamText { text });
                     }
                 }
-                Message::Result(ref result_msg) => {
-                    if let Some(c) = result_msg.total_cost_usd {
-                        cost_usd = c;
-                    }
-                    if result_msg.is_error {
-                        let text_len: usize = text_parts.iter().map(String::len).sum();
-                        warn!(
-                            phase = INIT_PHASE_SETUP,
-                            agent_text_len = text_len,
-                            "Agent errored; collected text may contain diagnostics",
-                        );
-                    }
-                    self.validate_agent_result(result_msg, INIT_PHASE_SETUP)?;
-                }
-                _ => {}
-            }
+            });
+            session.set_event_sender(session_tx);
         }
 
+        session.connect().await?;
+        let result = session.send(&setup_prompt, None).await;
+        session.disconnect().await;
+        let resp = result?;
+
         let duration = phase_start.elapsed();
+        let cost_usd = resp
+            .result
+            .as_ref()
+            .and_then(|r| r.total_cost_usd)
+            .unwrap_or(0.0);
 
         emit(
             progress_tx,
@@ -667,6 +595,19 @@ impl Engine {
         );
 
         Ok(())
+    }
+
+    /// Builds a [`SessionConfig`] from the engine's agent configuration.
+    ///
+    /// Used for the temporary init-phase sessions where timeout and budget
+    /// settings should match the project configuration.
+    fn init_session_config(&self) -> SessionConfig {
+        SessionConfig {
+            idle_timeout_secs: self.config.agent.idle_timeout_secs,
+            tool_execution_timeout_secs: self.config.agent.tool_execution_timeout_secs,
+            idle_retries: self.config.agent.idle_retries,
+            max_budget_usd: self.config.agent.max_budget_usd,
+        }
     }
 
     /// Starts an interactive planning session for a feature.
@@ -748,14 +689,21 @@ impl Engine {
     /// When `progress_tx` is provided, emits [`RunEvent`]s for real-time
     /// progress display.
     ///
+    /// The `cancel_token` enables graceful cancellation between phases
+    /// and during agent streaming. When triggered, the current phase
+    /// finishes its in-flight work and the runner returns
+    /// [`CoreError::Cancelled`].
+    ///
     /// # Errors
     ///
+    /// Returns `CoreError::Cancelled` if the cancellation token is triggered.
     /// Returns `CoreError` if the runner cannot be created or any phase
     /// fails after all retries.
     pub async fn run(
         &self,
         feature_slug: &str,
         progress_tx: Option<UnboundedSender<RunEvent>>,
+        cancel_token: CancellationToken,
     ) -> Result<Vec<TaskResult>, CoreError> {
         info!(feature_slug, "Starting feature run");
         let mut runner = crate::runner::Runner::new(
@@ -766,6 +714,7 @@ impl Engine {
             Arc::clone(&self.git),
             Arc::clone(&self.gh),
             progress_tx,
+            cancel_token,
         )?;
         runner.execute().await
     }
@@ -919,8 +868,7 @@ impl Engine {
             return Ok(None);
         };
 
-        let state_upper = pr_status.state.to_uppercase();
-        if state_upper != "MERGED" && state_upper != "CLOSED" {
+        if !pr_status.state.is_terminal() {
             debug!(
                 slug,
                 branch,
@@ -934,7 +882,7 @@ impl Engine {
             slug: slug.clone(),
             branch: branch.clone(),
             pr_number: Some(pr_status.number),
-            pr_state: state_upper,
+            pr_state: pr_status.state,
         }))
     }
 }
@@ -951,8 +899,8 @@ pub struct CleanedWorktree {
     /// PR number if found.
     pub pr_number: Option<u32>,
 
-    /// PR state (e.g., "MERGED", "CLOSED").
-    pub pr_state: String,
+    /// PR lifecycle state (e.g., Merged, Closed).
+    pub pr_state: PrState,
 }
 
 impl std::fmt::Debug for Engine {
@@ -1010,20 +958,20 @@ pub fn emit(tx: &Option<UnboundedSender<InitEvent>>, event: InitEvent) {
 ///
 /// Returns `CoreError` if the commit fails after all attempts.
 pub async fn commit_with_hooks(
-    git: &dyn GitOps,
+    git: &AsyncGitOps,
     cwd: &Path,
     paths: &[&str],
     message: &str,
     pm: &PromptManager,
     config: &CodaConfig,
 ) -> Result<(), CoreError> {
-    git.add(cwd, paths)?;
-    if !git.has_staged_changes(cwd) {
+    git.add(cwd, paths).await?;
+    if !git.has_staged_changes(cwd).await {
         return Ok(());
     }
 
     // Attempt 1: normal commit
-    let first_err = match git.commit(cwd, message) {
+    let first_err = match git.commit(cwd, message).await {
         Ok(()) => return Ok(()),
         Err(e) => {
             info!("Commit failed (hooks may have modified files), retrying");
@@ -1040,20 +988,20 @@ pub async fn commit_with_hooks(
             "Hook failure is unrecoverable (missing tool/command), \
              falling back to --no-verify"
         );
-        git.add(cwd, paths)?;
-        if !git.has_staged_changes(cwd) {
+        git.add(cwd, paths).await?;
+        if !git.has_staged_changes(cwd).await {
             return Ok(());
         }
-        return git.commit_internal(cwd, message);
+        return git.commit_internal(cwd, message).await;
     }
 
     // Attempt 2: re-stage (picks up fixer-hook modifications) and retry
-    git.add(cwd, paths)?;
-    if !git.has_staged_changes(cwd) {
+    git.add(cwd, paths).await?;
+    if !git.has_staged_changes(cwd).await {
         info!("Hooks fixed all files, nothing left to commit");
         return Ok(());
     }
-    match git.commit(cwd, message) {
+    match git.commit(cwd, message).await {
         Ok(()) => return Ok(()),
         Err(second_err) => {
             info!("Retry failed, invoking LLM to fix hook errors");
@@ -1065,12 +1013,12 @@ pub async fn commit_with_hooks(
     }
 
     // Attempt 3: re-stage LLM fixes and commit
-    git.add(cwd, paths)?;
-    if !git.has_staged_changes(cwd) {
+    git.add(cwd, paths).await?;
+    if !git.has_staged_changes(cwd).await {
         info!("LLM fixes resolved all issues, nothing left to commit");
         return Ok(());
     }
-    git.commit(cwd, message)
+    git.commit(cwd, message).await
 }
 
 /// Checks whether a pre-commit hook error indicates an unrecoverable failure.

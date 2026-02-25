@@ -25,6 +25,8 @@ use tokio::sync::mpsc::UnboundedSender;
 use tracing::{debug, info, warn};
 
 use crate::CoreError;
+use crate::config::ReasoningEffort;
+use crate::reviewer::ReviewSeverity;
 use crate::runner::RunEvent;
 
 /// Source of a review issue — which reviewer found it.
@@ -55,8 +57,8 @@ impl std::fmt::Display for ReviewSource {
 /// compared, merged, and presented uniformly.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReviewIssue {
-    /// Severity level: `"critical"` or `"major"`.
-    pub severity: String,
+    /// Severity level of this issue.
+    pub severity: ReviewSeverity,
     /// File path where the issue was found.
     pub file: String,
     /// Description of the problem.
@@ -100,8 +102,7 @@ pub fn is_codex_available() -> bool {
 /// real time and streamed to the TUI via `progress_tx`.
 ///
 /// The `reasoning_effort` parameter controls the model's reasoning depth
-/// and is passed via `-c model_reasoning_effort=<value>`. Valid values:
-/// `"minimal"`, `"low"`, `"medium"`, `"high"`, `"xhigh"`.
+/// and is passed via `-c model_reasoning_effort=<value>`.
 ///
 /// # Errors
 ///
@@ -116,19 +117,20 @@ pub async fn run_codex_review(
     spec_path: &str,
     changed_files: &[String],
     model: &str,
-    reasoning_effort: &str,
+    reasoning_effort: ReasoningEffort,
     progress_tx: Option<&UnboundedSender<RunEvent>>,
 ) -> Result<Vec<ReviewIssue>, CoreError> {
     let prompt = build_codex_review_prompt(base_branch, spec_path, changed_files);
+    let effort_str = reasoning_effort.to_string();
 
     info!(
         model = model,
-        reasoning_effort = reasoning_effort,
+        reasoning_effort = %effort_str,
         worktree = %worktree.display(),
         "Starting Codex review",
     );
 
-    let effort_config = format!("model_reasoning_effort=\"{reasoning_effort}\"");
+    let effort_config = format!("model_reasoning_effort=\"{effort_str}\"");
 
     // Pass the prompt via stdin (with `-`) to avoid E2BIG (os error 7) when
     // the diff + design spec exceeds the OS execve() argument-list limit.
@@ -228,17 +230,18 @@ pub async fn run_codex_review(
 /// Parses review issues from a YAML response into structured [`ReviewIssue`]s.
 ///
 /// Extracts a YAML code block and parses the `issues` array, filtering for
-/// `critical` and `major` severity only.
+/// actionable (critical/major) severity only.
 ///
 /// # Examples
 ///
 /// ```
 /// use coda_core::codex::{parse_review_issues_structured, ReviewSource};
+/// use coda_core::reviewer::ReviewSeverity;
 ///
 /// let response = "```yaml\nissues:\n  - severity: critical\n    file: src/main.rs\n    description: unwrap used\n    suggestion: use ? operator\n```";
 /// let issues = parse_review_issues_structured(response, ReviewSource::Claude);
 /// assert_eq!(issues.len(), 1);
-/// assert_eq!(issues[0].severity, "critical");
+/// assert_eq!(issues[0].severity, ReviewSeverity::Critical);
 /// ```
 pub fn parse_review_issues_structured(response: &str, source: ReviewSource) -> Vec<ReviewIssue> {
     let yaml_content = crate::parser::extract_yaml_block(response);
@@ -258,12 +261,13 @@ pub fn parse_review_issues_structured(response: &str, source: ReviewSource) -> V
     issues
         .iter()
         .filter_map(|issue| {
-            let severity = issue.get("severity")?.as_str()?;
-            if severity != "critical" && severity != "major" {
+            let severity_str = issue.get("severity")?.as_str()?;
+            let severity: ReviewSeverity = severity_str.parse().ok()?;
+            if !severity.is_actionable() {
                 return None;
             }
             Some(ReviewIssue {
-                severity: severity.to_string(),
+                severity,
                 file: issue
                     .get("file")
                     .and_then(|f| f.as_str())
@@ -296,17 +300,18 @@ pub fn parse_review_issues_structured(response: &str, source: ReviewSource) -> V
 ///
 /// ```
 /// use coda_core::codex::{ReviewIssue, ReviewSource, deduplicate_issues};
+/// use coda_core::reviewer::ReviewSeverity;
 ///
 /// let issues = vec![
 ///     ReviewIssue {
-///         severity: "critical".into(),
+///         severity: ReviewSeverity::Critical,
 ///         file: "src/main.rs".into(),
 ///         description: "unwrap used in production code".into(),
 ///         suggestion: "use ? operator".into(),
 ///         source: ReviewSource::Claude,
 ///     },
 ///     ReviewIssue {
-///         severity: "critical".into(),
+///         severity: ReviewSeverity::Critical,
 ///         file: "src/main.rs".into(),
 ///         description: "unwrap used in production code path".into(),
 ///         suggestion: "replace with ? operator instead".into(),
@@ -382,9 +387,10 @@ pub fn deduplicate_issues(issues: Vec<ReviewIssue>) -> Vec<ReviewIssue> {
 ///
 /// ```
 /// use coda_core::codex::{ReviewIssue, ReviewSource, format_issues};
+/// use coda_core::reviewer::ReviewSeverity;
 ///
 /// let issues = vec![ReviewIssue {
-///     severity: "critical".into(),
+///     severity: ReviewSeverity::Critical,
 ///     file: "src/main.rs".into(),
 ///     description: "unwrap used".into(),
 ///     suggestion: "use ?".into(),
@@ -598,10 +604,10 @@ issues:
 
         let issues = parse_review_issues_structured(response, ReviewSource::Codex);
         assert_eq!(issues.len(), 2); // Only critical + major
-        assert_eq!(issues[0].severity, "critical");
+        assert_eq!(issues[0].severity, ReviewSeverity::Critical);
         assert_eq!(issues[0].file, "src/main.rs");
         assert_eq!(issues[0].source, ReviewSource::Codex);
-        assert_eq!(issues[1].severity, "major");
+        assert_eq!(issues[1].severity, ReviewSeverity::Major);
         assert_eq!(issues[1].file, "src/db.rs");
     }
 
@@ -623,14 +629,14 @@ issues:
     fn test_should_deduplicate_overlapping_issues() {
         let issues = vec![
             ReviewIssue {
-                severity: "critical".into(),
+                severity: ReviewSeverity::Critical,
                 file: "src/main.rs".into(),
                 description: "unwrap used in production code".into(),
                 suggestion: "use ? operator".into(),
                 source: ReviewSource::Claude,
             },
             ReviewIssue {
-                severity: "critical".into(),
+                severity: ReviewSeverity::Critical,
                 file: "src/main.rs".into(),
                 description: "unwrap used in production code path is dangerous".into(),
                 suggestion: "replace with ? operator instead".into(),
@@ -649,14 +655,14 @@ issues:
     fn test_should_keep_distinct_issues() {
         let issues = vec![
             ReviewIssue {
-                severity: "critical".into(),
+                severity: ReviewSeverity::Critical,
                 file: "src/main.rs".into(),
                 description: "unwrap used in production code".into(),
                 suggestion: "use ? operator".into(),
                 source: ReviewSource::Claude,
             },
             ReviewIssue {
-                severity: "major".into(),
+                severity: ReviewSeverity::Major,
                 file: "src/main.rs".into(),
                 description: "missing error handling for network timeout".into(),
                 suggestion: "add timeout configuration".into(),
@@ -672,14 +678,14 @@ issues:
     fn test_should_keep_issues_in_different_files() {
         let issues = vec![
             ReviewIssue {
-                severity: "critical".into(),
+                severity: ReviewSeverity::Critical,
                 file: "src/main.rs".into(),
                 description: "unwrap used in production code".into(),
                 suggestion: "use ? operator".into(),
                 source: ReviewSource::Claude,
             },
             ReviewIssue {
-                severity: "critical".into(),
+                severity: ReviewSeverity::Critical,
                 file: "src/lib.rs".into(),
                 description: "unwrap used in production code".into(),
                 suggestion: "use ? operator".into(),
@@ -701,14 +707,14 @@ issues:
     fn test_should_format_issues_with_source() {
         let issues = vec![
             ReviewIssue {
-                severity: "critical".into(),
+                severity: ReviewSeverity::Critical,
                 file: "src/main.rs".into(),
                 description: "unwrap used".into(),
                 suggestion: "use ?".into(),
                 source: ReviewSource::Codex,
             },
             ReviewIssue {
-                severity: "major".into(),
+                severity: ReviewSeverity::Major,
                 file: "src/lib.rs".into(),
                 description: "missing docs".into(),
                 suggestion: "add docs".into(),

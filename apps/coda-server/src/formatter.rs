@@ -7,8 +7,8 @@
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use coda_core::CleanedWorktree;
 use coda_core::state::{FeatureState, FeatureStatus, PhaseStatus};
+use coda_core::{CleanedWorktree, PrState};
 use serde::{Deserialize, Serialize};
 
 /// Action ID for the clean confirm button, used by both the formatter
@@ -31,8 +31,8 @@ pub(crate) struct CleanTarget {
     pub branch: String,
     /// PR number if found.
     pub pr_number: Option<u32>,
-    /// PR state (e.g., "MERGED", "CLOSED").
-    pub pr_state: String,
+    /// PR lifecycle state.
+    pub pr_state: PrState,
 }
 
 impl From<&CleanedWorktree> for CleanTarget {
@@ -41,7 +41,7 @@ impl From<&CleanedWorktree> for CleanTarget {
             slug: w.slug.clone(),
             branch: w.branch.clone(),
             pr_number: w.pr_number,
-            pr_state: w.pr_state.clone(),
+            pr_state: w.pr_state,
         }
     }
 }
@@ -317,6 +317,18 @@ pub fn init_failure(phases: &[InitPhaseDisplay], error: &str) -> Vec<serde_json:
     blocks
 }
 
+/// Builds a Block Kit cancellation message for an init operation.
+///
+/// Shows completed phase metrics with a cancellation indicator instead
+/// of a failure, since cancellation is intentional (e.g., user abort,
+/// server shutdown).
+pub fn init_cancelled(phases: &[InitPhaseDisplay]) -> Vec<serde_json::Value> {
+    let mut blocks = vec![header("CODA Init \u{1f6d1}")];
+    blocks.push(section(&format_init_phase_lines(phases)));
+    blocks.push(context("Cancelled — run `/coda init` to retry."));
+    blocks
+}
+
 /// Formats init phase lines for reuse across progress/success/failure.
 fn format_init_phase_lines(phases: &[InitPhaseDisplay]) -> String {
     if phases.is_empty() {
@@ -476,6 +488,43 @@ pub fn run_failure(
     blocks.push(section(&format!(":warning: {error_preview}")));
 
     blocks
+}
+
+/// Builds a Block Kit cancellation message for a cancelled run operation.
+///
+/// Shows completed phase metrics with a cancellation indicator instead
+/// of a failure, since cancellation is intentional (e.g., user abort,
+/// server shutdown). The run can be resumed with `coda run`.
+pub fn run_cancelled(feature_slug: &str, phases: &[RunPhaseDisplay]) -> Vec<serde_json::Value> {
+    let mut blocks = vec![header(&format!("Run: `{feature_slug}` \u{1f6d1}"))];
+
+    if !phases.is_empty() {
+        let mut lines = Vec::with_capacity(phases.len());
+        for phase in phases {
+            let icon = display_status_icon(phase.status);
+            let mut line = format!("{icon} `{}`", phase.name);
+            if let Some(duration) = phase.duration {
+                line.push_str(&format!(
+                    " \u{2014} {}",
+                    format_duration(duration.as_secs())
+                ));
+            }
+            lines.push(line);
+        }
+        blocks.push(section(&lines.join("\n")));
+    }
+
+    blocks.push(context("Cancelled \u{2014} run `/coda run` to resume."));
+
+    blocks
+}
+
+/// Builds a cancellation notification for a cancelled run (posted as a
+/// new channel message to trigger a Slack notification).
+pub fn run_cancellation_notification(slug: &str) -> Vec<serde_json::Value> {
+    vec![section(&format!(
+        "\u{1f6d1} Run `{slug}` was cancelled \u{2014} resume with `/coda run {slug}`"
+    ))]
 }
 
 /// Builds a Block Kit message listing all features in a repository.
@@ -1060,11 +1109,11 @@ mod tests {
     use std::path::{Path, PathBuf};
     use std::time::Duration;
 
-    use coda_core::CleanedWorktree;
     use coda_core::state::{
         FeatureInfo, FeatureState, FeatureStatus, GitInfo, PhaseKind, PhaseRecord, PhaseStatus,
         PrInfo, TokenCost, TotalStats,
     };
+    use coda_core::{CleanedWorktree, PrState};
 
     use super::*;
 
@@ -1136,7 +1185,7 @@ mod tests {
             slug: slug.to_string(),
             branch: format!("feature/{slug}"),
             pr_number: Some(pr_number),
-            pr_state: state.to_string(),
+            pr_state: state.parse::<PrState>().unwrap_or(PrState::Merged),
         }
     }
 
@@ -1255,7 +1304,7 @@ mod tests {
             slug: "add-auth".to_string(),
             branch: "feature/add-auth".to_string(),
             pr_number: Some(42),
-            pr_state: "MERGED".to_string(),
+            pr_state: PrState::Merged,
         };
         let json = serde_json::to_string(&original).unwrap();
         let decoded: CleanTarget = serde_json::from_str(&json).unwrap();
@@ -1269,7 +1318,7 @@ mod tests {
             slug: "add-auth".to_string(),
             branch: "feature/add-auth".to_string(),
             pr_number: Some(42),
-            pr_state: "MERGED".to_string(),
+            pr_state: PrState::Merged,
         };
         let worktree: CleanedWorktree = target.into();
         assert_eq!(worktree.slug, "add-auth");
@@ -1282,7 +1331,7 @@ mod tests {
         let worktree = make_candidate("fix-login", 38, "CLOSED");
         let target = CleanTarget::from(&worktree);
         assert_eq!(target.slug, "fix-login");
-        assert_eq!(target.pr_state, "CLOSED");
+        assert_eq!(target.pr_state, PrState::Closed);
     }
 
     #[test]

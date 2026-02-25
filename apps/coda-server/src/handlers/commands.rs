@@ -67,6 +67,13 @@ pub enum CodaCommand {
         branch: String,
     },
 
+    /// Cancel a running init or run task.
+    Cancel {
+        /// Optional task key suffix (e.g., feature slug). When empty,
+        /// cancels all running tasks in the bound repository.
+        target: String,
+    },
+
     /// Show available commands.
     Help,
 }
@@ -147,6 +154,9 @@ impl CodaCommand {
                     branch: rest.to_string(),
                 })
             }
+            "cancel" => Ok(Self::Cancel {
+                target: rest.to_string(),
+            }),
             "help" => Ok(Self::Help),
             _ => Ok(Self::Help),
         }
@@ -230,6 +240,9 @@ pub async fn handle_slash_command(state: Arc<AppState>, payload: serde_json::Val
         }
         CodaCommand::Run { feature_slug } => {
             commands::run::handle_run(Arc::clone(&state), &cmd_payload, &feature_slug).await
+        }
+        CodaCommand::Cancel { target } => {
+            commands::query::handle_cancel(Arc::clone(&state), &cmd_payload, &target).await
         }
         CodaCommand::Help => commands::query::handle_help(Arc::clone(&state), &cmd_payload).await,
         CodaCommand::List => commands::query::handle_list(Arc::clone(&state), &cmd_payload).await,

@@ -35,6 +35,7 @@ const HELP_TEXT: &str = "\
   `/coda clean` — Clean up merged worktrees
 
 *Other*
+  `/coda cancel [slug]` — Cancel a running init or run task
   `/coda help` — Show this help message";
 
 /// Handles `/coda help`.
@@ -196,6 +197,89 @@ pub async fn handle_clean(
     Ok(())
 }
 
+/// Handles `/coda cancel [target]`.
+///
+/// Resolves the channel binding, searches for running tasks that match
+/// the bound repository (and optional target slug), and cancels them.
+///
+/// If `target` is empty, cancels all running tasks for the bound repo.
+/// Otherwise, looks for a matching `run:{repo}:{target}` or
+/// `init:{repo}` task key.
+///
+/// # Errors
+///
+/// Returns `ServerError` if the Slack API call fails.
+#[instrument(skip(state, payload), fields(channel = %payload.channel_id))]
+pub async fn handle_cancel(
+    state: Arc<AppState>,
+    payload: &SlashCommandPayload,
+    target: &str,
+) -> Result<(), ServerError> {
+    let channel = &payload.channel_id;
+
+    let Some(repo_path) = state.bindings().get(channel) else {
+        let blocks = formatter::error(
+            "No repository bound to this channel. Use `/coda repos` to bind a repository first.",
+        );
+        state.slack().post_message(channel, blocks).await?;
+        return Ok(());
+    };
+
+    let repo_display = repo_path.display().to_string();
+    let running = state.running_tasks().running_keys();
+
+    let mut cancelled = Vec::new();
+    for key in &running {
+        // Match tasks belonging to this repo
+        let belongs_to_repo = key.ends_with(&format!(":{repo_display}"))
+            || key.contains(&format!(":{repo_display}:"));
+
+        if !belongs_to_repo {
+            continue;
+        }
+
+        // If a specific target is given, only cancel matching tasks
+        if !target.is_empty() && !key.ends_with(&format!(":{target}")) {
+            continue;
+        }
+
+        if state.running_tasks().cancel(key) {
+            cancelled.push(key.clone());
+        }
+    }
+
+    let blocks = if cancelled.is_empty() {
+        if target.is_empty() {
+            formatter::error("No running tasks found for this repository.")
+        } else {
+            formatter::error(&format!("No running task found matching `{target}`."))
+        }
+    } else {
+        let names: Vec<&str> = cancelled.iter().map(String::as_str).collect();
+        info!(channel, tasks = ?names, "Cancelled tasks");
+        let msg = if cancelled.len() == 1 {
+            format!(":octagonal_sign: Cancelled task: `{}`", cancelled[0])
+        } else {
+            let list = cancelled
+                .iter()
+                .map(|k| format!("  \u{2022} `{k}`"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            format!(
+                ":octagonal_sign: Cancelled {} tasks:\n{list}",
+                cancelled.len()
+            )
+        };
+        vec![serde_json::json!({
+            "type": "section",
+            "text": { "type": "mrkdwn", "text": msg }
+        })]
+    };
+
+    state.slack().post_message(channel, blocks).await?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -210,6 +294,7 @@ mod tests {
         assert!(HELP_TEXT.contains("/coda list"));
         assert!(HELP_TEXT.contains("/coda status"));
         assert!(HELP_TEXT.contains("/coda clean"));
+        assert!(HELP_TEXT.contains("/coda cancel"));
         assert!(HELP_TEXT.contains("/coda help"));
     }
 }
