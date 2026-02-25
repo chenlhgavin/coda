@@ -625,11 +625,19 @@ impl Engine {
     pub fn plan(&self, feature_slug: &str) -> Result<PlanSession, CoreError> {
         validate_feature_slug(feature_slug)?;
 
-        // Ensure project has been initialized (coda init creates .coda/ and .trees/)
-        if !self.project_root.join(".coda").is_dir() || !self.project_root.join(".trees").is_dir() {
+        // Ensure project has been initialized (coda init creates .coda/)
+        if !self.project_root.join(".coda").is_dir() {
             return Err(CoreError::PlanError(
                 "Project not initialized. Run `coda init` first.".into(),
             ));
+        }
+
+        // Auto-create .trees/ if missing (it's in .gitignore so won't be committed)
+        let trees_dir = self.project_root.join(".trees");
+        if !trees_dir.is_dir() {
+            std::fs::create_dir_all(&trees_dir).map_err(|e| {
+                CoreError::PlanError(format!("Failed to create .trees/ directory: {e}"))
+            })?;
         }
 
         let worktree_path = self.project_root.join(".trees").join(feature_slug);
@@ -1727,18 +1735,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_should_reject_plan_when_trees_dir_missing() {
+    async fn test_should_auto_create_trees_dir_when_missing() {
         let tmp = tempfile::tempdir().expect("tempdir");
-        // Create .coda/ but no .trees/ — simulates partial state
+        // Create .coda/ but no .trees/ — .trees/ should be auto-created
         fs::create_dir_all(tmp.path().join(".coda")).expect("mkdir");
 
         let engine = make_engine(tmp.path()).await;
-        let result = engine.plan("add-auth");
+        // plan() will fail later (no git repo), but .trees/ should be created first
+        let _result = engine.plan("add-auth");
 
-        assert!(result.is_err());
-        let err = result.unwrap_err().to_string();
-        assert!(err.contains("not initialized"), "error was: {err}");
-        assert!(err.contains("coda init"), "error was: {err}");
+        assert!(
+            tmp.path().join(".trees").is_dir(),
+            ".trees/ should have been auto-created"
+        );
     }
 
     #[tokio::test]
