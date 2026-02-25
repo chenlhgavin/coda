@@ -187,7 +187,7 @@ impl BindingStore {
                 self.config_path.display()
             ))
         })?;
-        let mut config: ServerConfig = serde_yaml::from_str(&content).map_err(|e| {
+        let mut config: ServerConfig = serde_yaml_ng::from_str(&content).map_err(|e| {
             ServerError::Config(format!(
                 "Invalid config YAML at {}: {e}",
                 self.config_path.display()
@@ -200,7 +200,7 @@ impl BindingStore {
             .map(|entry| (entry.key().clone(), entry.value().display().to_string()))
             .collect();
 
-        let yaml = serde_yaml::to_string(&config)
+        let yaml = serde_yaml_ng::to_string(&config)
             .map_err(|e| ServerError::Config(format!("Cannot serialize config: {e}")))?;
         std::fs::write(&self.config_path, yaml).map_err(|e| {
             ServerError::Config(format!(
@@ -490,7 +490,7 @@ mod tests {
         store.set("C123", repo_path.clone()).expect("set");
 
         let content = std::fs::read_to_string(&config_path).expect("read");
-        let config: ServerConfig = serde_yaml::from_str(&content).expect("parse");
+        let config: ServerConfig = serde_yaml_ng::from_str(&content).expect("parse");
         assert_eq!(config.bindings.len(), 1);
         assert_eq!(config.bindings["C123"], repo_path.display().to_string());
     }

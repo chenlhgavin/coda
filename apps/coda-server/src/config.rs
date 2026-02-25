@@ -41,7 +41,7 @@ fn default_reaper_interval_secs() -> u64 {
 /// workspace: "/home/user/workspace"
 /// "#;
 ///
-/// let config: ServerConfig = serde_yaml::from_str(yaml).unwrap();
+/// let config: ServerConfig = serde_yaml_ng::from_str(yaml).unwrap();
 /// assert_eq!(config.slack.app_token, "xapp-1-test");
 /// assert_eq!(config.bindings.len(), 1);
 /// assert_eq!(config.workspace.as_deref(), Some("/home/user/workspace"));
@@ -85,7 +85,7 @@ pub struct ServerConfig {
 /// bot_token: "xoxb-test"
 /// "#;
 ///
-/// let config: SlackConfig = serde_yaml::from_str(yaml).unwrap();
+/// let config: SlackConfig = serde_yaml_ng::from_str(yaml).unwrap();
 /// assert!(config.app_token.starts_with("xapp-"));
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -131,7 +131,7 @@ impl ServerConfig {
         let content = std::fs::read_to_string(path).map_err(|e| {
             ServerError::Config(format!("Cannot read config at {}: {e}", path.display()))
         })?;
-        let config: Self = serde_yaml::from_str(&content).map_err(|e| {
+        let config: Self = serde_yaml_ng::from_str(&content).map_err(|e| {
             ServerError::Config(format!("Invalid YAML in config at {}: {e}", path.display()))
         })?;
         config.validate()?;
@@ -178,7 +178,7 @@ bindings:
   C001: "/home/user/project-a"
   C002: "/home/user/project-b"
 "#;
-        let config: ServerConfig = serde_yaml::from_str(yaml).expect("deserialize");
+        let config: ServerConfig = serde_yaml_ng::from_str(yaml).expect("deserialize");
         assert_eq!(config.slack.app_token, "xapp-1-A123-456");
         assert_eq!(config.slack.bot_token, "xoxb-789-012");
         assert_eq!(config.bindings.len(), 2);
@@ -192,7 +192,7 @@ slack:
   app_token: "xapp-1-test"
   bot_token: "xoxb-test"
 "#;
-        let config: ServerConfig = serde_yaml::from_str(yaml).expect("deserialize");
+        let config: ServerConfig = serde_yaml_ng::from_str(yaml).expect("deserialize");
         assert!(config.bindings.is_empty());
     }
 
@@ -297,8 +297,8 @@ bindings: {}
             session_idle_timeout_secs: 1800,
             reaper_interval_secs: 120,
         };
-        let yaml = serde_yaml::to_string(&config).expect("serialize");
-        let deserialized: ServerConfig = serde_yaml::from_str(&yaml).expect("deserialize");
+        let yaml = serde_yaml_ng::to_string(&config).expect("serialize");
+        let deserialized: ServerConfig = serde_yaml_ng::from_str(&yaml).expect("deserialize");
         assert_eq!(deserialized.slack.app_token, config.slack.app_token);
         assert_eq!(deserialized.bindings.len(), 1);
         assert_eq!(
@@ -316,7 +316,7 @@ slack:
   app_token: "xapp-1-test"
   bot_token: "xoxb-test"
 "#;
-        let config: ServerConfig = serde_yaml::from_str(yaml).expect("deserialize");
+        let config: ServerConfig = serde_yaml_ng::from_str(yaml).expect("deserialize");
         assert_eq!(config.session_idle_timeout_secs, 3600);
         assert_eq!(config.reaper_interval_secs, 300);
     }
@@ -330,7 +330,7 @@ slack:
 session_idle_timeout_secs: 7200
 reaper_interval_secs: 600
 "#;
-        let config: ServerConfig = serde_yaml::from_str(yaml).expect("deserialize");
+        let config: ServerConfig = serde_yaml_ng::from_str(yaml).expect("deserialize");
         assert_eq!(config.session_idle_timeout_secs, 7200);
         assert_eq!(config.reaper_interval_secs, 600);
     }
@@ -343,7 +343,7 @@ slack:
   bot_token: "xoxb-test"
 workspace: "/home/user/workspace"
 "#;
-        let config: ServerConfig = serde_yaml::from_str(yaml).expect("deserialize");
+        let config: ServerConfig = serde_yaml_ng::from_str(yaml).expect("deserialize");
         assert_eq!(config.workspace.as_deref(), Some("/home/user/workspace"));
     }
 
@@ -354,7 +354,7 @@ slack:
   app_token: "xapp-1-test"
   bot_token: "xoxb-test"
 "#;
-        let config: ServerConfig = serde_yaml::from_str(yaml).expect("deserialize");
+        let config: ServerConfig = serde_yaml_ng::from_str(yaml).expect("deserialize");
         assert!(config.workspace.is_none());
     }
 }

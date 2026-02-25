@@ -275,7 +275,7 @@ impl Runner {
         // Load, migrate, and validate state
         let state_content = std::fs::read_to_string(&state_path)
             .map_err(|e| CoreError::StateError(format!("Cannot read state.yml: {e}")))?;
-        let mut state: FeatureState = serde_yaml::from_str(&state_content)?;
+        let mut state: FeatureState = serde_yaml_ng::from_str(&state_content)?;
 
         // Migrate legacy states (e.g. missing update-docs phase) before validation.
         state.migrate();
@@ -332,12 +332,14 @@ impl Runner {
         // (auth failures, rate limits, etc.) are visible in the TUI.
         if let Some(ref tx) = progress_tx {
             let tx_clone = tx.clone();
-            options.stderr_callback = Some(Arc::new(move |line: String| {
-                let _ = tx_clone.send(RunEvent::StderrOutput { line });
+            options.stderr = Some(Arc::new(move |line: &str| {
+                let _ = tx_clone.send(RunEvent::StderrOutput {
+                    line: line.to_string(),
+                });
             }));
         }
 
-        let client = claude_agent_sdk_rs::ClaudeClient::new(options);
+        let client = code_agent_sdk::ClaudeSdkClient::new(Some(options), None);
         let session_config = SessionConfig {
             idle_timeout_secs: config.agent.idle_timeout_secs,
             tool_execution_timeout_secs: config.agent.tool_execution_timeout_secs,

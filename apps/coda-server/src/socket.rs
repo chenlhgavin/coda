@@ -196,7 +196,7 @@ impl SocketClient {
                                     let ack = serde_json::json!({
                                         "envelope_id": &envelope.envelope_id
                                     });
-                                    let ack_msg = WsMessage::Text(ack.to_string());
+                                    let ack_msg = WsMessage::Text(ack.to_string().into());
                                     write.send(ack_msg).await.map_err(|e| {
                                         ServerError::WebSocket(format!("Ack send failed: {e}"))
                                     })?;

@@ -33,8 +33,8 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use claude_agent_sdk_rs::ResultMessage;
 use coda_pm::PromptManager;
+use code_agent_sdk::ResultMessage;
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc::UnboundedSender;
 use tokio_util::sync::CancellationToken;

@@ -87,7 +87,7 @@ pub enum CoreError {
 
     /// A YAML serialization/deserialization error.
     #[error("YAML error: {0}")]
-    YamlError(#[from] serde_yaml::Error),
+    YamlError(#[from] serde_yaml_ng::Error),
 
     /// A generic error from anyhow.
     #[error(transparent)]

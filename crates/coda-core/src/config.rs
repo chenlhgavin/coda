@@ -20,8 +20,8 @@ use serde::{Deserialize, Serialize};
 /// assert_eq!(config.agent.max_retries, 3);
 ///
 /// // Deserialize from YAML
-/// let yaml = serde_yaml::to_string(&config).unwrap();
-/// let loaded: CodaConfig = serde_yaml::from_str(&yaml).unwrap();
+/// let yaml = serde_yaml_ng::to_string(&config).unwrap();
+/// let loaded: CodaConfig = serde_yaml_ng::from_str(&yaml).unwrap();
 /// assert_eq!(loaded.version, config.version);
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -167,8 +167,8 @@ impl std::fmt::Display for ReviewEngine {
 /// assert_eq!(minimal, ReasoningEffort::Low);
 ///
 /// // Round-trip through serde
-/// let yaml = serde_yaml::to_string(&effort).unwrap();
-/// let parsed: ReasoningEffort = serde_yaml::from_str(&yaml).unwrap();
+/// let yaml = serde_yaml_ng::to_string(&effort).unwrap();
+/// let parsed: ReasoningEffort = serde_yaml_ng::from_str(&yaml).unwrap();
 /// assert_eq!(parsed, effort);
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -364,8 +364,8 @@ mod tests {
     #[test]
     fn test_should_round_trip_yaml_serialization() {
         let config = CodaConfig::default();
-        let yaml = serde_yaml::to_string(&config).unwrap();
-        let deserialized: CodaConfig = serde_yaml::from_str(&yaml).unwrap();
+        let yaml = serde_yaml_ng::to_string(&config).unwrap();
+        let deserialized: CodaConfig = serde_yaml_ng::from_str(&yaml).unwrap();
         assert_eq!(deserialized.version, config.version);
         assert_eq!(deserialized.agent.model, config.agent.model);
         assert_eq!(deserialized.git.branch_prefix, config.git.branch_prefix);
@@ -398,7 +398,7 @@ review:
   codex_reasoning_effort: "medium"
 "#;
 
-        let config: CodaConfig = serde_yaml::from_str(yaml).unwrap();
+        let config: CodaConfig = serde_yaml_ng::from_str(yaml).unwrap();
         assert_eq!(config.version, 2);
         assert_eq!(config.agent.model, "claude-opus-4-20250514");
         assert!((config.agent.max_budget_usd - 100.0).abs() < f64::EPSILON);
@@ -440,7 +440,7 @@ review:
   max_review_rounds: 5
 "#;
 
-        let config: CodaConfig = serde_yaml::from_str(yaml).unwrap();
+        let config: CodaConfig = serde_yaml_ng::from_str(yaml).unwrap();
         assert_eq!(config.version, 1);
         assert!((config.agent.max_budget_usd - 100.0).abs() < f64::EPSILON);
         assert_eq!(config.agent.max_retries, 3);
@@ -451,7 +451,7 @@ review:
     #[test]
     fn test_should_deserialize_minimal_config() {
         let yaml = "version: 1\n";
-        let config: CodaConfig = serde_yaml::from_str(yaml).unwrap();
+        let config: CodaConfig = serde_yaml_ng::from_str(yaml).unwrap();
         assert_eq!(config.version, 1);
         assert_eq!(config.agent.model, "claude-opus-4-6");
         assert!((config.agent.max_budget_usd - 100.0).abs() < f64::EPSILON);
@@ -470,7 +470,7 @@ review:
             ("hybrid", ReviewEngine::Hybrid),
         ] {
             let yaml = format!("version: 1\nreview:\n  engine: {yaml_val}\n");
-            let config: CodaConfig = serde_yaml::from_str(&yaml).unwrap();
+            let config: CodaConfig = serde_yaml_ng::from_str(&yaml).unwrap();
             assert_eq!(config.review.engine, expected);
         }
     }
@@ -483,7 +483,7 @@ verify:
   fail_on_max_attempts: true
   max_retries: 5
 "#;
-        let config: CodaConfig = serde_yaml::from_str(yaml).unwrap();
+        let config: CodaConfig = serde_yaml_ng::from_str(yaml).unwrap();
         assert_eq!(config.verify.max_verify_retries, 5);
         assert!(config.verify.fail_on_max_attempts);
     }
@@ -495,7 +495,7 @@ version: 1
 verify:
   max_verify_retries: 7
 "#;
-        let config: CodaConfig = serde_yaml::from_str(yaml).unwrap();
+        let config: CodaConfig = serde_yaml_ng::from_str(yaml).unwrap();
         assert_eq!(config.verify.max_verify_retries, 7);
     }
 
@@ -601,7 +601,7 @@ verify:
             ("high", ReasoningEffort::High),
         ] {
             let yaml = format!("version: 1\nreview:\n  codex_reasoning_effort: {yaml_val}\n");
-            let config: CodaConfig = serde_yaml::from_str(&yaml).unwrap();
+            let config: CodaConfig = serde_yaml_ng::from_str(&yaml).unwrap();
             assert_eq!(config.review.codex_reasoning_effort, expected);
         }
     }
@@ -610,17 +610,17 @@ verify:
     fn test_should_deserialize_legacy_reasoning_effort_aliases() {
         // "minimal" should map to Low
         let yaml = "version: 1\nreview:\n  codex_reasoning_effort: minimal\n";
-        let config: CodaConfig = serde_yaml::from_str(yaml).unwrap();
+        let config: CodaConfig = serde_yaml_ng::from_str(yaml).unwrap();
         assert_eq!(config.review.codex_reasoning_effort, ReasoningEffort::Low);
 
         // "xhigh" should map to High
         let yaml = "version: 1\nreview:\n  codex_reasoning_effort: xhigh\n";
-        let config: CodaConfig = serde_yaml::from_str(yaml).unwrap();
+        let config: CodaConfig = serde_yaml_ng::from_str(yaml).unwrap();
         assert_eq!(config.review.codex_reasoning_effort, ReasoningEffort::High);
 
         // "moderate" should map to Medium
         let yaml = "version: 1\nreview:\n  codex_reasoning_effort: moderate\n";
-        let config: CodaConfig = serde_yaml::from_str(yaml).unwrap();
+        let config: CodaConfig = serde_yaml_ng::from_str(yaml).unwrap();
         assert_eq!(
             config.review.codex_reasoning_effort,
             ReasoningEffort::Medium
@@ -631,12 +631,12 @@ verify:
     fn test_should_deserialize_reasoning_effort_case_insensitive_from_yaml() {
         // Mixed-case "High" should work
         let yaml = "version: 1\nreview:\n  codex_reasoning_effort: High\n";
-        let config: CodaConfig = serde_yaml::from_str(yaml).unwrap();
+        let config: CodaConfig = serde_yaml_ng::from_str(yaml).unwrap();
         assert_eq!(config.review.codex_reasoning_effort, ReasoningEffort::High);
 
         // UPPERCASE "LOW" should work
         let yaml = "version: 1\nreview:\n  codex_reasoning_effort: LOW\n";
-        let config: CodaConfig = serde_yaml::from_str(yaml).unwrap();
+        let config: CodaConfig = serde_yaml_ng::from_str(yaml).unwrap();
         assert_eq!(config.review.codex_reasoning_effort, ReasoningEffort::Low);
     }
 }

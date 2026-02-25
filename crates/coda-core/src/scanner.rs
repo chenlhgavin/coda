@@ -219,7 +219,7 @@ impl FeatureScanner {
     fn read_state(path: &Path) -> Result<FeatureState, CoreError> {
         let content = fs::read_to_string(path)
             .map_err(|e| CoreError::StateError(format!("Cannot read {}: {e}", path.display())))?;
-        serde_yaml::from_str(&content).map_err(|e| {
+        serde_yaml_ng::from_str(&content).map_err(|e| {
             CoreError::StateError(format!("Invalid state.yml at {}: {e}", path.display()))
         })
     }
@@ -309,14 +309,14 @@ mod tests {
     fn write_active_state(root: &Path, slug: &str, state: &FeatureState) {
         let dir = root.join(".trees").join(slug).join(".coda").join(slug);
         fs::create_dir_all(&dir).expect("create state dir");
-        let yaml = serde_yaml::to_string(state).expect("serialize state");
+        let yaml = serde_yaml_ng::to_string(state).expect("serialize state");
         fs::write(dir.join("state.yml"), yaml).expect("write state.yml");
     }
 
     fn write_merged_state(root: &Path, slug: &str, state: &FeatureState) {
         let dir = root.join(".coda").join(slug);
         fs::create_dir_all(&dir).expect("create merged state dir");
-        let yaml = serde_yaml::to_string(state).expect("serialize state");
+        let yaml = serde_yaml_ng::to_string(state).expect("serialize state");
         fs::write(dir.join("state.yml"), yaml).expect("write state.yml");
     }
 
@@ -392,7 +392,8 @@ mod tests {
 
         let ghost_dir = tmp.path().join(".trees/new-feat/.coda/old-merged");
         fs::create_dir_all(&ghost_dir).expect("create ghost dir");
-        let ghost_yaml = serde_yaml::to_string(&make_state("old-merged")).expect("serialize ghost");
+        let ghost_yaml =
+            serde_yaml_ng::to_string(&make_state("old-merged")).expect("serialize ghost");
         fs::write(ghost_dir.join("state.yml"), ghost_yaml).expect("write ghost state");
 
         let scanner = FeatureScanner::new(tmp.path());
@@ -410,7 +411,7 @@ mod tests {
 
         let ghost_dir = tmp.path().join(".trees/active/.coda/ghost");
         fs::create_dir_all(&ghost_dir).expect("create ghost dir");
-        let ghost_yaml = serde_yaml::to_string(&make_state("ghost")).expect("serialize ghost");
+        let ghost_yaml = serde_yaml_ng::to_string(&make_state("ghost")).expect("serialize ghost");
         fs::write(ghost_dir.join("state.yml"), ghost_yaml).expect("write ghost state");
 
         let scanner = FeatureScanner::new(tmp.path());

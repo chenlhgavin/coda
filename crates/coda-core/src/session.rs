@@ -1,6 +1,6 @@
 //! Shared agent session abstraction for streaming/timeout/reconnect logic.
 //!
-//! Provides [`AgentSession`] which wraps a [`ClaudeClient`] with idle timeout
+//! Provides [`AgentSession`] which wraps a [`ClaudeSdkClient`] with idle timeout
 //! detection, exponential backoff reconnection, response accumulation, and
 //! API error detection. Both [`PlanSession`](crate::planner::PlanSession) and
 //! [`Runner`](crate::runner::Runner) delegate their agent interactions here,
@@ -24,7 +24,7 @@
 //! ```no_run
 //! # async fn example() -> Result<(), coda_core::CoreError> {
 //! use coda_core::session::{AgentSession, SessionConfig};
-//! use claude_agent_sdk_rs::ClaudeClient;
+//! use code_agent_sdk::ClaudeSdkClient;
 //!
 //! let config = SessionConfig {
 //!     idle_timeout_secs: 300,
@@ -32,7 +32,7 @@
 //!     idle_retries: 3,
 //!     max_budget_usd: 100.0,
 //! };
-//! // let client = ClaudeClient::new(options);
+//! // let client = ClaudeSdkClient::new(Some(options), None);
 //! // let mut session = AgentSession::new(client, config);
 //! // session.connect().await?;
 //! // let resp = session.send("Hello", None).await?;
@@ -42,7 +42,7 @@
 
 use std::time::Duration;
 
-use claude_agent_sdk_rs::{ClaudeClient, ContentBlock, Message, ResultMessage, ToolResultContent};
+use code_agent_sdk::{ClaudeSdkClient, ContentBlock, Message, ResultMessage, UserContent};
 use futures::StreamExt;
 use tokio::sync::mpsc::UnboundedSender;
 use tokio_util::sync::CancellationToken;
@@ -199,7 +199,7 @@ impl AgentResponse {
     }
 }
 
-/// Wraps a [`ClaudeClient`] with shared streaming, idle timeout, and
+/// Wraps a [`ClaudeSdkClient`] with shared streaming, idle timeout, and
 /// reconnection logic.
 ///
 /// This struct is the single implementation of the send/collect pattern
@@ -209,7 +209,7 @@ impl AgentResponse {
 /// An optional [`CancellationToken`] can be set to enable graceful
 /// cancellation of in-flight agent interactions.
 pub struct AgentSession {
-    client: ClaudeClient,
+    client: ClaudeSdkClient,
     config: SessionConfig,
     connected: bool,
     event_tx: Option<UnboundedSender<SessionEvent>>,
@@ -225,16 +225,16 @@ impl AgentSession {
     ///
     /// # Arguments
     ///
-    /// * `client` - The `ClaudeClient` to wrap.
+    /// * `client` - The `ClaudeSdkClient` to wrap.
     /// * `config` - Timeout and budget configuration.
     ///
     /// # Example
     ///
     /// ```no_run
     /// use coda_core::session::{AgentSession, SessionConfig};
-    /// use claude_agent_sdk_rs::ClaudeClient;
+    /// use code_agent_sdk::ClaudeSdkClient;
     ///
-    /// # fn example(client: ClaudeClient) {
+    /// # fn example(client: ClaudeSdkClient) {
     /// let config = SessionConfig {
     ///     idle_timeout_secs: 300,
     ///     tool_execution_timeout_secs: 600,
@@ -244,7 +244,7 @@ impl AgentSession {
     /// let session = AgentSession::new(client, config);
     /// # }
     /// ```
-    pub fn new(client: ClaudeClient, config: SessionConfig) -> Self {
+    pub fn new(client: ClaudeSdkClient, config: SessionConfig) -> Self {
         Self {
             client,
             config,
@@ -288,10 +288,10 @@ impl AgentSession {
     ///
     /// ```no_run
     /// use coda_core::session::{AgentSession, SessionConfig};
-    /// use claude_agent_sdk_rs::ClaudeClient;
+    /// use code_agent_sdk::ClaudeSdkClient;
     /// use tokio_util::sync::CancellationToken;
     ///
-    /// # fn example(client: ClaudeClient) {
+    /// # fn example(client: ClaudeSdkClient) {
     /// let config = SessionConfig {
     ///     idle_timeout_secs: 300,
     ///     tool_execution_timeout_secs: 600,
@@ -307,11 +307,11 @@ impl AgentSession {
         self.cancel_token = Some(token);
     }
 
-    /// Returns a mutable reference to the underlying `ClaudeClient`.
+    /// Returns a mutable reference to the underlying `ClaudeSdkClient`.
     ///
     /// Useful for callers that need to configure the client (e.g., setting
-    /// `stderr_callback` or `include_partial_messages`).
-    pub fn client_mut(&mut self) -> &mut ClaudeClient {
+    /// `stderr` or `include_partial_messages`).
+    pub fn client_mut(&mut self) -> &mut ClaudeSdkClient {
         &mut self.client
     }
 
@@ -320,14 +320,14 @@ impl AgentSession {
         self.connected
     }
 
-    /// Connects the underlying `ClaudeClient` to the Claude process.
+    /// Connects the underlying `ClaudeSdkClient` to the Claude process.
     ///
     /// # Errors
     ///
     /// Returns `CoreError::AgentError` if the connection fails.
     pub async fn connect(&mut self) -> Result<(), CoreError> {
         self.client
-            .connect()
+            .connect(None)
             .await
             .map_err(|e| CoreError::AgentError(e.to_string()))?;
         self.connected = true;
@@ -335,7 +335,7 @@ impl AgentSession {
         Ok(())
     }
 
-    /// Disconnects the underlying `ClaudeClient`.
+    /// Disconnects the underlying `ClaudeSdkClient`.
     ///
     /// Safe to call multiple times or when not connected.
     pub async fn disconnect(&mut self) {
@@ -368,7 +368,7 @@ impl AgentSession {
     /// [`CoreError::Cancelled`] at the next check point in the streaming loop.
     ///
     /// When `session_id` is `Some`, sends the prompt on an isolated session
-    /// (via [`ClaudeClient::query_with_session`]) so the conversation history
+    /// (via [`ClaudeSdkClient::query`] with a session ID) so the conversation history
     /// of the main session is not included.
     ///
     /// # Arguments
@@ -405,8 +405,8 @@ impl AgentSession {
 
         // Initial query
         match session_id {
-            Some(id) => self.client.query_with_session(prompt, id).await,
-            None => self.client.query(prompt).await,
+            Some(id) => self.client.query(prompt, id).await,
+            None => self.client.query(prompt, "").await,
         }
         .map_err(|e| CoreError::AgentError(e.to_string()))?;
 
@@ -505,7 +505,7 @@ impl AgentSession {
                         self.emit_event(SessionEvent::TurnCompleted {
                             current_turn: turn_count,
                         });
-                        for block in &assistant.message.content {
+                        for block in &assistant.content {
                             match block {
                                 ContentBlock::Text(text) => {
                                     resp.text.push_str(&text.text);
@@ -536,7 +536,7 @@ impl AgentSession {
                     }
                     Message::User(user) => {
                         in_tool_execution = false;
-                        if let Some(blocks) = &user.content {
+                        if let UserContent::Blocks(blocks) = &user.content {
                             for block in blocks {
                                 if let ContentBlock::ToolResult(tr) = block {
                                     collect_tool_result_text(
@@ -680,15 +680,15 @@ impl AgentSession {
 
         // Reconnect
         self.client
-            .connect()
+            .connect(None)
             .await
             .map_err(|e| CoreError::AgentError(format!("Reconnect failed: {e}")))?;
         self.connected = true;
 
         // Re-send prompt
         match session_id {
-            Some(id) => self.client.query_with_session(prompt, id).await,
-            None => self.client.query(prompt).await,
+            Some(id) => self.client.query(prompt, id).await,
+            None => self.client.query(prompt, "").await,
         }
         .map_err(|e| CoreError::AgentError(format!("Re-query after reconnect failed: {e}")))?;
 
@@ -832,38 +832,42 @@ pub fn summarize_tool_input(tool_name: &str, input: &serde_json::Value) -> Strin
     }
 }
 
-/// Extracts text content from a `ToolResultContent` and appends it to the buffer.
+/// Extracts text content from a tool result's JSON value and appends it to the buffer.
+///
+/// The content may be a plain string, or an array of blocks with `"text"` fields.
 ///
 /// # Examples
 ///
 /// ```
-/// use claude_agent_sdk_rs::ToolResultContent;
 /// use coda_core::session::collect_tool_result_text;
 ///
 /// let mut buf = String::new();
-/// let content = ToolResultContent::Text("hello".to_string());
+/// let content = serde_json::json!("hello");
 /// collect_tool_result_text(Some(&content), &mut buf);
 /// assert_eq!(buf, "hello");
 /// ```
-pub fn collect_tool_result_text(content: Option<&ToolResultContent>, buf: &mut String) {
-    match content {
-        Some(ToolResultContent::Text(text)) => {
-            if !buf.is_empty() {
-                buf.push('\n');
-            }
-            buf.push_str(text);
+pub fn collect_tool_result_text(content: Option<&serde_json::Value>, buf: &mut String) {
+    let Some(value) = content else { return };
+
+    // If it's a string, use directly
+    if let Some(text) = value.as_str() {
+        if !buf.is_empty() {
+            buf.push('\n');
         }
-        Some(ToolResultContent::Blocks(blocks)) => {
-            for block in blocks {
-                if let Some(text) = block.get("text").and_then(|v| v.as_str()) {
-                    if !buf.is_empty() {
-                        buf.push('\n');
-                    }
-                    buf.push_str(text);
+        buf.push_str(text);
+        return;
+    }
+
+    // If it's an array of blocks, extract text from each
+    if let Some(blocks) = value.as_array() {
+        for block in blocks {
+            if let Some(text) = block.get("text").and_then(|v| v.as_str()) {
+                if !buf.is_empty() {
+                    buf.push('\n');
                 }
+                buf.push_str(text);
             }
         }
-        None => {}
     }
 }
 
@@ -1084,7 +1088,7 @@ mod tests {
     #[test]
     fn test_should_collect_text_content() {
         let mut buf = String::new();
-        let content = ToolResultContent::Text("hello world".to_string());
+        let content = serde_json::json!("hello world");
         collect_tool_result_text(Some(&content), &mut buf);
         assert_eq!(buf, "hello world");
     }
@@ -1092,11 +1096,10 @@ mod tests {
     #[test]
     fn test_should_collect_blocks_content() {
         let mut buf = String::new();
-        let blocks = vec![
-            serde_json::json!({"text": "block1"}),
-            serde_json::json!({"text": "block2"}),
-        ];
-        let content = ToolResultContent::Blocks(blocks);
+        let content = serde_json::json!([
+            {"text": "block1"},
+            {"text": "block2"},
+        ]);
         collect_tool_result_text(Some(&content), &mut buf);
         assert_eq!(buf, "block1\nblock2");
     }
@@ -1111,7 +1114,7 @@ mod tests {
     #[test]
     fn test_should_append_with_newline_separator() {
         let mut buf = "existing".to_string();
-        let content = ToolResultContent::Text("appended".to_string());
+        let content = serde_json::json!("appended");
         collect_tool_result_text(Some(&content), &mut buf);
         assert_eq!(buf, "existing\nappended");
     }
@@ -1173,10 +1176,13 @@ mod tests {
             max_budget_usd: 100.0,
         };
         let session = AgentSession::new(
-            ClaudeClient::new(
-                claude_agent_sdk_rs::ClaudeAgentOptions::builder()
-                    .system_prompt("test")
-                    .build(),
+            ClaudeSdkClient::new(
+                Some(
+                    code_agent_sdk::ClaudeAgentOptions::builder()
+                        .system_prompt("test")
+                        .build(),
+                ),
+                None,
             ),
             config,
         );
@@ -1197,10 +1203,13 @@ mod tests {
             max_budget_usd: 100.0,
         };
         let session = AgentSession::new(
-            ClaudeClient::new(
-                claude_agent_sdk_rs::ClaudeAgentOptions::builder()
-                    .system_prompt("test")
-                    .build(),
+            ClaudeSdkClient::new(
+                Some(
+                    code_agent_sdk::ClaudeAgentOptions::builder()
+                        .system_prompt("test")
+                        .build(),
+                ),
+                None,
             ),
             config,
         );
@@ -1233,10 +1242,13 @@ mod tests {
             max_budget_usd: 100.0,
         };
         let session = AgentSession::new(
-            ClaudeClient::new(
-                claude_agent_sdk_rs::ClaudeAgentOptions::builder()
-                    .system_prompt("test")
-                    .build(),
+            ClaudeSdkClient::new(
+                Some(
+                    code_agent_sdk::ClaudeAgentOptions::builder()
+                        .system_prompt("test")
+                        .build(),
+                ),
+                None,
             ),
             config,
         );
@@ -1258,10 +1270,13 @@ mod tests {
             max_budget_usd: 10.0,
         };
         let session = AgentSession::new(
-            ClaudeClient::new(
-                claude_agent_sdk_rs::ClaudeAgentOptions::builder()
-                    .system_prompt("test")
-                    .build(),
+            ClaudeSdkClient::new(
+                Some(
+                    code_agent_sdk::ClaudeAgentOptions::builder()
+                        .system_prompt("test")
+                        .build(),
+                ),
+                None,
             ),
             config,
         );
@@ -1294,10 +1309,13 @@ mod tests {
             max_budget_usd: 100.0,
         };
         let session = AgentSession::new(
-            ClaudeClient::new(
-                claude_agent_sdk_rs::ClaudeAgentOptions::builder()
-                    .system_prompt("test")
-                    .build(),
+            ClaudeSdkClient::new(
+                Some(
+                    code_agent_sdk::ClaudeAgentOptions::builder()
+                        .system_prompt("test")
+                        .build(),
+                ),
+                None,
             ),
             config,
         );
@@ -1321,10 +1339,13 @@ mod tests {
             max_budget_usd: 100.0,
         };
         let mut session = AgentSession::new(
-            ClaudeClient::new(
-                claude_agent_sdk_rs::ClaudeAgentOptions::builder()
-                    .system_prompt("test")
-                    .build(),
+            ClaudeSdkClient::new(
+                Some(
+                    code_agent_sdk::ClaudeAgentOptions::builder()
+                        .system_prompt("test")
+                        .build(),
+                ),
+                None,
             ),
             config,
         );
@@ -1390,7 +1411,7 @@ mod tests {
 
     /// Helper to build a test AgentSession with default config.
     fn test_session() -> AgentSession {
-        let options = claude_agent_sdk_rs::ClaudeAgentOptions::builder()
+        let options = code_agent_sdk::ClaudeAgentOptions::builder()
             .system_prompt("test")
             .build();
         let config = SessionConfig {
@@ -1399,7 +1420,7 @@ mod tests {
             idle_retries: 0,
             max_budget_usd: 10.0,
         };
-        AgentSession::new(ClaudeClient::new(options), config)
+        AgentSession::new(ClaudeSdkClient::new(Some(options), None), config)
     }
 
     #[tokio::test]

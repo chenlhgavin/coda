@@ -12,8 +12,8 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use claude_agent_sdk_rs::ClaudeClient;
 use coda_pm::PromptManager;
+use code_agent_sdk::ClaudeSdkClient;
 use tracing::{debug, info, warn};
 
 use crate::CoreError;
@@ -131,7 +131,7 @@ impl PlanSession {
         // allowing the TUI to display live streaming during planning.
         options.include_partial_messages = true;
 
-        let client = ClaudeClient::new(options);
+        let client = ClaudeSdkClient::new(Some(options), None);
         let session_config = SessionConfig {
             idle_timeout_secs: config.agent.idle_timeout_secs,
             tool_execution_timeout_secs: config.agent.tool_execution_timeout_secs,
@@ -457,7 +457,7 @@ impl PlanSession {
             self.planning_cost_usd,
         );
         let state_path = coda_feature_dir.join("state.yml");
-        let state_yaml = serde_yaml::to_string(&state)?;
+        let state_yaml = serde_yaml_ng::to_string(&state)?;
         tokio::fs::write(&state_path, state_yaml)
             .await
             .map_err(CoreError::IoError)?;
@@ -757,7 +757,7 @@ mod tests {
             0.0,
         );
 
-        let yaml = serde_yaml::to_string(&state).unwrap();
+        let yaml = serde_yaml_ng::to_string(&state).unwrap();
         assert!(yaml.contains("planned"));
         assert!(yaml.contains("new-feature"));
         assert!(yaml.contains("phase-one"));
@@ -765,7 +765,7 @@ mod tests {
         assert!(yaml.contains("verify"));
         assert!(yaml.contains("update-docs"));
 
-        let deserialized: FeatureState = serde_yaml::from_str(&yaml).unwrap();
+        let deserialized: FeatureState = serde_yaml_ng::from_str(&yaml).unwrap();
         assert_eq!(deserialized.phases.len(), 5);
         assert_eq!(deserialized.status, FeatureStatus::Planned);
     }

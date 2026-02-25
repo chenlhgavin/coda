@@ -250,7 +250,7 @@ pub fn parse_review_issues_structured(response: &str, source: ReviewSource) -> V
         return Vec::new();
     };
 
-    let Ok(parsed) = serde_yaml::from_str::<serde_json::Value>(&yaml) else {
+    let Ok(parsed) = serde_yaml_ng::from_str::<serde_json::Value>(&yaml) else {
         return Vec::new();
     };
 

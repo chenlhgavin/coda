@@ -24,11 +24,11 @@ coda-core = { path = "crates/coda-core", version = "0.1.0" }
 coda-pm = { path = "crates/coda-pm", version = "0.1.0" }
 
 # Async runtime
-tokio = { version = "1.43", features = ["rt", "rt-multi-thread", "macros", "sync", "time", "fs", "process"] }
+tokio = { version = "1.49", features = ["rt", "rt-multi-thread", "macros", "sync", "time", "fs", "process"] }
 tokio-util = { version = "0.7", features = ["rt"] }
 
 # Claude Agent SDK
-claude-agent-sdk-rs = "0.6"
+code-agent-sdk = { path = "vendors/code-agent-sdk" }
 
 # CLI
 clap = { version = "4.5", features = ["derive"] }
@@ -37,16 +37,16 @@ crossterm = "0.29"
 unicode-width = "0.2"
 
 # Template engine
-minijinja = { version = "2.6", features = ["loader"] }
+minijinja = { version = "2.16", features = ["loader"] }
 
 # Serialization
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-serde_yaml = "0.9"
+serde_yaml_ng = "0.10"
 chrono = { version = "0.4", features = ["serde"] }
 
 # Regex
-regex = "1.11"
+regex = "1.12"
 
 # Async utilities
 futures = "0.3"
@@ -60,8 +60,8 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # HTTP / WebSocket (used by coda-server)
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
-tokio-tungstenite = { version = "0.24", default-features = false, features = ["connect", "rustls-tls-webpki-roots"] }
+reqwest = { version = "0.13", features = ["json"] }
+tokio-tungstenite = { version = "0.28", default-features = false, features = ["connect", "rustls-tls-webpki-roots"] }
 
 # Concurrent data structures
 dashmap = "6.1"

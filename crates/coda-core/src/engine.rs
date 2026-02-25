@@ -10,8 +10,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use claude_agent_sdk_rs::ClaudeClient;
 use coda_pm::PromptManager;
+use code_agent_sdk::ClaudeSdkClient;
 use futures::StreamExt;
 use serde::Serialize;
 use tokio_util::sync::CancellationToken;
@@ -212,7 +212,7 @@ impl Engine {
                     config_path.display()
                 ))
             })?;
-            serde_yaml::from_str::<CodaConfig>(&content).map_err(|e| {
+            serde_yaml_ng::from_str::<CodaConfig>(&content).map_err(|e| {
                 CoreError::ConfigError(format!(
                     "Invalid YAML in config file at {}: {e}",
                     config_path.display()
@@ -466,7 +466,10 @@ impl Engine {
             &self.config.agent.model,
         );
         options.include_partial_messages = true;
-        let mut session = AgentSession::new(ClaudeClient::new(options), self.init_session_config());
+        let mut session = AgentSession::new(
+            ClaudeSdkClient::new(Some(options), None),
+            self.init_session_config(),
+        );
         session.set_cancellation_token(cancel_token.clone());
 
         // Map SessionEvent::TextDelta → InitEvent::StreamText
@@ -555,7 +558,10 @@ impl Engine {
             &self.config.agent.model,
         );
         options.include_partial_messages = true;
-        let mut session = AgentSession::new(ClaudeClient::new(options), self.init_session_config());
+        let mut session = AgentSession::new(
+            ClaudeSdkClient::new(Some(options), None),
+            self.init_session_config(),
+        );
         session.set_cancellation_token(cancel_token.clone());
 
         // Map SessionEvent::TextDelta → InitEvent::StreamText
@@ -613,7 +619,7 @@ impl Engine {
     /// Starts an interactive planning session for a feature.
     ///
     /// Validates the slug format and checks for duplicate features before
-    /// creating a `PlanSession` wrapping a `ClaudeClient` with the Planner
+    /// creating a `PlanSession` wrapping a `ClaudeSdkClient` with the Planner
     /// profile for multi-turn conversation. The session must be explicitly
     /// connected and finalized by the caller (typically the CLI layer).
     ///
@@ -691,7 +697,7 @@ impl Engine {
     /// Executes a feature development run through all phases.
     ///
     /// Reads `state.yml` and resumes from the last completed phase. Uses
-    /// a single continuous `ClaudeClient` session with the Coder profile
+    /// a single continuous `ClaudeSdkClient` session with the Coder profile
     /// to execute setup → implement → test → review → verify → PR.
     ///
     /// When `progress_tx` is provided, emits [`RunEvent`]s for real-time
@@ -1069,13 +1075,23 @@ async fn fix_hook_errors_with_llm(
         &config.agent.model,
     );
 
-    let mut stream = claude_agent_sdk_rs::query_stream(fix_prompt, Some(options))
+    let mut client = ClaudeSdkClient::new(Some(options), None);
+    client
+        .connect(None)
+        .await
+        .map_err(|e| CoreError::AgentError(e.to_string()))?;
+    client
+        .query(fix_prompt.as_str(), "")
         .await
         .map_err(|e| CoreError::AgentError(e.to_string()))?;
 
+    let mut stream = client.receive_response();
     while let Some(result) = stream.next().await {
         let _ = result.map_err(|e| CoreError::AgentError(e.to_string()))?;
     }
+    drop(stream);
+
+    let _ = client.disconnect().await;
 
     info!("LLM hook-fix agent completed");
     Ok(())
@@ -1378,7 +1394,7 @@ mod tests {
     fn write_state(root: &std::path::Path, slug: &str, state: &FeatureState) {
         let dir = root.join(".trees").join(slug).join(".coda").join(slug);
         fs::create_dir_all(&dir).expect("create state dir");
-        let yaml = serde_yaml::to_string(state).expect("serialize state");
+        let yaml = serde_yaml_ng::to_string(state).expect("serialize state");
         fs::write(dir.join("state.yml"), yaml).expect("write state.yml");
     }
 

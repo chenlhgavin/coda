@@ -69,7 +69,7 @@ pub fn parse_review_issues(response: &str) -> Vec<String> {
     let yaml_content = extract_yaml_block(response);
 
     if let Some(yaml) = yaml_content
-        && let Ok(parsed) = serde_yaml::from_str::<serde_json::Value>(&yaml)
+        && let Ok(parsed) = serde_yaml_ng::from_str::<serde_json::Value>(&yaml)
         && let Some(issues) = parsed.get("issues").and_then(|v| v.as_array())
     {
         return issues
@@ -121,7 +121,7 @@ pub fn parse_verification_result(response: &str) -> (u32, Vec<String>) {
     let yaml_content = extract_yaml_block(response);
 
     if let Some(yaml) = yaml_content
-        && let Ok(parsed) = serde_yaml::from_str::<serde_json::Value>(&yaml)
+        && let Ok(parsed) = serde_yaml_ng::from_str::<serde_json::Value>(&yaml)
     {
         let result = parsed
             .get("result")

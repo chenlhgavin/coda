@@ -42,7 +42,7 @@ use serde::{Deserialize, Serialize};
 ///   duration_secs: 0
 /// "#;
 ///
-/// let state: FeatureState = serde_yaml::from_str(yaml).unwrap();
+/// let state: FeatureState = serde_yaml_ng::from_str(yaml).unwrap();
 /// assert_eq!(state.status, FeatureStatus::Planned);
 /// assert_eq!(state.feature.slug, "add-auth");
 /// ```
@@ -586,7 +586,7 @@ impl StateManager {
     /// `CoreError::IoError` on write failure.
     pub fn save(&mut self) -> Result<(), CoreError> {
         self.state.current_phase = self.current_phase_index() as u32;
-        let yaml = serde_yaml::to_string(&self.state)?;
+        let yaml = serde_yaml_ng::to_string(&self.state)?;
         std::fs::write(&self.state_path, yaml).map_err(CoreError::IoError)?;
         tracing::debug!(path = %self.state_path.display(), "State saved");
         Ok(())
@@ -829,14 +829,14 @@ mod tests {
     #[test]
     fn test_should_serialize_feature_status() {
         let status = FeatureStatus::InProgress;
-        let yaml = serde_yaml::to_string(&status).unwrap();
+        let yaml = serde_yaml_ng::to_string(&status).unwrap();
         assert!(yaml.contains("in_progress"));
     }
 
     #[test]
     fn test_should_serialize_phase_status() {
         let status = PhaseStatus::Running;
-        let yaml = serde_yaml::to_string(&status).unwrap();
+        let yaml = serde_yaml_ng::to_string(&status).unwrap();
         assert!(yaml.contains("running"));
     }
 
@@ -846,8 +846,8 @@ mod tests {
             input_tokens: 3000,
             output_tokens: 1500,
         };
-        let yaml = serde_yaml::to_string(&cost).unwrap();
-        let deserialized: TokenCost = serde_yaml::from_str(&yaml).unwrap();
+        let yaml = serde_yaml_ng::to_string(&cost).unwrap();
+        let deserialized: TokenCost = serde_yaml_ng::from_str(&yaml).unwrap();
         assert_eq!(deserialized.input_tokens, 3000);
         assert_eq!(deserialized.output_tokens, 1500);
     }
@@ -931,8 +931,8 @@ mod tests {
             },
         };
 
-        let yaml = serde_yaml::to_string(&state).unwrap();
-        let deserialized: FeatureState = serde_yaml::from_str(&yaml).unwrap();
+        let yaml = serde_yaml_ng::to_string(&state).unwrap();
+        let deserialized: FeatureState = serde_yaml_ng::from_str(&yaml).unwrap();
 
         assert_eq!(deserialized.feature.slug, "add-user-auth");
         assert_eq!(deserialized.status, FeatureStatus::InProgress);
@@ -1133,11 +1133,11 @@ mod tests {
             total: TotalStats::default(),
         };
 
-        let yaml = serde_yaml::to_string(&state).unwrap();
+        let yaml = serde_yaml_ng::to_string(&state).unwrap();
         // pr field should be omitted entirely when None
         assert!(!yaml.contains("pr:"));
 
-        let deserialized: FeatureState = serde_yaml::from_str(&yaml).unwrap();
+        let deserialized: FeatureState = serde_yaml_ng::from_str(&yaml).unwrap();
         assert!(deserialized.pr.is_none());
         assert_eq!(deserialized.status, FeatureStatus::Planned);
     }
@@ -1500,7 +1500,7 @@ mod tests {
 
         // After save, the file should have current_phase = 1 (derived)
         let content = std::fs::read_to_string(&path).unwrap();
-        let loaded: FeatureState = serde_yaml::from_str(&content).unwrap();
+        let loaded: FeatureState = serde_yaml_ng::from_str(&content).unwrap();
         assert_eq!(loaded.current_phase, 1);
 
         // In-memory state is also synced

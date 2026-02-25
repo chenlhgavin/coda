@@ -8,12 +8,10 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::Arc;
 
-use claude_agent_sdk_rs::{
-    ClaudeAgentOptions, HookContext, HookEvent, HookInput, HookJsonOutput, HookMatcher,
-    HookSpecificOutput, Hooks, PermissionMode, PreToolUseHookSpecificOutput, SyncHookJsonOutput,
-    SystemPrompt, SystemPromptPreset, Tools,
-};
+use code_agent_sdk::options::{HookCallback, HookJSONOutput, SystemPromptConfig, ToolsConfig};
+use code_agent_sdk::{ClaudeAgentOptions, HookEvent, HookMatcher, PermissionMode};
 use regex::Regex;
 use tracing::debug;
 
@@ -46,33 +44,34 @@ impl AgentProfile {
         max_budget_usd: f64,
         model: &str,
     ) -> ClaudeAgentOptions {
-        let system_prompt = SystemPrompt::Preset(SystemPromptPreset::with_append(
-            "claude_code",
-            system_append,
-        ));
+        let system_prompt = SystemPromptConfig::Preset {
+            preset: "claude_code".to_string(),
+            append: Some(system_append.to_string()),
+        };
 
-        match self {
+        let mut options = match self {
             Self::Planner => ClaudeAgentOptions::builder()
-                .system_prompt(system_prompt)
                 .permission_mode(PermissionMode::BypassPermissions)
                 .cwd(cwd)
                 .max_turns(max_turns)
                 .max_budget_usd(max_budget_usd)
                 .model(model.to_string())
-                .tools(Tools::from(["Read", "Glob", "Grep"]))
+                .tools(ToolsConfig::from(["Read", "Glob", "Grep"]))
                 .build(),
 
             Self::Coder => ClaudeAgentOptions::builder()
-                .system_prompt(system_prompt)
                 .permission_mode(PermissionMode::BypassPermissions)
                 .cwd(cwd)
                 .max_turns(max_turns)
                 .max_budget_usd(max_budget_usd)
                 .model(model.to_string())
-                .tools(Tools::from(["Read", "Write", "Bash", "Glob", "Grep"]))
+                .tools(ToolsConfig::from(["Read", "Write", "Bash", "Glob", "Grep"]))
                 .hooks(build_safety_hooks())
                 .build(),
-        }
+        };
+        // Set system prompt directly (builder only supports String, not Preset)
+        options.system_prompt = Some(system_prompt);
+        options
     }
 }
 
@@ -96,54 +95,88 @@ const DANGEROUS_PATTERNS: &[&str] = &[
 ///   dangerous patterns and denies them.
 /// - **`PostToolUse`** (all tools): Logs tool name and result via `tracing::debug!`.
 pub fn build_safety_hooks() -> HashMap<HookEvent, Vec<HookMatcher>> {
-    let mut hooks = Hooks::new();
+    let mut hooks = HashMap::new();
 
     // PreToolUse: intercept dangerous Bash commands
-    hooks.add_pre_tool_use_with_matcher("Bash", |input, _tool_use_id, _context| async move {
-        if let HookInput::PreToolUse(ref pre) = input {
-            let command = pre
-                .tool_input
-                .get("command")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
+    let pre_hook: HookCallback = Arc::new(
+        |input: serde_json::Value, _tool_use_id: Option<String>, _context| {
+            Box::pin(async move {
+                let command = input
+                    .get("tool_input")
+                    .and_then(|v| v.get("command"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
 
-            if is_dangerous_command(command) {
-                debug!(command = command, "Blocked dangerous Bash command");
-                return HookJsonOutput::Sync(SyncHookJsonOutput {
-                    decision: Some("deny".to_string()),
-                    reason: Some(format!("Command blocked by safety hook: {command}")),
-                    hook_specific_output: Some(HookSpecificOutput::PreToolUse(
-                        PreToolUseHookSpecificOutput {
-                            permission_decision: Some("deny".to_string()),
-                            permission_decision_reason: Some(
-                                "Dangerous command detected by CODA safety hook".to_string(),
-                            ),
-                            updated_input: None,
-                        },
-                    )),
-                    ..SyncHookJsonOutput::default()
-                });
-            }
-        }
+                if is_dangerous_command(command) {
+                    debug!(command = command, "Blocked dangerous Bash command");
+                    return Ok(HookJSONOutput::Sync {
+                        decision: Some("deny".to_string()),
+                        reason: Some(format!("Command blocked by safety hook: {command}")),
+                        hook_specific_output: Some(serde_json::json!({
+                            "permission_decision": "deny",
+                            "permission_decision_reason":
+                                "Dangerous command detected by CODA safety hook",
+                        })),
+                        continue_: None,
+                        suppress_output: None,
+                        stop_reason: None,
+                        system_message: None,
+                    });
+                }
 
-        // Allow safe commands
-        HookJsonOutput::Sync(SyncHookJsonOutput::default())
-    });
-
-    // PostToolUse: log all tool executions
-    hooks.add_post_tool_use(
-        |input: HookInput, _tool_use_id: Option<String>, _context: HookContext| async move {
-            if let HookInput::PostToolUse(ref post) = input {
-                debug!(
-                    tool_name = post.tool_name.as_str(),
-                    "Tool execution completed"
-                );
-            }
-            HookJsonOutput::Sync(SyncHookJsonOutput::default())
+                Ok(HookJSONOutput::Sync {
+                    continue_: None,
+                    suppress_output: None,
+                    stop_reason: None,
+                    decision: None,
+                    system_message: None,
+                    reason: None,
+                    hook_specific_output: None,
+                })
+            })
         },
     );
 
-    hooks.build()
+    hooks.insert(
+        HookEvent::PreToolUse,
+        vec![HookMatcher {
+            matcher: Some("Bash".to_string()),
+            hooks: vec![pre_hook],
+            timeout: None,
+        }],
+    );
+
+    // PostToolUse: log all tool executions
+    let post_hook: HookCallback = Arc::new(
+        |input: serde_json::Value, _tool_use_id: Option<String>, _context| {
+            Box::pin(async move {
+                if let Some(tool_name) = input.get("tool_name").and_then(|v| v.as_str()) {
+                    debug!(tool_name, "Tool execution completed");
+                }
+
+                Ok(HookJSONOutput::Sync {
+                    continue_: None,
+                    suppress_output: None,
+                    stop_reason: None,
+                    decision: None,
+                    system_message: None,
+                    reason: None,
+                    hook_specific_output: None,
+                })
+            })
+        },
+    );
+
+    hooks.insert(
+        HookEvent::PostToolUse,
+        vec![HookMatcher {
+            matcher: None,
+            hooks: vec![post_hook],
+            timeout: None,
+        }],
+    );
+
+    hooks
 }
 
 /// Pre-compiled dangerous command regexes, initialized once on first access.
@@ -227,14 +260,14 @@ mod tests {
         assert!(options.hooks.is_none());
 
         match options.tools {
-            Some(Tools::List(tools)) => {
+            Some(ToolsConfig::List(tools)) => {
                 assert!(tools.contains(&"Read".to_string()));
                 assert!(tools.contains(&"Glob".to_string()));
                 assert!(tools.contains(&"Grep".to_string()));
                 assert!(!tools.contains(&"Write".to_string()));
                 assert!(!tools.contains(&"Bash".to_string()));
             }
-            _ => panic!("Expected Tools::List for Planner"),
+            _ => panic!("Expected ToolsConfig::List for Planner"),
         }
     }
 
@@ -255,14 +288,14 @@ mod tests {
         assert!(options.hooks.is_some());
 
         match options.tools {
-            Some(Tools::List(tools)) => {
+            Some(ToolsConfig::List(tools)) => {
                 assert!(tools.contains(&"Read".to_string()));
                 assert!(tools.contains(&"Write".to_string()));
                 assert!(tools.contains(&"Bash".to_string()));
                 assert!(tools.contains(&"Glob".to_string()));
                 assert!(tools.contains(&"Grep".to_string()));
             }
-            _ => panic!("Expected Tools::List for Coder"),
+            _ => panic!("Expected ToolsConfig::List for Coder"),
         }
     }
 }
