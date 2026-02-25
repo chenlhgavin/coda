@@ -738,42 +738,33 @@ pub fn wrapped_line_count(line: &Line<'_>, panel_width: usize) -> usize {
 
 /// Appends streaming text to the styled content buffer, splitting on newlines.
 ///
-/// Text is styled with `Color::White`. Each newline creates a new `Line`.
-/// The first fragment is appended to the last existing line if it has a
-/// matching style (to support streaming that splits mid-line).
-pub fn append_styled_text(buffer: &mut Vec<Line<'static>>, text: &str) {
-    let style = Style::default().fg(Color::White);
-    let mut parts = text.split('\n');
-
-    // First fragment appends to the current (last) text line
-    if let Some(first) = parts.next() {
-        if let Some(last_line) = buffer.last_mut()
-            && last_line
-                .spans
-                .last()
-                .is_some_and(|s| s.style.fg == Some(Color::White))
-        {
-            if let Some(last_span) = last_line.spans.last_mut() {
-                let mut existing = last_span.content.to_string();
-                existing.push_str(first);
-                *last_span = Span::styled(existing, style);
-            }
-        } else if !first.is_empty() {
-            buffer.push(Line::from(Span::styled(first.to_string(), style)));
-        }
-    }
-
-    // Each subsequent fragment (after a \n) starts a new line
-    for part in parts {
-        buffer.push(Line::from(Span::styled(part.to_string(), style)));
-    }
+/// Streaming text is parsed through the given [`MarkdownRenderer`] to
+/// convert Markdown syntax (headings, bold, code, lists, etc.) into
+/// styled ratatui [`Line`]/[`Span`] objects. Complete lines (terminated
+/// by `\n`) are parsed and styled immediately; the trailing fragment is
+/// held as pending text inside the renderer until more content arrives.
+pub fn append_markdown_text(
+    renderer: &mut crate::markdown::MarkdownRenderer,
+    buffer: &mut Vec<Line<'static>>,
+    text: &str,
+) {
+    renderer.append_text(buffer, text);
 }
 
 /// Appends a tool activity line to the content buffer.
 ///
-/// Formatted as `"┄ tool_name summary"` in dark gray to visually
+/// Adds a blank line before the activity if the last line in the buffer
+/// is non-empty, providing visual separation between agent text and tool
+/// output. Formatted as `"┄ tool_name summary"` in dark gray to visually
 /// distinguish tool activity from agent text output.
 pub fn append_tool_activity(buffer: &mut Vec<Line<'static>>, tool_name: &str, summary: &str) {
+    // Add visual separation before tool activity
+    let needs_blank = buffer
+        .last()
+        .is_some_and(|l| !l.spans.is_empty() && l.spans.iter().any(|s| !s.content.is_empty()));
+    if needs_blank {
+        buffer.push(Line::from(Span::raw(String::new())));
+    }
     buffer.push(Line::from(Span::styled(
         format!("┄ {tool_name} {summary}"),
         Style::default().fg(Color::DarkGray),
@@ -845,26 +836,29 @@ mod tests {
     }
 
     #[test]
-    fn test_should_append_single_line_to_empty_buffer() {
+    fn test_should_append_single_line_via_markdown() {
+        let mut renderer = crate::markdown::MarkdownRenderer::new();
         let mut buf: Vec<Line<'static>> = Vec::new();
-        append_styled_text(&mut buf, "hello world");
+        append_markdown_text(&mut renderer, &mut buf, "hello world\n");
         assert_eq!(buf.len(), 1);
         assert_eq!(buf[0].spans[0].content.as_ref(), "hello world");
     }
 
     #[test]
-    fn test_should_append_to_existing_last_line() {
+    fn test_should_append_streaming_text_via_markdown() {
+        let mut renderer = crate::markdown::MarkdownRenderer::new();
         let mut buf: Vec<Line<'static>> = Vec::new();
-        append_styled_text(&mut buf, "partial");
-        append_styled_text(&mut buf, " text");
+        append_markdown_text(&mut renderer, &mut buf, "partial");
+        append_markdown_text(&mut renderer, &mut buf, " text\n");
         assert_eq!(buf.len(), 1);
         assert_eq!(buf[0].spans[0].content.as_ref(), "partial text");
     }
 
     #[test]
     fn test_should_split_on_newlines() {
+        let mut renderer = crate::markdown::MarkdownRenderer::new();
         let mut buf: Vec<Line<'static>> = Vec::new();
-        append_styled_text(&mut buf, "line1\nline2\nline3");
+        append_markdown_text(&mut renderer, &mut buf, "line1\nline2\nline3\n");
         assert_eq!(buf.len(), 3);
         assert_eq!(buf[0].spans[0].content.as_ref(), "line1");
         assert_eq!(buf[1].spans[0].content.as_ref(), "line2");
@@ -873,21 +867,32 @@ mod tests {
 
     #[test]
     fn test_should_handle_trailing_newline() {
+        let mut renderer = crate::markdown::MarkdownRenderer::new();
         let mut buf: Vec<Line<'static>> = Vec::new();
-        append_styled_text(&mut buf, "line1\n");
+        append_markdown_text(&mut renderer, &mut buf, "line1\n\n");
         assert_eq!(buf.len(), 2);
         assert_eq!(buf[0].spans[0].content.as_ref(), "line1");
-        // Second line is empty
+        // Second line is blank
         assert_eq!(buf[1].spans[0].content.as_ref(), "");
     }
 
     #[test]
-    fn test_should_append_tool_activity() {
+    fn test_should_append_tool_activity_with_blank_separator() {
+        let mut buf: Vec<Line<'static>> = Vec::new();
+        buf.push(Line::from(Span::raw("some text")));
+        append_tool_activity(&mut buf, "read_file", "src/main.rs");
+        // Blank line separator + tool activity
+        assert_eq!(buf.len(), 3);
+        assert_eq!(buf[1].spans[0].content.as_ref(), "");
+        assert_eq!(buf[2].spans[0].content.as_ref(), "┄ read_file src/main.rs");
+        assert_eq!(buf[2].spans[0].style.fg, Some(Color::DarkGray));
+    }
+
+    #[test]
+    fn test_should_not_add_blank_before_tool_activity_on_empty_buffer() {
         let mut buf: Vec<Line<'static>> = Vec::new();
         append_tool_activity(&mut buf, "read_file", "src/main.rs");
         assert_eq!(buf.len(), 1);
-        assert_eq!(buf[0].spans[0].content.as_ref(), "┄ read_file src/main.rs");
-        assert_eq!(buf[0].spans[0].style.fg, Some(Color::DarkGray));
     }
 
     #[test]

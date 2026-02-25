@@ -22,6 +22,7 @@ use crossterm::{
 use ratatui::prelude::*;
 use tokio::sync::mpsc::UnboundedReceiver;
 
+use crate::markdown::MarkdownRenderer;
 use crate::tui_widgets::{
     self, MiddlePanel, PhaseDisplay, PhaseDisplayStatus, PrDisplayStatus, SummaryFields,
 };
@@ -80,6 +81,8 @@ pub struct InitUi {
     active_phase: Option<usize>,
     start_time: Instant,
     total_cost: f64,
+    /// Markdown renderer for converting streaming AI text into styled lines.
+    md_renderer: MarkdownRenderer,
     /// Accumulated styled lines for the streaming content area.
     content_lines: Vec<Line<'static>>,
     /// Vertical scroll offset (number of visual rows scrolled from top).
@@ -116,6 +119,7 @@ impl InitUi {
                 active_phase: None,
                 start_time: Instant::now(),
                 total_cost: 0.0,
+                md_renderer: MarkdownRenderer::new(),
                 content_lines: Vec::new(),
                 scroll_offset: 0,
                 auto_scroll: true,
@@ -257,13 +261,18 @@ impl InitUi {
                     phase.started_at = Some(Instant::now());
                 }
                 self.active_phase = Some(index);
-                // Clear content buffer for the new phase
+                // Clear content buffer and reset markdown renderer for the new phase
                 self.content_lines.clear();
+                self.md_renderer = MarkdownRenderer::new();
                 self.scroll_offset = 0;
                 self.auto_scroll = true;
             }
             InitEvent::StreamText { text } => {
-                tui_widgets::append_styled_text(&mut self.content_lines, &text);
+                tui_widgets::append_markdown_text(
+                    &mut self.md_renderer,
+                    &mut self.content_lines,
+                    &text,
+                );
                 if self.auto_scroll {
                     self.scroll_offset = self.max_scroll_offset();
                 }

@@ -32,7 +32,7 @@ use crate::state::AppState;
 use super::resolve_engine;
 use super::streaming::{
     HEARTBEAT_INTERVAL, SLACK_SECTION_CHAR_LIMIT, STREAM_UPDATE_DEBOUNCE, format_tool_activity,
-    split_into_chunks, truncated_preview,
+    markdown_to_slack, split_into_chunks, truncated_preview,
 };
 
 /// Handles `/coda run <feature_slug>`.
@@ -360,8 +360,9 @@ impl PhaseThreadStreamer {
         if !self.exceeded_limit && self.text.len() > SLACK_SECTION_CHAR_LIMIT {
             self.exceeded_limit = true;
             let preview = truncated_preview(&self.text);
+            let slack_preview = markdown_to_slack(preview);
             let phase_header = self.phase_header();
-            let msg = format!("{phase_header}\n{preview}\n\n_:hourglass: generating..._");
+            let msg = format!("{phase_header}\n{slack_preview}\n\n_:hourglass: generating..._");
             let _ = self
                 .slack
                 .update_message_text(&self.channel, ts, &msg)
@@ -378,7 +379,8 @@ impl PhaseThreadStreamer {
         self.pending = true;
         if self.last_update.elapsed() >= STREAM_UPDATE_DEBOUNCE {
             let phase_header = self.phase_header();
-            let msg = format!("{phase_header}\n{}", self.text);
+            let slack_text = markdown_to_slack(&self.text);
+            let msg = format!("{phase_header}\n{slack_text}");
             let _ = self
                 .slack
                 .update_message_text(&self.channel, ts, &msg)
@@ -398,9 +400,11 @@ impl PhaseThreadStreamer {
         let phase_header = self.phase_header();
         let display = if self.exceeded_limit {
             let preview = truncated_preview(&self.text);
-            format!("{phase_header}\n{preview}\n\n{activity}")
+            let slack_preview = markdown_to_slack(preview);
+            format!("{phase_header}\n{slack_preview}\n\n{activity}")
         } else {
-            format!("{phase_header}\n{}\n\n{activity}", self.text)
+            let slack_text = markdown_to_slack(&self.text);
+            format!("{phase_header}\n{slack_text}\n\n{activity}")
         };
         let _ = self
             .slack
@@ -435,14 +439,13 @@ impl PhaseThreadStreamer {
         let phase_header = self.phase_header();
         let msg = if self.exceeded_limit {
             let preview = truncated_preview(&self.text);
-            format!("{phase_header}\n{preview}\n\n_:hourglass: working... ({elapsed}s)_")
+            let slack_preview = markdown_to_slack(preview);
+            format!("{phase_header}\n{slack_preview}\n\n_:hourglass: working... ({elapsed}s)_")
         } else if self.text.is_empty() {
             format!("{phase_header}\n_:hourglass: working... ({elapsed}s)_")
         } else {
-            format!(
-                "{phase_header}\n{}\n\n_:hourglass: working... ({elapsed}s)_",
-                self.text
-            )
+            let slack_text = markdown_to_slack(&self.text);
+            format!("{phase_header}\n{slack_text}\n\n_:hourglass: working... ({elapsed}s)_",)
         };
         let _ = self
             .slack
@@ -463,7 +466,8 @@ impl PhaseThreadStreamer {
         }
 
         let phase_header = self.phase_header();
-        let chunks = split_into_chunks(&self.text, SLACK_SECTION_CHAR_LIMIT);
+        let slack_text = markdown_to_slack(&self.text);
+        let chunks = split_into_chunks(&slack_text, SLACK_SECTION_CHAR_LIMIT);
 
         // First chunk updates the existing reply
         if let Some(first) = chunks.first() {
@@ -494,13 +498,14 @@ impl PhaseThreadStreamer {
         };
 
         let phase_header = self.phase_header();
+        let slack_text = markdown_to_slack(&self.text);
 
-        if self.text.len() <= SLACK_SECTION_CHAR_LIMIT {
+        if slack_text.len() <= SLACK_SECTION_CHAR_LIMIT {
             // Everything fits in one message
             let msg = if self.text.is_empty() {
                 format!("{phase_header}\n{footer}")
             } else {
-                format!("{phase_header}\n{}\n\n{footer}", self.text)
+                format!("{phase_header}\n{slack_text}\n\n{footer}")
             };
             let _ = self
                 .slack
@@ -508,7 +513,7 @@ impl PhaseThreadStreamer {
                 .await;
         } else {
             // Split the text and put footer in the last message
-            let chunks = split_into_chunks(&self.text, SLACK_SECTION_CHAR_LIMIT);
+            let chunks = split_into_chunks(&slack_text, SLACK_SECTION_CHAR_LIMIT);
 
             if let Some(first) = chunks.first() {
                 let msg = format!("{phase_header}\n{first}");

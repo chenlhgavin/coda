@@ -8,6 +8,7 @@ mod cli;
 pub(crate) mod fmt_utils;
 pub(crate) mod init_ui;
 mod line_editor;
+pub mod markdown;
 mod run_ui;
 pub(crate) mod tui_widgets;
 #[allow(dead_code)]

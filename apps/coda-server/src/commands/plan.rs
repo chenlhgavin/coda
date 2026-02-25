@@ -24,7 +24,7 @@ use crate::state::AppState;
 use super::resolve_engine;
 use super::streaming::{
     HEARTBEAT_INTERVAL, SLACK_SECTION_CHAR_LIMIT, STREAM_UPDATE_DEBOUNCE, format_tool_activity,
-    split_into_chunks, truncated_preview,
+    markdown_to_slack, split_into_chunks, truncated_preview,
 };
 
 /// Handles `/coda plan <feature_slug>`.
@@ -215,7 +215,8 @@ async fn handle_conversation(
                 .await;
         }
         Ok(reply) => {
-            let chunks = split_into_chunks(&reply, SLACK_SECTION_CHAR_LIMIT);
+            let slack_text = markdown_to_slack(&reply);
+            let chunks = split_into_chunks(&slack_text, SLACK_SECTION_CHAR_LIMIT);
             // First chunk replaces the placeholder message
             if let Some(first) = chunks.first() {
                 let _ = state
@@ -285,8 +286,9 @@ async fn consume_streaming_updates(
                         if !exceeded_limit && latest_text.len() > SLACK_SECTION_CHAR_LIMIT {
                             exceeded_limit = true;
                             let preview = truncated_preview(&latest_text);
+                            let slack_preview = markdown_to_slack(preview);
                             let msg = format!(
-                                "{preview}\n\n_:hourglass: generating..._"
+                                "{slack_preview}\n\n_:hourglass: generating..._"
                             );
                             let _ = slack
                                 .update_message_text(&channel, &ts, &msg)
@@ -302,8 +304,9 @@ async fn consume_streaming_updates(
 
                         pending = true;
                         if last_update.elapsed() >= STREAM_UPDATE_DEBOUNCE {
+                            let slack_text = markdown_to_slack(&latest_text);
                             let _ = slack
-                                .update_message_text(&channel, &ts, &latest_text)
+                                .update_message_text(&channel, &ts, &slack_text)
                                 .await;
                             last_update = Instant::now();
                             pending = false;
@@ -316,9 +319,11 @@ async fn consume_streaming_updates(
                         let activity = format_tool_activity(&tool_name, &summary);
                         let display = if exceeded_limit {
                             let preview = truncated_preview(&latest_text);
-                            format!("{preview}\n\n{activity}")
+                            let slack_preview = markdown_to_slack(preview);
+                            format!("{slack_preview}\n\n{activity}")
                         } else {
-                            format!("{latest_text}\n\n{activity}")
+                            let slack_text = markdown_to_slack(&latest_text);
+                            format!("{slack_text}\n\n{activity}")
                         };
                         let _ = slack
                             .update_message_text(&channel, &ts, &display)
@@ -333,11 +338,13 @@ async fn consume_streaming_updates(
                 let elapsed = started.elapsed().as_secs();
                 let msg = if exceeded_limit {
                     let preview = truncated_preview(&latest_text);
-                    format!("{preview}\n\n_:hourglass: generating... ({elapsed}s)_")
+                    let slack_preview = markdown_to_slack(preview);
+                    format!("{slack_preview}\n\n_:hourglass: generating... ({elapsed}s)_")
                 } else if latest_text.is_empty() {
                     format!("_:hourglass: thinking... ({elapsed}s)_")
                 } else {
-                    format!("{latest_text}\n\n_:hourglass: thinking... ({elapsed}s)_")
+                    let slack_text = markdown_to_slack(&latest_text);
+                    format!("{slack_text}\n\n_:hourglass: thinking... ({elapsed}s)_")
                 };
                 let _ = slack.update_message_text(&channel, &ts, &msg).await;
                 last_update = Instant::now();
@@ -347,7 +354,8 @@ async fn consume_streaming_updates(
 
     // Flush any remaining pending text update (only if within limit and non-empty)
     if pending && !exceeded_limit && !latest_text.is_empty() {
-        let _ = slack.update_message_text(&channel, &ts, &latest_text).await;
+        let slack_text = markdown_to_slack(&latest_text);
+        let _ = slack.update_message_text(&channel, &ts, &slack_text).await;
     }
 }
 

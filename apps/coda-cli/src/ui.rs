@@ -493,7 +493,7 @@ fn render_chat(frame: &mut Frame, area: Rect, messages: &[ChatMessage], scroll_o
     let inner = chat_block.inner(area);
     frame.render_widget(chat_block, area);
 
-    // Build chat text with styled roles
+    // Build chat text with styled roles and markdown-rendered content
     let mut lines: Vec<Line> = Vec::new();
     for msg in messages {
         let (role_style, role_label) = if msg.role == USER_ROLE {
@@ -502,27 +502,27 @@ fn render_chat(frame: &mut Frame, area: Rect, messages: &[ChatMessage], scroll_o
             (Style::default().fg(Color::Yellow).bold(), "Assistant: ")
         };
 
-        // First line: role label + first line of content
-        let mut content_lines: Vec<&str> = msg.content.lines().collect();
-        let first_content_line = if content_lines.is_empty() {
-            ""
-        } else {
-            content_lines.remove(0)
-        };
+        // Role label on its own line
+        lines.push(Line::from(Span::styled(role_label, role_style)));
 
-        lines.push(Line::from(vec![
-            Span::styled(role_label, role_style),
-            Span::raw(first_content_line),
-        ]));
-
-        // Remaining lines with indentation matching the role label width
-        let indent = " ".repeat(role_label.len());
-        for line in content_lines {
-            if line.is_empty() {
-                lines.push(Line::from(""));
-            } else {
-                lines.push(Line::from(format!("{indent}{line}")));
+        if msg.role == USER_ROLE {
+            // User messages: plain white text, no markdown parsing
+            for content_line in msg.content.lines() {
+                if content_line.is_empty() {
+                    lines.push(Line::from(""));
+                } else {
+                    lines.push(Line::from(Span::styled(
+                        content_line.to_string(),
+                        Style::default().fg(Color::White),
+                    )));
+                }
             }
+        } else {
+            // Assistant messages: parse markdown for styled rendering
+            let mut renderer = crate::markdown::MarkdownRenderer::new();
+            renderer.append_text(&mut lines, &msg.content);
+            // Flush any trailing content by appending a newline
+            renderer.append_text(&mut lines, "\n");
         }
 
         // Blank line between messages
