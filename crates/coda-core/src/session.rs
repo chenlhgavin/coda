@@ -1,6 +1,6 @@
 //! Shared agent session abstraction for streaming/timeout/reconnect logic.
 //!
-//! Provides [`AgentSession`] which wraps a [`ClaudeSdkClient`] with idle timeout
+//! Provides [`AgentSession`] which wraps a [`AgentSdkClient`] with idle timeout
 //! detection, exponential backoff reconnection, response accumulation, and
 //! API error detection. Both [`PlanSession`](crate::planner::PlanSession) and
 //! [`Runner`](crate::runner::Runner) delegate their agent interactions here,
@@ -24,7 +24,7 @@
 //! ```no_run
 //! # async fn example() -> Result<(), coda_core::CoreError> {
 //! use coda_core::session::{AgentSession, SessionConfig};
-//! use code_agent_sdk::ClaudeSdkClient;
+//! use code_agent_sdk::AgentSdkClient;
 //!
 //! let config = SessionConfig {
 //!     idle_timeout_secs: 300,
@@ -32,7 +32,7 @@
 //!     idle_retries: 3,
 //!     max_budget_usd: 100.0,
 //! };
-//! // let client = ClaudeSdkClient::new(Some(options), None);
+//! // let client = AgentSdkClient::new(Some(options), None);
 //! // let mut session = AgentSession::new(client, config);
 //! // session.connect().await?;
 //! // let resp = session.send("Hello", None).await?;
@@ -42,7 +42,7 @@
 
 use std::time::Duration;
 
-use code_agent_sdk::{ClaudeSdkClient, ContentBlock, Message, ResultMessage, UserContent};
+use code_agent_sdk::{AgentSdkClient, ContentBlock, Message, ResultMessage, UserContent};
 use futures::StreamExt;
 use tokio::sync::mpsc::UnboundedSender;
 use tokio_util::sync::CancellationToken;
@@ -199,7 +199,7 @@ impl AgentResponse {
     }
 }
 
-/// Wraps a [`ClaudeSdkClient`] with shared streaming, idle timeout, and
+/// Wraps a [`AgentSdkClient`] with shared streaming, idle timeout, and
 /// reconnection logic.
 ///
 /// This struct is the single implementation of the send/collect pattern
@@ -209,7 +209,7 @@ impl AgentResponse {
 /// An optional [`CancellationToken`] can be set to enable graceful
 /// cancellation of in-flight agent interactions.
 pub struct AgentSession {
-    client: ClaudeSdkClient,
+    client: AgentSdkClient,
     config: SessionConfig,
     connected: bool,
     event_tx: Option<UnboundedSender<SessionEvent>>,
@@ -225,16 +225,16 @@ impl AgentSession {
     ///
     /// # Arguments
     ///
-    /// * `client` - The `ClaudeSdkClient` to wrap.
+    /// * `client` - The `AgentSdkClient` to wrap.
     /// * `config` - Timeout and budget configuration.
     ///
     /// # Example
     ///
     /// ```no_run
     /// use coda_core::session::{AgentSession, SessionConfig};
-    /// use code_agent_sdk::ClaudeSdkClient;
+    /// use code_agent_sdk::AgentSdkClient;
     ///
-    /// # fn example(client: ClaudeSdkClient) {
+    /// # fn example(client: AgentSdkClient) {
     /// let config = SessionConfig {
     ///     idle_timeout_secs: 300,
     ///     tool_execution_timeout_secs: 600,
@@ -244,7 +244,7 @@ impl AgentSession {
     /// let session = AgentSession::new(client, config);
     /// # }
     /// ```
-    pub fn new(client: ClaudeSdkClient, config: SessionConfig) -> Self {
+    pub fn new(client: AgentSdkClient, config: SessionConfig) -> Self {
         Self {
             client,
             config,
@@ -288,10 +288,10 @@ impl AgentSession {
     ///
     /// ```no_run
     /// use coda_core::session::{AgentSession, SessionConfig};
-    /// use code_agent_sdk::ClaudeSdkClient;
+    /// use code_agent_sdk::AgentSdkClient;
     /// use tokio_util::sync::CancellationToken;
     ///
-    /// # fn example(client: ClaudeSdkClient) {
+    /// # fn example(client: AgentSdkClient) {
     /// let config = SessionConfig {
     ///     idle_timeout_secs: 300,
     ///     tool_execution_timeout_secs: 600,
@@ -307,11 +307,11 @@ impl AgentSession {
         self.cancel_token = Some(token);
     }
 
-    /// Returns a mutable reference to the underlying `ClaudeSdkClient`.
+    /// Returns a mutable reference to the underlying `AgentSdkClient`.
     ///
     /// Useful for callers that need to configure the client (e.g., setting
     /// `stderr` or `include_partial_messages`).
-    pub fn client_mut(&mut self) -> &mut ClaudeSdkClient {
+    pub fn client_mut(&mut self) -> &mut AgentSdkClient {
         &mut self.client
     }
 
@@ -320,7 +320,7 @@ impl AgentSession {
         self.connected
     }
 
-    /// Connects the underlying `ClaudeSdkClient` to the Claude process.
+    /// Connects the underlying `AgentSdkClient` to the Claude process.
     ///
     /// # Errors
     ///
@@ -335,7 +335,7 @@ impl AgentSession {
         Ok(())
     }
 
-    /// Disconnects the underlying `ClaudeSdkClient`.
+    /// Disconnects the underlying `AgentSdkClient`.
     ///
     /// Safe to call multiple times or when not connected.
     pub async fn disconnect(&mut self) {
@@ -368,7 +368,7 @@ impl AgentSession {
     /// [`CoreError::Cancelled`] at the next check point in the streaming loop.
     ///
     /// When `session_id` is `Some`, sends the prompt on an isolated session
-    /// (via [`ClaudeSdkClient::query`] with a session ID) so the conversation history
+    /// (via [`AgentSdkClient::query`] with a session ID) so the conversation history
     /// of the main session is not included.
     ///
     /// # Arguments
@@ -1176,9 +1176,9 @@ mod tests {
             max_budget_usd: 100.0,
         };
         let session = AgentSession::new(
-            ClaudeSdkClient::new(
+            AgentSdkClient::new(
                 Some(
-                    code_agent_sdk::ClaudeAgentOptions::builder()
+                    code_agent_sdk::AgentOptions::builder()
                         .system_prompt("test")
                         .build(),
                 ),
@@ -1203,9 +1203,9 @@ mod tests {
             max_budget_usd: 100.0,
         };
         let session = AgentSession::new(
-            ClaudeSdkClient::new(
+            AgentSdkClient::new(
                 Some(
-                    code_agent_sdk::ClaudeAgentOptions::builder()
+                    code_agent_sdk::AgentOptions::builder()
                         .system_prompt("test")
                         .build(),
                 ),
@@ -1242,9 +1242,9 @@ mod tests {
             max_budget_usd: 100.0,
         };
         let session = AgentSession::new(
-            ClaudeSdkClient::new(
+            AgentSdkClient::new(
                 Some(
-                    code_agent_sdk::ClaudeAgentOptions::builder()
+                    code_agent_sdk::AgentOptions::builder()
                         .system_prompt("test")
                         .build(),
                 ),
@@ -1270,9 +1270,9 @@ mod tests {
             max_budget_usd: 10.0,
         };
         let session = AgentSession::new(
-            ClaudeSdkClient::new(
+            AgentSdkClient::new(
                 Some(
-                    code_agent_sdk::ClaudeAgentOptions::builder()
+                    code_agent_sdk::AgentOptions::builder()
                         .system_prompt("test")
                         .build(),
                 ),
@@ -1309,9 +1309,9 @@ mod tests {
             max_budget_usd: 100.0,
         };
         let session = AgentSession::new(
-            ClaudeSdkClient::new(
+            AgentSdkClient::new(
                 Some(
-                    code_agent_sdk::ClaudeAgentOptions::builder()
+                    code_agent_sdk::AgentOptions::builder()
                         .system_prompt("test")
                         .build(),
                 ),
@@ -1339,9 +1339,9 @@ mod tests {
             max_budget_usd: 100.0,
         };
         let mut session = AgentSession::new(
-            ClaudeSdkClient::new(
+            AgentSdkClient::new(
                 Some(
-                    code_agent_sdk::ClaudeAgentOptions::builder()
+                    code_agent_sdk::AgentOptions::builder()
                         .system_prompt("test")
                         .build(),
                 ),
@@ -1411,7 +1411,7 @@ mod tests {
 
     /// Helper to build a test AgentSession with default config.
     fn test_session() -> AgentSession {
-        let options = code_agent_sdk::ClaudeAgentOptions::builder()
+        let options = code_agent_sdk::AgentOptions::builder()
             .system_prompt("test")
             .build();
         let config = SessionConfig {
@@ -1420,7 +1420,7 @@ mod tests {
             idle_retries: 0,
             max_budget_usd: 10.0,
         };
-        AgentSession::new(ClaudeSdkClient::new(Some(options), None), config)
+        AgentSession::new(AgentSdkClient::new(Some(options), None), config)
     }
 
     #[tokio::test]

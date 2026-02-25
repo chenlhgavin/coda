@@ -11,7 +11,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use coda_pm::PromptManager;
-use code_agent_sdk::ClaudeSdkClient;
+use code_agent_sdk::AgentSdkClient;
 use futures::StreamExt;
 use serde::Serialize;
 use tokio_util::sync::CancellationToken;
@@ -467,7 +467,7 @@ impl Engine {
         );
         options.include_partial_messages = true;
         let mut session = AgentSession::new(
-            ClaudeSdkClient::new(Some(options), None),
+            AgentSdkClient::new(Some(options), None),
             self.init_session_config(),
         );
         session.set_cancellation_token(cancel_token.clone());
@@ -559,7 +559,7 @@ impl Engine {
         );
         options.include_partial_messages = true;
         let mut session = AgentSession::new(
-            ClaudeSdkClient::new(Some(options), None),
+            AgentSdkClient::new(Some(options), None),
             self.init_session_config(),
         );
         session.set_cancellation_token(cancel_token.clone());
@@ -1075,7 +1075,7 @@ async fn fix_hook_errors_with_llm(
         &config.agent.model,
     );
 
-    let mut client = ClaudeSdkClient::new(Some(options), None);
+    let mut client = AgentSdkClient::new(Some(options), None);
     client
         .connect(None)
         .await

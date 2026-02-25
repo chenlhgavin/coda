@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use coda_pm::PromptManager;
-use code_agent_sdk::ClaudeSdkClient;
+use code_agent_sdk::AgentSdkClient;
 use tracing::{debug, info, warn};
 
 use crate::CoreError;
@@ -131,7 +131,7 @@ impl PlanSession {
         // allowing the TUI to display live streaming during planning.
         options.include_partial_messages = true;
 
-        let client = ClaudeSdkClient::new(Some(options), None);
+        let client = AgentSdkClient::new(Some(options), None);
         let session_config = SessionConfig {
             idle_timeout_secs: config.agent.idle_timeout_secs,
             tool_execution_timeout_secs: config.agent.tool_execution_timeout_secs,

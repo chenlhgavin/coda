@@ -1,7 +1,7 @@
 //! Agent profile configuration for Claude Agent SDK.
 //!
 //! Defines `AgentProfile` which maps CODA's task types to
-//! `ClaudeAgentOptions` configurations. Two profiles exist:
+//! `AgentOptions` configurations. Two profiles exist:
 //!
 //! - **Planner**: Read-only tools for analysis and planning.
 //! - **Coder**: Full tool access with safety hooks for development.
@@ -11,7 +11,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use code_agent_sdk::options::{HookCallback, HookJSONOutput, SystemPromptConfig, ToolsConfig};
-use code_agent_sdk::{ClaudeAgentOptions, HookEvent, HookMatcher, PermissionMode};
+use code_agent_sdk::{AgentOptions, HookEvent, HookMatcher, PermissionMode};
 use regex::Regex;
 use tracing::debug;
 
@@ -32,7 +32,7 @@ pub enum AgentProfile {
 }
 
 impl AgentProfile {
-    /// Converts this profile into `ClaudeAgentOptions` for the SDK.
+    /// Converts this profile into `AgentOptions` for the SDK.
     ///
     /// Both profiles use the `claude_code` system prompt preset with
     /// custom appended instructions, and `BypassPermissions` mode.
@@ -43,14 +43,14 @@ impl AgentProfile {
         max_turns: u32,
         max_budget_usd: f64,
         model: &str,
-    ) -> ClaudeAgentOptions {
+    ) -> AgentOptions {
         let system_prompt = SystemPromptConfig::Preset {
             preset: "claude_code".to_string(),
             append: Some(system_append.to_string()),
         };
 
         let mut options = match self {
-            Self::Planner => ClaudeAgentOptions::builder()
+            Self::Planner => AgentOptions::builder()
                 .permission_mode(PermissionMode::BypassPermissions)
                 .cwd(cwd)
                 .max_turns(max_turns)
@@ -59,7 +59,7 @@ impl AgentProfile {
                 .tools(ToolsConfig::from(["Read", "Glob", "Grep"]))
                 .build(),
 
-            Self::Coder => ClaudeAgentOptions::builder()
+            Self::Coder => AgentOptions::builder()
                 .permission_mode(PermissionMode::BypassPermissions)
                 .cwd(cwd)
                 .max_turns(max_turns)
