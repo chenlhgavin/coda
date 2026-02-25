@@ -11,8 +11,9 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use coda_core::InitEvent;
+use coda_core::{CoreError, InitEvent};
 use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, instrument, warn};
 
 use crate::error::ServerError;
@@ -72,10 +73,14 @@ pub async fn handle_init(
     let resp = state.slack().post_message(&channel, initial_blocks).await?;
     let message_ts = resp.ts;
 
+    // Create cancellation token and store it with the task
+    let cancel_token = CancellationToken::new();
+
     // Spawn background task
     let state_clone = Arc::clone(&state);
     let channel_clone = channel.clone();
     let repo_path_clone = repo_path.clone();
+    let cancel_token_clone = cancel_token.clone();
 
     let handle = tokio::spawn(async move {
         run_init_task(
@@ -85,11 +90,12 @@ pub async fn handle_init(
             message_ts,
             repo_path_clone,
             force,
+            cancel_token_clone,
         )
         .await;
     });
 
-    state.running_tasks().insert(task_key, handle);
+    state.running_tasks().insert(task_key, handle, cancel_token);
 
     Ok(())
 }
@@ -102,6 +108,7 @@ async fn run_init_task(
     message_ts: String,
     repo_path: std::path::PathBuf,
     force: bool,
+    cancel_token: CancellationToken,
 ) {
     let (tx, rx) = mpsc::unbounded_channel();
     let slack = state.slack().clone();
@@ -116,7 +123,7 @@ async fn run_init_task(
 
     debug!("Starting engine.init()");
     let start = Instant::now();
-    let result = engine.init(false, force, Some(tx)).await;
+    let result = engine.init(false, force, Some(tx), cancel_token).await;
     let duration_ms = start.elapsed().as_millis();
     debug!(
         duration_ms,
@@ -138,6 +145,10 @@ async fn run_init_task(
         Ok(()) => {
             info!(channel, "Init completed successfully");
             formatter::init_success(&display_phases)
+        }
+        Err(CoreError::Cancelled) => {
+            info!(channel, "Init was cancelled");
+            formatter::init_cancelled(&display_phases)
         }
         Err(e) => {
             warn!(channel, error = %e, "Init failed");

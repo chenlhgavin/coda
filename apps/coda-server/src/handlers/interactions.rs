@@ -269,7 +269,7 @@ mod tests {
             slug: "add-auth".to_string(),
             branch: "feature/add-auth".to_string(),
             pr_number: Some(42),
-            pr_state: "MERGED".to_string(),
+            pr_state: coda_core::PrState::Merged,
         }];
         let json = serde_json::to_string(&targets).unwrap();
         let parsed: Vec<CleanTarget> = serde_json::from_str(&json).unwrap();

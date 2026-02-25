@@ -3,6 +3,8 @@
 //! Defines `CodaConfig` which is loaded from `.coda/config.yml` in a
 //! user's repository. All fields use snake_case to match YAML conventions.
 
+use std::str::FromStr;
+
 use serde::{Deserialize, Serialize};
 
 /// Top-level CODA project configuration loaded from `.coda/config.yml`.
@@ -141,8 +143,98 @@ impl std::fmt::Display for ReviewEngine {
     }
 }
 
+/// Reasoning effort level for Codex CLI reviews.
+///
+/// Controls how much reasoning the model applies during review. Higher
+/// levels produce more thorough reviews but cost more and are slower.
+/// The value is passed through to the Codex CLI as
+/// `-c model_reasoning_effort=<value>`.
+///
+/// Deserialization is case-insensitive and accepts legacy aliases:
+/// `minimal` maps to `Low`, `xhigh` maps to `High`.
+///
+/// # Examples
+///
+/// ```
+/// use coda_core::config::ReasoningEffort;
+///
+/// let effort: ReasoningEffort = "high".parse().unwrap();
+/// assert_eq!(effort, ReasoningEffort::High);
+/// assert_eq!(effort.to_string(), "high");
+///
+/// // Legacy aliases are accepted
+/// let minimal: ReasoningEffort = "minimal".parse().unwrap();
+/// assert_eq!(minimal, ReasoningEffort::Low);
+///
+/// // Round-trip through serde
+/// let yaml = serde_yaml::to_string(&effort).unwrap();
+/// let parsed: ReasoningEffort = serde_yaml::from_str(&yaml).unwrap();
+/// assert_eq!(parsed, effort);
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReasoningEffort {
+    /// Minimal reasoning — fastest, cheapest, least thorough.
+    Low,
+    /// Moderate reasoning — balanced between speed and thoroughness.
+    Medium,
+    /// Deep reasoning — most thorough, slowest, most expensive.
+    High,
+}
+
+/// Custom serialization: always lowercase canonical names.
+impl serde::Serialize for ReasoningEffort {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&self.to_string())
+    }
+}
+
+/// Custom deserialization: case-insensitive with legacy alias support.
+///
+/// Accepts canonical values (`low`, `medium`, `high`) and legacy aliases
+/// (`minimal` → `Low`, `xhigh` → `High`) regardless of case.
+impl<'de> serde::Deserialize<'de> for ReasoningEffort {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let s = String::deserialize(deserializer)?;
+        s.parse::<ReasoningEffort>()
+            .map_err(serde::de::Error::custom)
+    }
+}
+
+impl std::fmt::Display for ReasoningEffort {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Low => write!(f, "low"),
+            Self::Medium => write!(f, "medium"),
+            Self::High => write!(f, "high"),
+        }
+    }
+}
+
+impl FromStr for ReasoningEffort {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "low" | "minimal" => Ok(Self::Low),
+            "medium" | "moderate" => Ok(Self::Medium),
+            "high" | "xhigh" => Ok(Self::High),
+            other => Err(format!("unknown reasoning effort: {other}")),
+        }
+    }
+}
+
 /// Verification phase configuration.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+///
+/// # Examples
+///
+/// ```
+/// use coda_core::config::VerifyConfig;
+///
+/// let config = VerifyConfig::default();
+/// assert_eq!(config.max_verify_retries, 3);
+/// assert!(!config.fail_on_max_attempts);
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct VerifyConfig {
     /// When `true`, the verify phase returns an error if any check still
@@ -150,6 +242,23 @@ pub struct VerifyConfig {
     /// `false` (default), a warning is logged and the run continues with
     /// a draft PR.
     pub fail_on_max_attempts: bool,
+
+    /// Maximum number of retry attempts after the initial verification
+    /// fails. Total verification attempts = 1 (initial) + `max_verify_retries`.
+    /// Defaults to 3 retries (4 total attempts).
+    ///
+    /// Backward-compatible with the legacy `max_retries` key via serde alias.
+    #[serde(alias = "max_retries")]
+    pub max_verify_retries: u32,
+}
+
+impl Default for VerifyConfig {
+    fn default() -> Self {
+        Self {
+            fail_on_max_attempts: false,
+            max_verify_retries: 3,
+        }
+    }
 }
 
 /// Code review configuration.
@@ -169,9 +278,7 @@ pub struct ReviewConfig {
     pub codex_model: String,
 
     /// Reasoning effort level for Codex CLI reviews.
-    ///
-    /// Valid values: `"minimal"`, `"low"`, `"medium"`, `"high"`, `"xhigh"`.
-    pub codex_reasoning_effort: String,
+    pub codex_reasoning_effort: ReasoningEffort,
 }
 
 impl Default for CodaConfig {
@@ -232,7 +339,7 @@ impl Default for ReviewConfig {
             max_review_rounds: 5,
             engine: ReviewEngine::default(),
             codex_model: "gpt-5.3-codex".to_string(),
-            codex_reasoning_effort: "high".to_string(),
+            codex_reasoning_effort: ReasoningEffort::High,
         }
     }
 }
@@ -251,6 +358,7 @@ mod tests {
         assert!(config.git.auto_commit);
         assert!(config.git.squash_before_push);
         assert!(config.review.enabled);
+        assert_eq!(config.verify.max_verify_retries, 3);
     }
 
     #[test]
@@ -305,12 +413,14 @@ review:
         assert_eq!(config.review.max_review_rounds, 10);
         assert_eq!(config.review.engine, ReviewEngine::Hybrid);
         assert_eq!(config.review.codex_model, "o4-mini");
-        assert_eq!(config.review.codex_reasoning_effort, "medium");
+        assert_eq!(
+            config.review.codex_reasoning_effort,
+            ReasoningEffort::Medium
+        );
     }
 
     #[test]
     fn test_should_deserialize_partial_config_with_defaults() {
-        // Simulates a config.yml generated by the agent with missing/extra fields
         let yaml = r#"
 version: 1
 agent:
@@ -332,10 +442,8 @@ review:
 
         let config: CodaConfig = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(config.version, 1);
-        // max_budget_usd missing → should use default 100.0
         assert!((config.agent.max_budget_usd - 100.0).abs() < f64::EPSILON);
         assert_eq!(config.agent.max_retries, 3);
-        // top-level checks missing → should use default
         assert!(!config.checks.is_empty());
         assert!(config.review.enabled);
     }
@@ -349,10 +457,9 @@ review:
         assert!((config.agent.max_budget_usd - 100.0).abs() < f64::EPSILON);
         assert!(config.git.auto_commit);
         assert!(config.git.squash_before_push);
-        // Review engine defaults
         assert_eq!(config.review.engine, ReviewEngine::Codex);
         assert_eq!(config.review.codex_model, "gpt-5.3-codex");
-        assert_eq!(config.review.codex_reasoning_effort, "high");
+        assert_eq!(config.review.codex_reasoning_effort, ReasoningEffort::High);
     }
 
     #[test]
@@ -366,5 +473,170 @@ review:
             let config: CodaConfig = serde_yaml::from_str(&yaml).unwrap();
             assert_eq!(config.review.engine, expected);
         }
+    }
+
+    #[test]
+    fn test_should_deserialize_legacy_max_retries_as_max_verify_retries() {
+        let yaml = r#"
+version: 1
+verify:
+  fail_on_max_attempts: true
+  max_retries: 5
+"#;
+        let config: CodaConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(config.verify.max_verify_retries, 5);
+        assert!(config.verify.fail_on_max_attempts);
+    }
+
+    #[test]
+    fn test_should_deserialize_new_max_verify_retries() {
+        let yaml = r#"
+version: 1
+verify:
+  max_verify_retries: 7
+"#;
+        let config: CodaConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(config.verify.max_verify_retries, 7);
+    }
+
+    #[test]
+    fn test_should_default_max_verify_retries_to_three() {
+        let config = CodaConfig::default();
+        assert_eq!(config.verify.max_verify_retries, 3);
+    }
+
+    // ── ReasoningEffort ─────────────────────────────────────────────
+
+    #[test]
+    fn test_should_serialize_reasoning_effort_lowercase() {
+        assert_eq!(
+            serde_json::to_string(&ReasoningEffort::Low).unwrap(),
+            "\"low\""
+        );
+        assert_eq!(
+            serde_json::to_string(&ReasoningEffort::Medium).unwrap(),
+            "\"medium\""
+        );
+        assert_eq!(
+            serde_json::to_string(&ReasoningEffort::High).unwrap(),
+            "\"high\""
+        );
+    }
+
+    #[test]
+    fn test_should_deserialize_reasoning_effort_lowercase() {
+        assert_eq!(
+            serde_json::from_str::<ReasoningEffort>("\"low\"").unwrap(),
+            ReasoningEffort::Low
+        );
+        assert_eq!(
+            serde_json::from_str::<ReasoningEffort>("\"medium\"").unwrap(),
+            ReasoningEffort::Medium
+        );
+        assert_eq!(
+            serde_json::from_str::<ReasoningEffort>("\"high\"").unwrap(),
+            ReasoningEffort::High
+        );
+    }
+
+    #[test]
+    fn test_should_round_trip_reasoning_effort_serde() {
+        for effort in [
+            ReasoningEffort::Low,
+            ReasoningEffort::Medium,
+            ReasoningEffort::High,
+        ] {
+            let json = serde_json::to_string(&effort).unwrap();
+            let parsed: ReasoningEffort = serde_json::from_str(&json).unwrap();
+            assert_eq!(parsed, effort);
+        }
+    }
+
+    #[test]
+    fn test_should_display_reasoning_effort_lowercase() {
+        assert_eq!(ReasoningEffort::Low.to_string(), "low");
+        assert_eq!(ReasoningEffort::Medium.to_string(), "medium");
+        assert_eq!(ReasoningEffort::High.to_string(), "high");
+    }
+
+    #[test]
+    fn test_should_parse_reasoning_effort_from_str_case_insensitive() {
+        assert_eq!(
+            "Low".parse::<ReasoningEffort>().unwrap(),
+            ReasoningEffort::Low
+        );
+        assert_eq!(
+            "MEDIUM".parse::<ReasoningEffort>().unwrap(),
+            ReasoningEffort::Medium
+        );
+        assert_eq!(
+            "high".parse::<ReasoningEffort>().unwrap(),
+            ReasoningEffort::High
+        );
+    }
+
+    #[test]
+    fn test_should_reject_invalid_reasoning_effort() {
+        assert!("unknown".parse::<ReasoningEffort>().is_err());
+    }
+
+    #[test]
+    fn test_should_display_and_from_str_roundtrip_for_reasoning_effort() {
+        for effort in [
+            ReasoningEffort::Low,
+            ReasoningEffort::Medium,
+            ReasoningEffort::High,
+        ] {
+            let displayed = effort.to_string();
+            let parsed: ReasoningEffort = displayed.parse().unwrap();
+            assert_eq!(parsed, effort);
+        }
+    }
+
+    #[test]
+    fn test_should_deserialize_all_reasoning_effort_variants_from_yaml() {
+        for (yaml_val, expected) in [
+            ("low", ReasoningEffort::Low),
+            ("medium", ReasoningEffort::Medium),
+            ("high", ReasoningEffort::High),
+        ] {
+            let yaml = format!("version: 1\nreview:\n  codex_reasoning_effort: {yaml_val}\n");
+            let config: CodaConfig = serde_yaml::from_str(&yaml).unwrap();
+            assert_eq!(config.review.codex_reasoning_effort, expected);
+        }
+    }
+
+    #[test]
+    fn test_should_deserialize_legacy_reasoning_effort_aliases() {
+        // "minimal" should map to Low
+        let yaml = "version: 1\nreview:\n  codex_reasoning_effort: minimal\n";
+        let config: CodaConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(config.review.codex_reasoning_effort, ReasoningEffort::Low);
+
+        // "xhigh" should map to High
+        let yaml = "version: 1\nreview:\n  codex_reasoning_effort: xhigh\n";
+        let config: CodaConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(config.review.codex_reasoning_effort, ReasoningEffort::High);
+
+        // "moderate" should map to Medium
+        let yaml = "version: 1\nreview:\n  codex_reasoning_effort: moderate\n";
+        let config: CodaConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(
+            config.review.codex_reasoning_effort,
+            ReasoningEffort::Medium
+        );
+    }
+
+    #[test]
+    fn test_should_deserialize_reasoning_effort_case_insensitive_from_yaml() {
+        // Mixed-case "High" should work
+        let yaml = "version: 1\nreview:\n  codex_reasoning_effort: High\n";
+        let config: CodaConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(config.review.codex_reasoning_effort, ReasoningEffort::High);
+
+        // UPPERCASE "LOW" should work
+        let yaml = "version: 1\nreview:\n  codex_reasoning_effort: LOW\n";
+        let config: CodaConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(config.review.codex_reasoning_effort, ReasoningEffort::Low);
     }
 }

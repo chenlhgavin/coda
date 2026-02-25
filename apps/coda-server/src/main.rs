@@ -25,6 +25,10 @@ use tracing::{info, warn};
 /// Duration before session expiry at which a warning is sent.
 const WARN_BEFORE_EXPIRY: Duration = Duration::from_secs(300);
 
+/// Maximum time to wait for running tasks to complete their cancellation
+/// cleanup (state persistence, session disconnect) during server shutdown.
+const TASK_CANCEL_TIMEOUT: Duration = Duration::from_secs(10);
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     // Initialize tracing with env filter
@@ -167,6 +171,17 @@ async fn main() -> anyhow::Result<()> {
         )
         .await
         .context("Socket Mode event loop failed")?;
+
+    // Cancel running init/run tasks and give them time to clean up
+    let cancelled = app_state.running_tasks().cancel_all();
+    if cancelled > 0 {
+        info!(
+            cancelled,
+            timeout_secs = TASK_CANCEL_TIMEOUT.as_secs(),
+            "Waiting for running tasks to complete cleanup"
+        );
+        tokio::time::sleep(TASK_CANCEL_TIMEOUT).await;
+    }
 
     // Clean up active plan sessions before exiting
     let session_count = app_state.sessions().len();

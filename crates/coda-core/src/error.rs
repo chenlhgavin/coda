@@ -52,6 +52,15 @@ pub enum CoreError {
         limit: f64,
     },
 
+    /// The operation was cancelled by the caller.
+    ///
+    /// Emitted when a [`CancellationToken`](tokio_util::sync::CancellationToken)
+    /// is triggered, typically by the user pressing Ctrl+C or an abort signal
+    /// from the server. The current operation is cleanly abandoned; callers
+    /// should persist any in-progress state before propagating this error.
+    #[error("Operation cancelled")]
+    Cancelled,
+
     /// An error from the prompt template manager.
     #[error("Prompt error: {0}")]
     PromptError(#[from] coda_pm::PromptError),

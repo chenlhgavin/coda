@@ -1,30 +1,31 @@
 //! Planning session for interactive feature planning.
 //!
-//! Provides `PlanSession` which wraps a `ClaudeClient` with the Planner
-//! profile for multi-turn feature planning conversations, and `PlanOutput`
-//! describing the artifacts produced by a successful planning session.
+//! Provides `PlanSession` which wraps an [`AgentSession`](crate::session::AgentSession)
+//! with the Planner profile for multi-turn feature planning conversations,
+//! and `PlanOutput` describing the artifacts produced by a successful
+//! planning session.
+//!
+//! The agent interaction logic (streaming, timeout, reconnect) is delegated
+//! to [`AgentSession`](crate::session::AgentSession), eliminating the
+//! previously duplicated streaming pattern.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
 
-use claude_agent_sdk_rs::{ClaudeClient, ContentBlock, Message};
+use claude_agent_sdk_rs::ClaudeClient;
 use coda_pm::PromptManager;
-use futures::StreamExt;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, info, warn};
 
 use crate::CoreError;
+use crate::async_ops::{AsyncGitOps, commit_coda_artifacts_async};
 use crate::config::CodaConfig;
-use crate::engine::commit_coda_artifacts;
 use crate::git::GitOps;
 use crate::profile::AgentProfile;
+use crate::session::{AgentSession, SessionConfig, SessionEvent};
 use crate::state::{
     FeatureInfo, FeatureState, FeatureStatus, GitInfo, PhaseKind, PhaseRecord, PhaseStatus,
     TokenCost, TotalStats,
 };
-
-/// Maximum characters for tool input summaries in streaming events.
-const TOOL_SUMMARY_MAX_LEN: usize = 60;
 
 /// Incremental update from a streaming plan conversation.
 ///
@@ -62,7 +63,7 @@ pub struct PlanOutput {
 /// Fixed quality-assurance phase names appended after dynamic dev phases.
 const QUALITY_PHASES: &[&str] = &["review", "verify", "update-docs"];
 
-/// An interactive planning session wrapping a `ClaudeClient` with the
+/// An interactive planning session wrapping an [`AgentSession`] with the
 /// Planner profile for multi-turn feature planning conversations.
 ///
 /// # Usage
@@ -72,18 +73,17 @@ const QUALITY_PHASES: &[&str] = &["review", "verify", "update-docs"];
 /// 3. Call [`approve`](Self::approve) to formalize the approved design
 /// 4. Call [`finalize`](Self::finalize) to write specs and create a worktree
 pub struct PlanSession {
-    client: ClaudeClient,
+    session: AgentSession,
     feature_slug: String,
     project_root: PathBuf,
     pm: PromptManager,
     config: CodaConfig,
-    connected: bool,
     /// The formalized design spec produced by [`approve`](Self::approve).
     approved_design: Option<String>,
     /// The verification plan produced by [`approve`](Self::approve).
     approved_verification: Option<String>,
-    /// Git operations implementation.
-    git: Arc<dyn GitOps>,
+    /// Git operations implementation (async wrapper for blocking safety).
+    git: AsyncGitOps,
     /// Accumulated API cost in USD across all planning turns.
     planning_cost_usd: f64,
     /// Accumulated conversation turns across the entire planning session.
@@ -93,7 +93,7 @@ pub struct PlanSession {
 impl PlanSession {
     /// Creates a new planning session for the given feature.
     ///
-    /// Initializes a `ClaudeClient` with the Planner profile and renders
+    /// Initializes an [`AgentSession`] with the Planner profile and renders
     /// the planning system prompt with repository context.
     ///
     /// # Errors
@@ -119,7 +119,7 @@ impl PlanSession {
 
         let system_prompt = pm.render("plan/system", minijinja::context!(coda_md => coda_md))?;
 
-        let options = AgentProfile::Planner.to_options(
+        let mut options = AgentProfile::Planner.to_options(
             &system_prompt,
             project_root.clone(),
             config.agent.max_turns,
@@ -127,47 +127,50 @@ impl PlanSession {
             &config.agent.model,
         );
 
+        // Enable partial messages so the SDK emits token-level text deltas,
+        // allowing the TUI to display live streaming during planning.
+        options.include_partial_messages = true;
+
         let client = ClaudeClient::new(options);
+        let session_config = SessionConfig {
+            idle_timeout_secs: config.agent.idle_timeout_secs,
+            tool_execution_timeout_secs: config.agent.tool_execution_timeout_secs,
+            idle_retries: config.agent.idle_retries,
+            max_budget_usd: config.agent.max_budget_usd,
+        };
+        let session = AgentSession::new(client, session_config);
 
         Ok(Self {
-            client,
+            session,
             feature_slug,
             project_root,
             pm: pm.clone(),
             config: config.clone(),
-            connected: false,
             approved_design: None,
             approved_verification: None,
-            git,
+            git: AsyncGitOps::new(git),
             planning_cost_usd: 0.0,
             planning_turns: 0,
         })
     }
 
-    /// Connects the underlying `ClaudeClient` to the Claude process.
+    /// Connects the underlying agent session to the Claude process.
     ///
     /// # Errors
     ///
     /// Returns `CoreError::AgentError` if the connection fails.
     pub async fn connect(&mut self) -> Result<(), CoreError> {
-        self.client
-            .connect()
-            .await
-            .map_err(|e| CoreError::AgentError(e.to_string()))?;
-        self.connected = true;
+        self.session.connect().await?;
         debug!("PlanSession connected to Claude");
         Ok(())
     }
 
-    /// Disconnects the underlying `ClaudeClient`.
+    /// Disconnects the underlying agent session.
     ///
     /// Safe to call multiple times or when not connected.
     pub async fn disconnect(&mut self) {
-        if self.connected {
-            let _ = self.client.disconnect().await;
-            self.connected = false;
-            debug!("PlanSession disconnected from Claude");
-        }
+        self.session.disconnect().await;
+        debug!("PlanSession disconnected from Claude");
     }
 
     /// Sends a user message and collects the agent's response.
@@ -206,160 +209,75 @@ impl PlanSession {
     /// Shared implementation for [`send`](Self::send) and
     /// [`send_streaming`](Self::send_streaming).
     ///
-    /// When `update_tx` is `Some`, accumulated response text and tool
-    /// activity events are sent as they arrive. Each stream iteration is
-    /// wrapped in a timeout (from `agent.idle_timeout_secs`) with retry
-    /// logic (from `agent.idle_retries`) to prevent indefinite hangs when
-    /// the Claude subprocess or API becomes unresponsive.
+    /// Delegates to [`AgentSession::send`] for the actual streaming,
+    /// timeout, and reconnection logic. When `update_tx` is `Some`,
+    /// bridges [`SessionEvent`] to [`PlanStreamUpdate`] events.
     ///
-    /// On idle timeout, performs a full subprocess reconnection: disconnects
-    /// the stalled subprocess, spawns a fresh one, and re-sends the message.
-    /// Partial response data from the stalled session is discarded.
+    /// On [`SessionEvent::Reconnecting`], the accumulated text buffer is
+    /// cleared and an empty [`PlanStreamUpdate::Text`] is emitted so that
+    /// the UI discards stale partial text from the timed-out attempt.
     async fn send_inner(
         &mut self,
         message: &str,
         update_tx: Option<tokio::sync::mpsc::UnboundedSender<PlanStreamUpdate>>,
     ) -> Result<String, CoreError> {
-        if !self.connected {
-            self.connect().await?;
-        }
-
-        self.client
-            .query(message)
-            .await
-            .map_err(|e| CoreError::AgentError(e.to_string()))?;
-
-        let idle_timeout = Duration::from_secs(self.config.agent.idle_timeout_secs);
-        let max_idle_retries = self.config.agent.idle_retries;
-        let mut consecutive_timeouts: u32 = 0;
-
-        let mut response = String::new();
-
-        'outer: loop {
-            let mut stream = self.client.receive_response();
-            loop {
-                let result = match tokio::time::timeout(idle_timeout, stream.next()).await {
-                    Ok(Some(result)) => {
-                        consecutive_timeouts = 0;
-                        result
-                    }
-                    Ok(None) => break 'outer,
-                    Err(_) => {
-                        consecutive_timeouts += 1;
-                        if consecutive_timeouts <= max_idle_retries {
-                            warn!(
-                                idle_secs = self.config.agent.idle_timeout_secs,
-                                attempt = consecutive_timeouts,
-                                max_retries = max_idle_retries,
-                                "Plan agent idle timeout — reconnecting subprocess",
-                            );
-
-                            // Drop stream before reconnecting (releases borrow on self.client)
-                            drop(stream);
-
-                            self.plan_reconnect_and_resend(message, consecutive_timeouts)
-                                .await?;
-
-                            // Reset accumulator — partial data from stalled session is unreliable
-                            response.clear();
-                            if let Some(ref tx) = update_tx {
-                                let _ = tx.send(PlanStreamUpdate::Text(String::new()));
-                            }
-
-                            continue 'outer;
+        // Set up event bridging if streaming is requested
+        if let Some(ref plan_tx) = update_tx {
+            let (session_tx, mut session_rx) =
+                tokio::sync::mpsc::unbounded_channel::<SessionEvent>();
+            let plan_tx_clone = plan_tx.clone();
+            // Accumulated text for PlanStreamUpdate::Text (sends the full
+            // accumulated text on each delta, matching the original behavior).
+            // On reconnect, the buffer is cleared so stale partial text from
+            // the timed-out attempt is discarded.
+            tokio::spawn(async move {
+                let mut accumulated = String::new();
+                while let Some(event) = session_rx.recv().await {
+                    match event {
+                        SessionEvent::TextDelta { text } => {
+                            accumulated.push_str(&text);
+                            let _ = plan_tx_clone.send(PlanStreamUpdate::Text(accumulated.clone()));
                         }
-                        let total_secs =
-                            self.config.agent.idle_timeout_secs * u64::from(max_idle_retries + 1);
-                        error!(
-                            total_idle_secs = total_secs,
-                            "Plan agent idle timeout — all retries exhausted",
-                        );
-                        return Err(CoreError::IdleTimeout {
-                            total_idle_secs: total_secs,
-                            retries_exhausted: max_idle_retries,
-                        });
-                    }
-                };
-                let msg = result.map_err(|e| CoreError::AgentError(e.to_string()))?;
-                match msg {
-                    Message::Assistant(assistant) => {
-                        for block in &assistant.message.content {
-                            match block {
-                                ContentBlock::Text(text) => {
-                                    response.push_str(&text.text);
-                                    if let Some(ref tx) = update_tx {
-                                        let _ = tx.send(PlanStreamUpdate::Text(response.clone()));
-                                    }
-                                }
-                                ContentBlock::ToolUse(tu) => {
-                                    if let Some(ref tx) = update_tx {
-                                        let _ = tx.send(PlanStreamUpdate::ToolActivity {
-                                            tool_name: tu.name.clone(),
-                                            summary: summarize_plan_tool(&tu.name, &tu.input),
-                                        });
-                                    }
-                                }
-                                _ => {}
-                            }
+                        SessionEvent::ToolActivity { tool_name, summary } => {
+                            let _ = plan_tx_clone
+                                .send(PlanStreamUpdate::ToolActivity { tool_name, summary });
                         }
-                    }
-                    Message::Result(result_msg) => {
-                        if let Some(cost) = result_msg.total_cost_usd {
-                            self.planning_cost_usd += cost;
+                        SessionEvent::Reconnecting { .. } => {
+                            // Agent subprocess is being replaced after idle timeout.
+                            // Clear accumulated text and notify the UI to reset its
+                            // display buffer — the new subprocess will re-stream
+                            // from scratch.
+                            accumulated.clear();
+                            let _ = plan_tx_clone.send(PlanStreamUpdate::Text(String::new()));
                         }
-                        self.planning_turns += result_msg.num_turns;
-                        break 'outer;
+                        _ => {}
                     }
-                    _ => {}
                 }
-            }
+            });
+            self.session.set_event_sender(session_tx);
         }
 
-        Ok(response)
-    }
+        let result = self.session.send(message, None).await;
 
-    /// Reconnects the subprocess and re-sends the message after an idle timeout.
-    ///
-    /// Disconnects the stalled subprocess, waits with exponential backoff,
-    /// reconnects, and re-sends the message.
-    ///
-    /// # Errors
-    ///
-    /// Returns `CoreError::AgentError` if disconnect, connect, or query fails.
-    async fn plan_reconnect_and_resend(
-        &mut self,
-        message: &str,
-        attempt: u32,
-    ) -> Result<(), CoreError> {
-        // Disconnect old subprocess
-        let _ = self.client.disconnect().await;
-        self.connected = false;
+        // Clear the per-call event sender so the spawned forwarder task
+        // observes channel closure and terminates. This must run on both
+        // success and error paths to prevent the forwarder (which holds
+        // a clone of plan_tx) from keeping the receiver alive indefinitely.
+        if update_tx.is_some() {
+            self.session.clear_event_sender();
+        }
 
-        // Exponential backoff: 5s, 15s, 45s, ...
-        let backoff_secs = 5u64 * 3u64.saturating_pow(attempt.saturating_sub(1));
-        info!(
-            backoff_secs,
-            attempt, "Plan session: waiting before reconnecting subprocess",
-        );
-        tokio::time::sleep(Duration::from_secs(backoff_secs)).await;
+        let resp = result?;
 
-        // Reconnect
-        self.client
-            .connect()
-            .await
-            .map_err(|e| CoreError::AgentError(format!("Plan reconnect failed: {e}")))?;
-        self.connected = true;
+        // Extract cost and turns from the response
+        if let Some(ref result) = resp.result {
+            if let Some(cost) = result.total_cost_usd {
+                self.planning_cost_usd += cost;
+            }
+            self.planning_turns += result.num_turns;
+        }
 
-        // Re-send message
-        self.client.query(message).await.map_err(|e| {
-            CoreError::AgentError(format!("Plan re-query after reconnect failed: {e}"))
-        })?;
-
-        info!(
-            attempt,
-            "Plan session: subprocess reconnected and message re-sent"
-        );
-        Ok(())
+        Ok(resp.text)
     }
 
     /// Formalizes the approved design and generates a verification plan.
@@ -429,6 +347,9 @@ impl PlanSession {
     /// All feature artifacts are written under `<worktree>/.coda/<slug>/`
     /// so they travel with the feature branch and merge cleanly into main.
     ///
+    /// Git operations are run via `spawn_blocking` to avoid blocking
+    /// the async runtime.
+    ///
     /// # Errors
     ///
     /// Returns `CoreError` if git operations, directory creation, or
@@ -451,7 +372,7 @@ impl PlanSession {
 
         // 1. Create git worktree
         let base_branch = if self.config.git.base_branch == "auto" {
-            self.git.detect_default_branch()
+            self.git.detect_default_branch().await
         } else {
             self.config.git.base_branch.clone()
         };
@@ -462,23 +383,26 @@ impl PlanSession {
         if !self
             .git
             .file_exists_in_ref(&base_branch, ".coda/config.yml")
+            .await
         {
             warn!(
                 base = %base_branch,
                 "CODA init files not committed, auto-committing before worktree creation"
             );
             let paths: &[&str] = &[".coda/", ".coda.md", "CLAUDE.md", ".gitignore"];
-            commit_coda_artifacts(
-                self.git.as_ref(),
+            commit_coda_artifacts_async(
+                &self.git,
                 &self.project_root,
                 paths,
                 "chore: initialize CODA project",
-            )?;
+            )
+            .await?;
 
             // Re-check: if still missing, the files don't exist at all
             if !self
                 .git
                 .file_exists_in_ref(&base_branch, ".coda/config.yml")
+                .await
             {
                 return Err(CoreError::PlanError(format!(
                     "CODA init files not found on '{base_branch}' even after auto-commit.\n  \
@@ -494,7 +418,8 @@ impl PlanSession {
                 .map_err(CoreError::IoError)?;
         }
         self.git
-            .worktree_add(&worktree_abs, &branch_name, &base_branch)?;
+            .worktree_add(&worktree_abs, &branch_name, &base_branch)
+            .await?;
         info!(
             branch = %branch_name,
             worktree = %worktree_abs.display(),
@@ -539,12 +464,13 @@ impl PlanSession {
         debug!(path = %state_path.display(), "Wrote state.yml");
 
         // 4. Initial commit so planning artifacts are version-controlled
-        commit_coda_artifacts(
-            self.git.as_ref(),
+        commit_coda_artifacts_async(
+            &self.git,
             &worktree_abs,
             &[".coda/"],
             &format!("feat({slug}): initialize planning artifacts"),
-        )?;
+        )
+        .await?;
 
         // 5. Clear approved state only after everything succeeded
         self.approved_design = None;
@@ -579,30 +505,8 @@ impl std::fmt::Debug for PlanSession {
         f.debug_struct("PlanSession")
             .field("feature_slug", &self.feature_slug)
             .field("project_root", &self.project_root)
-            .field("connected", &self.connected)
+            .field("connected", &self.session.is_connected())
             .finish_non_exhaustive()
-    }
-}
-
-/// Extracts a brief summary from a tool invocation for UI display.
-///
-/// Returns a human-readable string like the file path for Read/Write/Edit,
-/// the command for Bash, or the pattern for Grep/Glob. Truncates long
-/// values to [`TOOL_SUMMARY_MAX_LEN`] characters with an ellipsis.
-fn summarize_plan_tool(tool_name: &str, input: &serde_json::Value) -> String {
-    let detail = match tool_name {
-        "Bash" => input.get("command").and_then(|v| v.as_str()),
-        "Write" | "Read" | "Edit" => input.get("file_path").and_then(|v| v.as_str()),
-        "Grep" | "Glob" => input.get("pattern").and_then(|v| v.as_str()),
-        _ => None,
-    };
-    match detail {
-        Some(d) if d.chars().count() > TOOL_SUMMARY_MAX_LEN => {
-            let truncated: String = d.chars().take(TOOL_SUMMARY_MAX_LEN - 1).collect();
-            format!("{truncated}\u{2026}")
-        }
-        Some(d) => d.to_string(),
-        None => String::new(),
     }
 }
 
@@ -945,5 +849,93 @@ mod tests {
         );
         assert_eq!(strip_parenthetical("No parens"), "No parens");
         assert_eq!(strip_parenthetical("(all parens)"), "(all parens)");
+    }
+
+    /// Verifies that the event forwarding logic in `send_inner` clears
+    /// the accumulated text buffer when a `Reconnecting` event arrives.
+    ///
+    /// This test simulates the forwarder task directly (without a real
+    /// `AgentSession`) by sending events through the same channel pattern
+    /// used in `send_inner`.
+    #[tokio::test]
+    async fn test_should_clear_accumulated_text_on_reconnect() {
+        let (session_tx, mut session_rx) = tokio::sync::mpsc::unbounded_channel::<SessionEvent>();
+        let (plan_tx, mut plan_rx) = tokio::sync::mpsc::unbounded_channel::<PlanStreamUpdate>();
+
+        // Spawn a forwarder task identical to the one in send_inner
+        tokio::spawn(async move {
+            let mut accumulated = String::new();
+            while let Some(event) = session_rx.recv().await {
+                match event {
+                    SessionEvent::TextDelta { text } => {
+                        accumulated.push_str(&text);
+                        let _ = plan_tx.send(PlanStreamUpdate::Text(accumulated.clone()));
+                    }
+                    SessionEvent::ToolActivity { tool_name, summary } => {
+                        let _ = plan_tx.send(PlanStreamUpdate::ToolActivity { tool_name, summary });
+                    }
+                    SessionEvent::Reconnecting { .. } => {
+                        accumulated.clear();
+                        let _ = plan_tx.send(PlanStreamUpdate::Text(String::new()));
+                    }
+                    _ => {}
+                }
+            }
+        });
+
+        // Phase 1: Send text deltas (simulating pre-timeout output)
+        session_tx
+            .send(SessionEvent::TextDelta {
+                text: "Hello ".to_string(),
+            })
+            .unwrap();
+        session_tx
+            .send(SessionEvent::TextDelta {
+                text: "world".to_string(),
+            })
+            .unwrap();
+
+        // Drain accumulated updates
+        let update1 = plan_rx.recv().await.unwrap();
+        let update2 = plan_rx.recv().await.unwrap();
+        assert!(matches!(update1, PlanStreamUpdate::Text(ref t) if t == "Hello "));
+        assert!(matches!(update2, PlanStreamUpdate::Text(ref t) if t == "Hello world"));
+
+        // Phase 2: Reconnect event (simulating idle timeout recovery)
+        session_tx
+            .send(SessionEvent::Reconnecting {
+                attempt: 1,
+                max_retries: 3,
+            })
+            .unwrap();
+
+        let reconnect_update = plan_rx.recv().await.unwrap();
+        assert!(
+            matches!(reconnect_update, PlanStreamUpdate::Text(ref t) if t.is_empty()),
+            "Reconnect should emit empty text to clear UI buffer"
+        );
+
+        // Phase 3: New text from fresh subprocess
+        session_tx
+            .send(SessionEvent::TextDelta {
+                text: "Fresh ".to_string(),
+            })
+            .unwrap();
+        session_tx
+            .send(SessionEvent::TextDelta {
+                text: "response".to_string(),
+            })
+            .unwrap();
+
+        let update3 = plan_rx.recv().await.unwrap();
+        let update4 = plan_rx.recv().await.unwrap();
+        assert!(
+            matches!(update3, PlanStreamUpdate::Text(ref t) if t == "Fresh "),
+            "After reconnect, accumulated text should start fresh"
+        );
+        assert!(
+            matches!(update4, PlanStreamUpdate::Text(ref t) if t == "Fresh response"),
+            "After reconnect, accumulated text should not contain pre-reconnect data"
+        );
     }
 }

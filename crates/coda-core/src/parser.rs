@@ -43,10 +43,18 @@ pub fn extract_yaml_block(text: &str) -> Option<String> {
     None
 }
 
+/// Returns `true` if the given severity string represents an actionable
+/// review issue (critical or major), using case-insensitive comparison.
+fn is_actionable_severity(severity: &str) -> bool {
+    let lower = severity.to_lowercase();
+    lower == "critical" || lower == "major"
+}
+
 /// Parses review issues from the agent's YAML response.
 ///
 /// Returns a list of issue descriptions for critical/major issues only.
-/// Minor and informational severity issues are filtered out.
+/// Minor and informational severity issues are filtered out. Severity
+/// matching is case-insensitive (e.g., `Critical`, `MAJOR` are accepted).
 ///
 /// # Examples
 ///
@@ -68,7 +76,7 @@ pub fn parse_review_issues(response: &str) -> Vec<String> {
             .iter()
             .filter_map(|issue| {
                 let severity = issue.get("severity")?.as_str()?;
-                if severity == "critical" || severity == "major" {
+                if is_actionable_severity(severity) {
                     let desc = issue
                         .get("description")
                         .and_then(|d| d.as_str())
@@ -215,6 +223,80 @@ pub fn extract_pr_number(url: &str) -> Option<u32> {
     url.rsplit('/').next()?.parse().ok()
 }
 
+/// Extracts a PR title from `gh pr create` output or agent text.
+///
+/// Scans each line for patterns commonly produced by the `gh` CLI or
+/// the agent when reporting a newly created PR. Recognizes:
+///
+/// - `gh pr create` output: `https://github.com/.../pull/42` preceded by
+///   a `--title "..."` flag in the command
+/// - Agent summary: lines like `**Title:** <title>` or `Title: <title>`
+///
+/// Returns `None` if no title can be extracted from the text. Callers
+/// should fall back to querying `gh pr view --json title`.
+///
+/// # Examples
+///
+/// ```
+/// use coda_core::parser::extract_pr_title;
+///
+/// let text = "I've created the PR:\n\n**Title:** feat: add user auth\n\nURL: https://github.com/org/repo/pull/42";
+/// assert_eq!(extract_pr_title(text), Some("feat: add user auth".to_string()));
+/// ```
+pub fn extract_pr_title(text: &str) -> Option<String> {
+    for line in text.lines() {
+        let trimmed = line.trim();
+
+        // Pattern: **Title:** <title> or *Title:* <title>
+        if let Some(rest) = trimmed
+            .strip_prefix("**Title:**")
+            .or_else(|| trimmed.strip_prefix("*Title:*"))
+        {
+            let title = rest.trim();
+            if !title.is_empty() {
+                return Some(title.to_string());
+            }
+        }
+
+        // Pattern: Title: <title> (case-insensitive prefix)
+        // Use `get()` for UTF-8-safe slicing instead of direct byte indexing,
+        // which would panic if a multi-byte character spans the boundary.
+        if let Some(prefix) = trimmed.get(..7)
+            && prefix.eq_ignore_ascii_case("title: ")
+        {
+            // Safe: `get(..7)` succeeded, so byte offset 7 is a valid char boundary.
+            let title = trimmed[7..].trim();
+            if !title.is_empty() {
+                return Some(title.to_string());
+            }
+        }
+
+        // Pattern: --title "..." or --title '...' in a gh command
+        if let Some(idx) = trimmed.find("--title") {
+            let after_flag = &trimmed[idx + "--title".len()..].trim_start();
+            if let Some(title) = extract_quoted_string(after_flag)
+                && !title.is_empty()
+            {
+                return Some(title);
+            }
+        }
+    }
+
+    None
+}
+
+/// Extracts a quoted string from the start of `s`, handling both single
+/// and double quotes. Returns the content between the matching quotes.
+fn extract_quoted_string(s: &str) -> Option<String> {
+    let quote = s.chars().next()?;
+    if quote != '"' && quote != '\'' {
+        return None;
+    }
+    let inner = &s[1..];
+    let end = inner.find(quote)?;
+    Some(inner[..end].to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -343,6 +425,35 @@ issues:
         assert!(issues.is_empty());
     }
 
+    #[test]
+    fn test_should_parse_review_issues_case_insensitive_severity() {
+        let response = r#"
+```yaml
+issues:
+  - severity: "Critical"
+    file: "src/main.rs"
+    line: 1
+    description: "Security vulnerability"
+    suggestion: "Fix it"
+  - severity: "MAJOR"
+    file: "src/lib.rs"
+    line: 2
+    description: "Memory leak"
+    suggestion: "Free memory"
+  - severity: "Minor"
+    file: "src/util.rs"
+    line: 3
+    description: "Style issue"
+    suggestion: "Reformat"
+```
+"#;
+
+        let issues = parse_review_issues(response);
+        assert_eq!(issues.len(), 2);
+        assert!(issues[0].contains("Security vulnerability"));
+        assert!(issues[1].contains("Memory leak"));
+    }
+
     // ── parse_verification_result ───────────────────────────────────
 
     #[test]
@@ -425,8 +536,6 @@ total_count: 2
 
     #[test]
     fn test_should_reject_git_push_create_pr_page_url() {
-        // `git push` output includes a "Create a pull request" link that
-        // points to /pull/new/<branch>, NOT an actual PR.
         let text = "remote: Create a pull request for 'feature/update-doc' on GitHub by visiting:\nremote:   https://github.com/lehuagavin/coda/pull/new/feature/update-doc";
         assert!(extract_pr_url(text).is_none());
     }
@@ -460,5 +569,88 @@ total_count: 2
             extract_pr_number("https://github.com/org/repo/pull/abc"),
             None
         );
+    }
+
+    // ── extract_pr_title ────────────────────────────────────────────
+
+    #[test]
+    fn test_should_extract_pr_title_from_bold_markdown() {
+        let text = "I've created the PR:\n\n**Title:** feat: add user auth\n\nURL: https://github.com/org/repo/pull/42";
+        assert_eq!(
+            extract_pr_title(text),
+            Some("feat: add user auth".to_string())
+        );
+    }
+
+    #[test]
+    fn test_should_extract_pr_title_from_plain_label() {
+        let text = "Title: refactor: decompose runner\nURL: ...";
+        assert_eq!(
+            extract_pr_title(text),
+            Some("refactor: decompose runner".to_string())
+        );
+    }
+
+    #[test]
+    fn test_should_extract_pr_title_from_gh_command_double_quotes() {
+        let text = r#"gh pr create --title "feat(auth): add JWT support" --body "..."
+https://github.com/org/repo/pull/55"#;
+        assert_eq!(
+            extract_pr_title(text),
+            Some("feat(auth): add JWT support".to_string())
+        );
+    }
+
+    #[test]
+    fn test_should_extract_pr_title_from_gh_command_single_quotes() {
+        let text = "gh pr create --title 'fix: resolve null pointer' --body '...'";
+        assert_eq!(
+            extract_pr_title(text),
+            Some("fix: resolve null pointer".to_string())
+        );
+    }
+
+    #[test]
+    fn test_should_return_none_when_no_pr_title_found() {
+        let text = "PR created successfully at https://github.com/org/repo/pull/42";
+        assert!(extract_pr_title(text).is_none());
+    }
+
+    #[test]
+    fn test_should_extract_pr_title_from_italic_markdown() {
+        let text = "*Title:* docs: update README\nBody: ...";
+        assert_eq!(
+            extract_pr_title(text),
+            Some("docs: update README".to_string())
+        );
+    }
+
+    #[test]
+    fn test_should_not_panic_on_non_ascii_title_prefix() {
+        // Multi-byte UTF-8 characters where byte offset 7 falls mid-character
+        let text = "\u{1F600}\u{1F600}x: rest";
+        // Should not panic and should return None (prefix doesn't match "title: ")
+        assert!(extract_pr_title(text).is_none());
+    }
+
+    #[test]
+    fn test_should_extract_title_case_insensitive() {
+        let text = "TITLE: uppercase title";
+        assert_eq!(extract_pr_title(text), Some("uppercase title".to_string()));
+    }
+
+    // ── is_actionable_severity ──────────────────────────────────────
+
+    #[test]
+    fn test_should_identify_actionable_severity_case_insensitive() {
+        assert!(is_actionable_severity("critical"));
+        assert!(is_actionable_severity("Critical"));
+        assert!(is_actionable_severity("CRITICAL"));
+        assert!(is_actionable_severity("major"));
+        assert!(is_actionable_severity("Major"));
+        assert!(is_actionable_severity("MAJOR"));
+        assert!(!is_actionable_severity("minor"));
+        assert!(!is_actionable_severity("info"));
+        assert!(!is_actionable_severity("informational"));
     }
 }

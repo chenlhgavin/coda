@@ -18,8 +18,9 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use coda_core::RunEvent;
+use coda_core::{CoreError, RunEvent};
 use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, instrument, warn};
 
 use crate::error::ServerError;
@@ -74,11 +75,15 @@ pub async fn handle_run(
     let resp = state.slack().post_message(&channel, initial_blocks).await?;
     let message_ts = resp.ts;
 
+    // Create cancellation token and store it with the task
+    let cancel_token = CancellationToken::new();
+
     // Spawn background task
     let state_clone = Arc::clone(&state);
     let channel_clone = channel.clone();
     let slug_clone = slug.clone();
     let repo_path_clone = repo_path;
+    let cancel_token_clone = cancel_token.clone();
 
     let handle = tokio::spawn(async move {
         run_feature_task(
@@ -88,11 +93,12 @@ pub async fn handle_run(
             message_ts,
             slug_clone,
             repo_path_clone,
+            cancel_token_clone,
         )
         .await;
     });
 
-    state.running_tasks().insert(task_key, handle);
+    state.running_tasks().insert(task_key, handle, cancel_token);
 
     Ok(())
 }
@@ -105,6 +111,7 @@ async fn run_feature_task(
     message_ts: String,
     slug: String,
     repo_path: std::path::PathBuf,
+    cancel_token: CancellationToken,
 ) {
     let (tx, rx) = mpsc::unbounded_channel();
     let slack = state.slack().clone();
@@ -121,7 +128,7 @@ async fn run_feature_task(
 
     debug!(slug, "Starting engine.run()");
     let start = Instant::now();
-    let result = engine.run(&slug, Some(tx)).await;
+    let result = engine.run(&slug, Some(tx), cancel_token).await;
     let duration_ms = start.elapsed().as_millis();
     debug!(
         duration_ms,
@@ -139,19 +146,34 @@ async fn run_feature_task(
         }
     };
 
-    // Build final summary and completion notification
-    let (final_blocks, success, phases, error_msg) = match result {
+    // Build final summary and notification based on outcome
+    let (final_blocks, notification_blocks) = match result {
         Ok(ref results) => {
             info!(channel, slug, "Run completed successfully");
             let phases = results_to_phases(results);
-            let blocks = formatter::run_progress(&slug, &phases);
-            (blocks, true, phases, None)
+            let progress = formatter::run_progress(&slug, &phases);
+            let notification = formatter::run_completion_notification(
+                &slug,
+                true,
+                &phases,
+                pr_url.as_deref(),
+                None,
+            );
+            (progress, notification)
+        }
+        Err(CoreError::Cancelled) => {
+            info!(channel, slug, "Run was cancelled");
+            let cancelled = formatter::run_cancelled(&slug, &[]);
+            let notification = formatter::run_cancellation_notification(&slug);
+            (cancelled, notification)
         }
         Err(ref e) => {
             warn!(channel, slug, error = %e, "Run failed");
             let err_str = e.to_string();
-            let blocks = formatter::run_failure(&slug, &[], &err_str);
-            (blocks, false, Vec::new(), Some(err_str))
+            let failure = formatter::run_failure(&slug, &[], &err_str);
+            let notification =
+                formatter::run_completion_notification(&slug, false, &[], None, Some(&err_str));
+            (failure, notification)
         }
     };
 
@@ -165,13 +187,6 @@ async fn run_feature_task(
     }
 
     // Post a new channel message as completion notification (triggers Slack notification)
-    let notification_blocks = formatter::run_completion_notification(
-        &slug,
-        success,
-        &phases,
-        pr_url.as_deref(),
-        error_msg.as_deref(),
-    );
     if let Err(e) = state
         .slack()
         .post_message(&channel, notification_blocks)
