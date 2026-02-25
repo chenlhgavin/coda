@@ -17,7 +17,7 @@ CODA turns a feature description into a reviewed, tested pull request with minim
 - **Crash recovery** — State persisted after each phase; interrupted runs resume from the last completed phase
 - **Budget tracking** — Per-phase cost tracking with budget limits, accurate across resumed sessions
 - **Graceful cancellation** — Ctrl+C saves progress and exits cleanly; resume with `coda run`
-- **Multiple review engines** — Claude self-review, Codex independent review, or hybrid mode
+- **Multiple review engines** — Claude self-review or Codex independent review
 - **Configurable verification** — Run build, format, lint, and test checks with bounded retry loops
 - **Isolated worktrees** — Each feature gets its own git worktree and branch
 - **Slack integration** — Team-based workflows via slash commands in Slack threads
@@ -285,7 +285,7 @@ git:
 review:
   enabled: true                  # Enable code review phase
   max_review_rounds: 5           # Max review iterations
-  engine: "claude"               # Review engine: claude, codex, or hybrid
+  engine: "claude"               # Review engine: claude or codex
   codex_model: "gpt-5.3-codex"   # Model for Codex reviews
   codex_reasoning_effort: "high" # Reasoning effort: low, medium, high
 

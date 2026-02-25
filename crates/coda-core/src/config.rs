@@ -119,8 +119,8 @@ pub struct GitConfig {
 
 /// Which review engine to use for code review.
 ///
-/// Controls whether reviews are performed by Claude (self-review),
-/// Codex CLI (independent review), or both (hybrid).
+/// Controls whether reviews are performed by Claude (self-review)
+/// or Codex CLI (independent review).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum ReviewEngine {
@@ -129,8 +129,6 @@ pub enum ReviewEngine {
     /// Codex CLI performs an independent read-only review (default).
     #[default]
     Codex,
-    /// Both Codex and Claude review; issues are merged and deduplicated.
-    Hybrid,
 }
 
 impl std::fmt::Display for ReviewEngine {
@@ -138,7 +136,6 @@ impl std::fmt::Display for ReviewEngine {
         match self {
             Self::Claude => write!(f, "claude"),
             Self::Codex => write!(f, "codex"),
-            Self::Hybrid => write!(f, "hybrid"),
         }
     }
 }
@@ -393,7 +390,7 @@ git:
 review:
   enabled: false
   max_review_rounds: 10
-  engine: hybrid
+  engine: codex
   codex_model: "o4-mini"
   codex_reasoning_effort: "medium"
 "#;
@@ -411,7 +408,7 @@ review:
         assert_eq!(config.git.branch_prefix, "dev");
         assert!(!config.review.enabled);
         assert_eq!(config.review.max_review_rounds, 10);
-        assert_eq!(config.review.engine, ReviewEngine::Hybrid);
+        assert_eq!(config.review.engine, ReviewEngine::Codex);
         assert_eq!(config.review.codex_model, "o4-mini");
         assert_eq!(
             config.review.codex_reasoning_effort,
@@ -467,7 +464,6 @@ review:
         for (yaml_val, expected) in [
             ("claude", ReviewEngine::Claude),
             ("codex", ReviewEngine::Codex),
-            ("hybrid", ReviewEngine::Hybrid),
         ] {
             let yaml = format!("version: 1\nreview:\n  engine: {yaml_val}\n");
             let config: CodaConfig = serde_yaml_ng::from_str(&yaml).unwrap();

@@ -1,7 +1,7 @@
 //! Review phase executor.
 //!
-//! Handles the code review phase with support for three review engines:
-//! Claude (self-review), Codex (independent review), and Hybrid (both).
+//! Handles the code review phase with two review engines:
+//! Claude (self-review) and Codex (independent review).
 //! Each engine mode follows the same pattern: review → find issues → fix → repeat.
 
 use std::time::Duration;
@@ -9,10 +9,7 @@ use std::time::Duration;
 use tracing::{info, warn};
 
 use crate::CoreError;
-use crate::codex::{
-    ReviewSource, deduplicate_issues, format_issues, is_codex_available,
-    parse_review_issues_structured, run_codex_review,
-};
+use crate::codex::{format_issues, is_codex_available, run_codex_review};
 use crate::config::ReviewEngine;
 use crate::parser::parse_review_issues;
 use crate::runner::RunEvent;
@@ -22,7 +19,7 @@ use super::{PhaseContext, PhaseExecutor, PhaseMetricsAccumulator, PhaseOutcome};
 
 /// Executes the review phase with the configured review engine.
 ///
-/// Dispatches to Claude, Codex, or Hybrid mode based on configuration.
+/// Dispatches to Claude or Codex mode based on configuration.
 /// Falls back to Claude if Codex is configured but not available.
 ///
 /// # Example
@@ -73,7 +70,6 @@ impl PhaseExecutor for ReviewPhaseExecutor {
         match effective_engine {
             ReviewEngine::Claude => run_review_claude(ctx, phase_idx).await,
             ReviewEngine::Codex => run_review_codex(ctx, phase_idx).await,
-            ReviewEngine::Hybrid => run_review_hybrid(ctx, phase_idx).await,
         }
     }
 }
@@ -83,9 +79,9 @@ impl PhaseExecutor for ReviewPhaseExecutor {
 fn resolve_review_engine(configured: &ReviewEngine) -> ReviewEngine {
     match configured {
         ReviewEngine::Claude => ReviewEngine::Claude,
-        ReviewEngine::Codex | ReviewEngine::Hybrid => {
+        ReviewEngine::Codex => {
             if is_codex_available() {
-                configured.clone()
+                ReviewEngine::Codex
             } else {
                 warn!(
                     configured = %configured,
@@ -213,110 +209,6 @@ async fn run_review_codex(
     finalize_review_phase(ctx, phase_idx, acc)
 }
 
-/// Runs hybrid review: Codex first, then Claude, merge and deduplicate.
-async fn run_review_hybrid(
-    ctx: &mut PhaseContext,
-    phase_idx: usize,
-) -> Result<TaskResult, CoreError> {
-    let design_spec = ctx.load_spec("design.md")?;
-    let max_rounds = ctx.config.review.max_review_rounds;
-    let codex_model = ctx.config.review.codex_model.clone();
-    let codex_effort = ctx.config.review.codex_reasoning_effort;
-    let spec_path = ctx.spec_relative_path("design.md");
-    let mut acc = PhaseMetricsAccumulator::new();
-
-    for round in 0..max_rounds {
-        info!(round = round + 1, max = max_rounds, "Review round (hybrid)");
-
-        let changed_files = ctx.get_changed_files().await?;
-
-        // 1. Run Codex review
-        let base_branch = ctx.state().git.base_branch.clone();
-        let codex_issues = match run_codex_review(
-            &ctx.worktree_path,
-            &base_branch,
-            &spec_path,
-            &changed_files,
-            &codex_model,
-            codex_effort,
-            ctx.progress_tx.as_ref(),
-        )
-        .await
-        {
-            Ok(issues) => {
-                ctx.emit_event(RunEvent::ReviewerCompleted {
-                    reviewer: "codex".to_string(),
-                    issues_found: issues.len() as u32,
-                });
-                issues
-            }
-            Err(e) => {
-                warn!(error = %e, "Codex review failed, continuing with Claude only");
-                ctx.emit_event(RunEvent::ReviewerCompleted {
-                    reviewer: "codex".to_string(),
-                    issues_found: 0,
-                });
-                Vec::new()
-            }
-        };
-
-        // 2. Run Claude review
-        let diff = ctx.get_diff().await?;
-        let review_prompt = ctx.pm.render(
-            "run/review",
-            minijinja::context!(
-                design_spec => design_spec,
-                diff => diff,
-            ),
-        )?;
-
-        let resp = ctx.send_and_collect(&review_prompt, None).await?;
-        let m = ctx.metrics.record(&resp.result);
-        if let Some(logger) = &mut ctx.run_logger {
-            logger.log_interaction(&review_prompt, &resp, &m);
-        }
-        acc.record(&resp, m);
-
-        let claude_issues = parse_review_issues_structured(&resp.text, ReviewSource::Claude);
-
-        ctx.emit_event(RunEvent::ReviewerCompleted {
-            reviewer: "claude".to_string(),
-            issues_found: claude_issues.len() as u32,
-        });
-
-        // 3. Merge and deduplicate
-        let mut all_issues = codex_issues;
-        all_issues.extend(claude_issues);
-        let combined = deduplicate_issues(all_issues);
-        let issue_count = combined.len() as u32;
-
-        ctx.review_summary.rounds += 1;
-        ctx.review_summary.issues_found += issue_count;
-
-        ctx.emit_event(RunEvent::ReviewRound {
-            round: round + 1,
-            max_rounds,
-            issues_found: issue_count,
-        });
-
-        if combined.is_empty() {
-            info!("No critical/major issues found, review passed");
-            break;
-        }
-
-        // 4. Ask Claude to fix combined issues
-        info!(
-            issues = issue_count,
-            "Hybrid review found issues, asking Claude to fix",
-        );
-        let formatted = format_issues(&combined);
-        ask_claude_to_fix(ctx, &formatted, issue_count, &mut acc).await?;
-        ctx.review_summary.issues_fix_attempted += issue_count;
-    }
-
-    finalize_review_phase(ctx, phase_idx, acc)
-}
-
 /// Asks Claude to fix a list of review issues.
 async fn ask_claude_to_fix(
     ctx: &mut PhaseContext,
@@ -400,15 +292,6 @@ mod tests {
         assert!(
             matches!(result, ReviewEngine::Claude | ReviewEngine::Codex),
             "Should resolve to Claude or Codex, got {result:?}"
-        );
-    }
-
-    #[test]
-    fn test_should_fallback_hybrid_to_claude_when_unavailable() {
-        let result = resolve_review_engine(&ReviewEngine::Hybrid);
-        assert!(
-            matches!(result, ReviewEngine::Claude | ReviewEngine::Hybrid),
-            "Should resolve to Claude or Hybrid, got {result:?}"
         );
     }
 }

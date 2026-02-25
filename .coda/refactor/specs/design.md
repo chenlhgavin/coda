@@ -101,7 +101,7 @@ Decompose into 7 phases following a bottom-up dependency order:
     }
     ```
   - Extract `crates/coda-core/src/phases/dev.rs` — `DevPhaseExecutor` from `Runner::run_dev_phase`, parameterized by phase index
-  - Extract `crates/coda-core/src/phases/review.rs` — `ReviewPhaseExecutor` from `Runner::run_review`, `run_review_claude`, `run_review_codex`, `run_review_hybrid`, `ask_claude_to_fix`, `finalize_review_phase`, and `resolve_review_engine`
+  - Extract `crates/coda-core/src/phases/review.rs` — `ReviewPhaseExecutor` from `Runner::run_review`, `run_review_claude`, `run_review_codex`, `ask_claude_to_fix`, `finalize_review_phase`, and `resolve_review_engine`
   - Extract `crates/coda-core/src/phases/verify.rs` — `VerifyPhaseExecutor` from `Runner::run_verify`
   - Extract `crates/coda-core/src/phases/docs.rs` — `DocsPhaseExecutor` from `Runner::run_update_docs`, `validate_doc_files`, `build_doc_fix_prompt`
   - Extract `crates/coda-core/src/phases/pr.rs` — `PrPhaseExecutor` from `Runner::create_pr`, `prepare_squash`, `extract_pr_url`, `extract_pr_number`

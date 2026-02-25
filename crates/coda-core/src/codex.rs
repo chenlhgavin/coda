@@ -1,26 +1,24 @@
 //! Codex CLI integration for independent code review.
 //!
-//! Provides a wrapper around the `codex` CLI tool to perform read-only
-//! code reviews using a different LLM (e.g., GPT-5.3 Codex). Issues from
-//! Codex reviews can be combined with Claude's reviews for a hybrid
-//! review that catches more problems.
+//! Provides a wrapper around the Codex CLI (via `code-agent-sdk`) to perform
+//! read-only code reviews using a different LLM (e.g., GPT-5.3 Codex).
 //!
 //! # Architecture
 //!
 //! - [`ReviewIssue`] is the normalized issue representation shared by both engines
-//! - [`run_codex_review`] spawns `codex exec` as a subprocess with filesystem
-//!   access (`--sandbox read-only`). Instead of inlining the full diff in the
-//!   prompt (which can overflow the context window on large changesets), the
-//!   prompt provides only metadata (base branch, spec path, changed file list)
-//!   and Codex reads files and runs `git diff` on its own.
+//! - [`run_codex_review`] uses `code_agent_sdk::query()` to drive `codex exec`
+//!   with filesystem access (`sandbox read-only`). The prompt provides only
+//!   metadata (base branch, spec path, changed file list) and Codex reads
+//!   files and runs `git diff` on its own.
 //! - [`deduplicate_issues`] merges overlapping issues from multiple reviewers
 //! - Falls back gracefully when `codex` is not installed
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
+use code_agent_sdk::{AgentOptions, BackendKind, CodexOptions, ContentBlock, Message, Prompt};
+use futures::StreamExt;
 use serde::{Deserialize, Serialize};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::mpsc::UnboundedSender;
 use tracing::{debug, info, warn};
 
@@ -69,48 +67,40 @@ pub struct ReviewIssue {
     pub source: ReviewSource,
 }
 
-/// Checks whether the `codex` CLI binary is available on PATH.
+/// Checks whether the `codex` CLI binary is available.
+///
+/// Uses the SDK's discovery logic which checks (in order):
+/// 1. `CODEX_CLI_PATH` environment variable
+/// 2. `PATH` search for `codex` binary
 ///
 /// # Examples
 ///
 /// ```
 /// use coda_core::codex::is_codex_available;
 ///
-/// // Returns true if `codex` is installed and on PATH
+/// // Returns true if `codex` is installed and discoverable
 /// let available = is_codex_available();
 /// ```
 pub fn is_codex_available() -> bool {
-    std::process::Command::new("which")
-        .arg("codex")
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .is_ok_and(|s| s.success())
+    code_agent_sdk::backend::codex::exec_transport::find_codex_cli(&AgentOptions::default()).is_ok()
 }
 
 /// Runs a Codex CLI review using filesystem access.
 ///
-/// Instead of inlining the entire diff in the prompt (which overflows
-/// the model's context window on large changesets), this function passes
-/// only lightweight metadata — the base branch, spec file path, and list
-/// of changed files. Codex operates in `--sandbox read-only` mode with
-/// `-C <worktree>`, giving it direct filesystem access to run `git diff`
-/// and read files on its own, keeping the initial prompt small.
+/// Uses `code_agent_sdk::query()` to drive `codex exec` with read-only
+/// filesystem access. Instead of inlining the entire diff in the prompt
+/// (which overflows the context window on large changesets), the prompt
+/// provides only lightweight metadata — base branch, spec file path, and
+/// list of changed files. Codex reads files and runs `git diff` on its own.
 ///
-/// Spawns `codex exec --full-auto --sandbox read-only --json` with the
-/// review prompt piped via stdin. JSONL events on stdout are parsed in
-/// real time and streamed to the TUI via `progress_tx`.
-///
-/// The `reasoning_effort` parameter controls the model's reasoning depth
-/// and is passed via `-c model_reasoning_effort=<value>`.
+/// Agent messages are streamed to the TUI in real time via `progress_tx`.
 ///
 /// # Errors
 ///
 /// Returns `CoreError::AgentError` if:
-/// - The `codex` process cannot be spawned
-/// - The prompt cannot be written to stdin
+/// - The `codex` CLI is not found
 /// - The process exits with a non-zero status
-/// - The output cannot be parsed
+/// - The SDK stream returns an error
 pub async fn run_codex_review(
     worktree: &Path,
     base_branch: &str,
@@ -130,92 +120,50 @@ pub async fn run_codex_review(
         "Starting Codex review",
     );
 
-    let effort_config = format!("model_reasoning_effort=\"{effort_str}\"");
+    let options = AgentOptions {
+        backend: Some(BackendKind::Codex),
+        model: Some(model.to_string()),
+        cwd: Some(worktree.to_path_buf()),
+        codex: Some(CodexOptions {
+            approval_policy: Some("full-auto".to_string()),
+            sandbox_mode: Some("read-only".to_string()),
+        }),
+        extra_args: HashMap::from([(
+            "c".to_string(),
+            Some(format!("model_reasoning_effort=\"{effort_str}\"")),
+        )]),
+        ..AgentOptions::default()
+    };
 
-    // Pass the prompt via stdin (with `-`) to avoid E2BIG (os error 7) when
-    // the diff + design spec exceeds the OS execve() argument-list limit.
-    // Use `--json` to suppress TTY output so codex doesn't corrupt CODA's TUI.
-    let mut child = tokio::process::Command::new("codex")
-        .args([
-            "exec",
-            "--full-auto",
-            "--sandbox",
-            "read-only",
-            "--json",
-            "--model",
-            model,
-            "-c",
-            &effort_config,
-            "-C",
-            &worktree.to_string_lossy(),
-            "-",
-        ])
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .map_err(|e| CoreError::AgentError(format!("Failed to spawn codex: {e}")))?;
-
-    if let Some(mut stdin) = child.stdin.take() {
-        stdin
-            .write_all(prompt.as_bytes())
-            .await
-            .map_err(|e| CoreError::AgentError(format!("Failed to write prompt to codex: {e}")))?;
-        // Drop stdin to signal EOF so codex starts processing.
-    }
-
-    // Stream stdout line-by-line, extracting agent messages and errors in real time.
-    let stdout_pipe = child
-        .stdout
-        .take()
-        .ok_or_else(|| CoreError::AgentError("Failed to capture codex stdout".to_string()))?;
-    let mut lines = BufReader::new(stdout_pipe).lines();
+    let mut stream = std::pin::pin!(code_agent_sdk::query(Prompt::Text(prompt), Some(options)));
     let mut agent_texts: Vec<String> = Vec::new();
-    let mut error_messages: Vec<String> = Vec::new();
 
-    while let Some(line) = lines
-        .next_line()
-        .await
-        .map_err(|e| CoreError::AgentError(format!("Failed to read codex output: {e}")))?
-    {
-        if let Some(text) = extract_agent_text_from_jsonl_event(&line) {
-            if let Some(tx) = progress_tx {
-                let _ = tx.send(RunEvent::AgentTextDelta { text: text.clone() });
+    while let Some(result) = stream.next().await {
+        match result {
+            Ok(Message::Assistant(msg)) => {
+                for text in extract_text_blocks(&msg.content) {
+                    if let Some(tx) = progress_tx {
+                        let _ = tx.send(RunEvent::AgentTextDelta { text: text.clone() });
+                    }
+                    agent_texts.push(text);
+                }
             }
-            agent_texts.push(text);
+            Err(code_agent_sdk::Error::Process { exit_code, stderr }) => {
+                let error_detail = stderr.unwrap_or_default();
+                warn!(
+                    exit_code = exit_code,
+                    stderr = %error_detail,
+                    "Codex review failed",
+                );
+                return Err(CoreError::AgentError(format!(
+                    "Codex exited with code {exit_code}: {error_detail}",
+                )));
+            }
+            Err(e) => {
+                return Err(CoreError::AgentError(format!("Codex review error: {e}")));
+            }
+            Ok(_) => {}
         }
-        if let Some(err) = extract_error_from_jsonl_event(&line) {
-            error_messages.push(err);
-        }
-    }
-
-    let status = child
-        .wait()
-        .await
-        .map_err(|e| CoreError::AgentError(format!("Failed to wait for codex: {e}")))?;
-
-    if !status.success() {
-        let mut stderr_buf = String::new();
-        if let Some(mut stderr) = child.stderr.take() {
-            use tokio::io::AsyncReadExt;
-            let _ = stderr.read_to_string(&mut stderr_buf).await;
-        }
-        // Codex reports errors via JSONL stdout events, not stderr.
-        // Combine both sources for a complete error message.
-        let error_detail = if !error_messages.is_empty() {
-            error_messages.join("; ")
-        } else {
-            stderr_buf.clone()
-        };
-        warn!(
-            status = ?status,
-            stderr = %stderr_buf,
-            jsonl_errors = %error_messages.join("; "),
-            "Codex review failed",
-        );
-        return Err(CoreError::AgentError(format!(
-            "Codex exited with {status}: {error_detail}",
-        )));
     }
 
     let agent_text = agent_texts.join("\n");
@@ -225,6 +173,24 @@ pub async fn run_codex_review(
 
     info!(issues = issues.len(), "Codex review found issues");
     Ok(issues)
+}
+
+/// Extracts text strings from SDK content blocks, skipping tool use/result/thinking blocks.
+fn extract_text_blocks(content: &[ContentBlock]) -> Vec<String> {
+    content
+        .iter()
+        .filter_map(|block| {
+            if let ContentBlock::Text(tb) = block {
+                if tb.text.is_empty() {
+                    None
+                } else {
+                    Some(tb.text.clone())
+                }
+            } else {
+                None
+            }
+        })
+        .collect()
 }
 
 /// Parses review issues from a YAML response into structured [`ReviewIssue`]s.
@@ -433,83 +399,6 @@ fn jaccard_similarity(a: &str, b: &str) -> f64 {
     }
 
     intersection as f64 / union as f64
-}
-
-/// Extracts agent message text from a single JSONL event line.
-///
-/// Returns `Some(text)` if the line is an `item.completed` event with
-/// `item.type == "agent_message"`, otherwise `None`.
-fn extract_agent_text_from_jsonl_event(line: &str) -> Option<String> {
-    let line = line.trim();
-    if line.is_empty() {
-        return None;
-    }
-    let event: serde_json::Value = serde_json::from_str(line).ok()?;
-    if event.get("type")?.as_str()? != "item.completed" {
-        return None;
-    }
-    let item = event.get("item")?;
-    if item.get("type")?.as_str()? != "agent_message" {
-        return None;
-    }
-    item.get("text")?.as_str().map(String::from)
-}
-
-/// Extracts error messages from JSONL event lines emitted by Codex.
-///
-/// Codex reports errors via two patterns on stdout:
-/// - Top-level error events: `{"type":"error","message":"..."}`
-/// - Item-level errors: `{"type":"item.completed","item":{"type":"error","message":"..."}}`
-/// - Turn failures: `{"type":"turn.failed","error":{"message":"..."}}`
-fn extract_error_from_jsonl_event(line: &str) -> Option<String> {
-    let line = line.trim();
-    if line.is_empty() {
-        return None;
-    }
-    let event: serde_json::Value = serde_json::from_str(line).ok()?;
-    let event_type = event.get("type")?.as_str()?;
-
-    match event_type {
-        "error" => event.get("message")?.as_str().map(String::from),
-        "turn.failed" => event
-            .get("error")
-            .and_then(|e| e.get("message"))
-            .and_then(|m| m.as_str())
-            .map(String::from),
-        "item.completed" => {
-            let item = event.get("item")?;
-            if item.get("type")?.as_str()? == "error" {
-                item.get("message")?.as_str().map(String::from)
-            } else {
-                None
-            }
-        }
-        _ => None,
-    }
-}
-
-/// Extracts agent message text from `codex exec --json` JSONL output.
-///
-/// Scans for `item.completed` events where `item.type` is `"agent_message"`
-/// and concatenates their `item.text` fields.
-///
-/// # Examples
-///
-/// ```
-/// use coda_core::codex::extract_agent_message_from_jsonl;
-///
-/// let jsonl = r#"{"type":"thread.started","thread_id":"abc"}
-/// {"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"hello"}}
-/// {"type":"turn.completed","usage":{"input_tokens":10,"output_tokens":5}}"#;
-///
-/// assert_eq!(extract_agent_message_from_jsonl(jsonl), "hello");
-/// ```
-pub fn extract_agent_message_from_jsonl(jsonl: &str) -> String {
-    jsonl
-        .lines()
-        .filter_map(extract_agent_text_from_jsonl_event)
-        .collect::<Vec<_>>()
-        .join("\n")
 }
 
 /// Builds the review prompt for the Codex CLI.
@@ -735,39 +624,47 @@ issues:
     }
 
     #[test]
-    fn test_should_extract_agent_message_from_jsonl() {
-        let jsonl = r#"{"type":"thread.started","thread_id":"019c7fd5"}
-{"type":"turn.started"}
-{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"```yaml\nissues:\n  - severity: critical\n    file: src/main.rs\n    description: unwrap used\n    suggestion: use ?\n```"}}
-{"type":"turn.completed","usage":{"input_tokens":100,"output_tokens":50}}"#;
-
-        let text = extract_agent_message_from_jsonl(jsonl);
-        assert!(text.contains("issues:"));
-        assert!(text.contains("critical"));
+    fn test_should_extract_text_from_sdk_assistant_message() {
+        let content = vec![ContentBlock::Text(code_agent_sdk::TextBlock {
+            text: "Review output here".to_string(),
+        })];
+        let texts = extract_text_blocks(&content);
+        assert_eq!(texts, vec!["Review output here"]);
     }
 
     #[test]
-    fn test_should_return_empty_for_no_agent_message() {
-        let jsonl = r#"{"type":"thread.started","thread_id":"abc"}
-{"type":"turn.completed","usage":{"input_tokens":10,"output_tokens":5}}"#;
-
-        assert!(extract_agent_message_from_jsonl(jsonl).is_empty());
+    fn test_should_skip_non_text_content_blocks() {
+        let content = vec![
+            ContentBlock::ToolUse(code_agent_sdk::ToolUseBlock {
+                id: "id".to_string(),
+                name: "Bash".to_string(),
+                input: serde_json::json!({}),
+            }),
+            ContentBlock::Text(code_agent_sdk::TextBlock {
+                text: "kept".to_string(),
+            }),
+            ContentBlock::ToolResult(code_agent_sdk::ToolResultBlock {
+                tool_use_id: "id".to_string(),
+                content: None,
+                is_error: None,
+            }),
+        ];
+        let texts = extract_text_blocks(&content);
+        assert_eq!(texts, vec!["kept"]);
     }
 
     #[test]
-    fn test_should_concatenate_multiple_agent_messages() {
-        let jsonl = r#"{"type":"item.completed","item":{"id":"0","type":"agent_message","text":"first"}}
-{"type":"item.completed","item":{"id":"1","type":"agent_message","text":"second"}}"#;
-
-        assert_eq!(extract_agent_message_from_jsonl(jsonl), "first\nsecond");
-    }
-
-    #[test]
-    fn test_should_skip_non_agent_message_items() {
-        let jsonl = r#"{"type":"item.completed","item":{"id":"0","type":"tool_call","text":"ignored"}}
-{"type":"item.completed","item":{"id":"1","type":"agent_message","text":"kept"}}"#;
-
-        assert_eq!(extract_agent_message_from_jsonl(jsonl), "kept");
+    fn test_should_skip_empty_text_blocks() {
+        let content = vec![
+            ContentBlock::Text(code_agent_sdk::TextBlock {
+                text: String::new(),
+            }),
+            ContentBlock::Text(code_agent_sdk::TextBlock {
+                text: "non-empty".to_string(),
+            }),
+        ];
+        let texts = extract_text_blocks(&content);
+        assert_eq!(texts, vec!["non-empty"]);
     }
 
     #[test]
@@ -800,39 +697,6 @@ issues:
     fn test_should_handle_empty_strings_in_jaccard() {
         assert!((jaccard_similarity("", "") - 1.0).abs() < f64::EPSILON);
         assert!((jaccard_similarity("hello", "") - 0.0).abs() < f64::EPSILON);
-    }
-
-    #[test]
-    fn test_should_extract_top_level_error_event() {
-        let line = r#"{"type":"error","message":"Model not supported"}"#;
-        assert_eq!(
-            extract_error_from_jsonl_event(line),
-            Some("Model not supported".to_string()),
-        );
-    }
-
-    #[test]
-    fn test_should_extract_turn_failed_error() {
-        let line = r#"{"type":"turn.failed","error":{"message":"The model is not supported"}}"#;
-        assert_eq!(
-            extract_error_from_jsonl_event(line),
-            Some("The model is not supported".to_string()),
-        );
-    }
-
-    #[test]
-    fn test_should_extract_item_error() {
-        let line = r#"{"type":"item.completed","item":{"id":"item_0","type":"error","message":"Model metadata not found"}}"#;
-        assert_eq!(
-            extract_error_from_jsonl_event(line),
-            Some("Model metadata not found".to_string()),
-        );
-    }
-
-    #[test]
-    fn test_should_return_none_for_non_error_events() {
-        let line = r#"{"type":"thread.started","thread_id":"abc"}"#;
-        assert_eq!(extract_error_from_jsonl_event(line), None);
     }
 
     #[test]
