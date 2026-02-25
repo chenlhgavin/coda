@@ -4,6 +4,9 @@ build:
 test:
 	@cargo nextest run --all-features
 
+sync-submodule:
+	@git submodule update --init --recursive
+
 update-submodule:
 	@git submodule update --init --recursive --remote
 
@@ -11,7 +14,7 @@ build-release:
 	@echo "Building coda-server in release mode..."
 	cargo build --release --bin coda-server
 
-deploy: build-release install-service
+deploy: sync-submodule build-release install-service
 	@echo "Restarting coda-server..."
 	sudo systemctl restart coda-server
 	@echo "Deploy complete."
@@ -36,4 +39,11 @@ restart-service:
 status-service:
 	@systemctl status coda-server --no-pager
 
-.PHONY: build test update-submodule build-release deploy install-service uninstall-service restart-service status-service
+install-sudoers:
+	@echo "Installing passwordless sudo rules for coda-server deployment..."
+	sudo cp deploy/sudoers-coda-deploy /etc/sudoers.d/coda-deploy
+	sudo chmod 0440 /etc/sudoers.d/coda-deploy
+	sudo visudo -cf /etc/sudoers.d/coda-deploy
+	@echo "Done. Sudo password no longer required for deploy commands."
+
+.PHONY: build test sync-submodule update-submodule build-release deploy install-service uninstall-service restart-service status-service install-sudoers
