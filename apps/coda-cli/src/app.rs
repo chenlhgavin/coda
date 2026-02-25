@@ -250,6 +250,66 @@ impl App {
         Ok(())
     }
 
+    /// Handles the `coda config` command.
+    ///
+    /// Dispatches to `show`, `get`, or `set` subcommands, delegating
+    /// to the core engine's config CRUD methods.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the config operation fails.
+    pub fn config(&self, action: crate::cli::ConfigAction) -> Result<()> {
+        match action {
+            crate::cli::ConfigAction::Show => {
+                let summary = self.engine.config_show();
+                println!();
+                println!(
+                    "  {:<12} {:<10} {:<26} {:<8}",
+                    "Operation", "Backend", "Model", "Effort"
+                );
+                println!("  {}", "─".repeat(58));
+                for (name, resolved) in [
+                    ("init", &summary.init),
+                    ("plan", &summary.plan),
+                    ("run", &summary.run),
+                    ("review", &summary.review),
+                ] {
+                    let effort = resolved
+                        .effort
+                        .map_or_else(|| "-".to_string(), |e| e.to_string());
+                    println!(
+                        "  {:<12} {:<10} {:<26} {:<8}",
+                        name, resolved.backend, resolved.model, effort,
+                    );
+                }
+                println!();
+                Ok(())
+            }
+            crate::cli::ConfigAction::Get { key } => match self.engine.config_get(&key) {
+                Ok(value) => {
+                    println!("{value}");
+                    Ok(())
+                }
+                Err(e) => {
+                    println!("Error: {e}");
+                    std::process::exit(1);
+                }
+            },
+            crate::cli::ConfigAction::Set { key, value } => {
+                match self.engine.config_set(&key, &value) {
+                    Ok(()) => {
+                        println!("Updated {key} = {value}");
+                        Ok(())
+                    }
+                    Err(e) => {
+                        println!("Error: {e}");
+                        std::process::exit(1);
+                    }
+                }
+            }
+        }
+    }
+
     /// Handles the `coda list` command.
     ///
     /// Lists all features (active and merged) with their status, branch,

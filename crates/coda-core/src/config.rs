@@ -2,9 +2,18 @@
 //!
 //! Defines `CodaConfig` which is loaded from `.coda/config.yml` in a
 //! user's repository. All fields use snake_case to match YAML conventions.
+//!
+//! ## Per-Operation Agent Configuration
+//!
+//! The `agents` section allows each operation (`init`, `plan`, `run`, `review`)
+//! to independently configure which backend (claude/codex/cursor), model, and
+//! effort level to use. Unspecified fields fall back to global defaults
+//! (`agent.model`) or legacy fields (`review.engine`, `review.codex_model`).
 
 use std::str::FromStr;
 
+use code_agent_sdk::backend::BackendKind;
+use code_agent_sdk::options::Effort;
 use serde::{Deserialize, Serialize};
 
 /// Top-level CODA project configuration loaded from `.coda/config.yml`.
@@ -47,6 +56,13 @@ pub struct CodaConfig {
 
     /// Verification phase configuration.
     pub verify: VerifyConfig,
+
+    /// Per-operation agent backend overrides.
+    ///
+    /// Each operation (`init`, `plan`, `run`, `review`) can independently
+    /// specify a backend, model, and effort level. Unset fields inherit
+    /// from global defaults (`agent.model`) or legacy review fields.
+    pub agents: AgentsConfig,
 }
 
 /// Agent configuration controlling model and budget limits.
@@ -140,12 +156,89 @@ impl std::fmt::Display for ReviewEngine {
     }
 }
 
-/// Reasoning effort level for Codex CLI reviews.
+/// Which agent CLI backend to use for an operation.
 ///
-/// Controls how much reasoning the model applies during review. Higher
-/// levels produce more thorough reviews but cost more and are slower.
-/// The value is passed through to the Codex CLI as
-/// `-c model_reasoning_effort=<value>`.
+/// Controls which subprocess is spawned: Claude Code CLI, OpenAI Codex CLI,
+/// or Cursor Agent CLI. Serializes as lowercase (`"claude"`, `"codex"`,
+/// `"cursor"`) and parses case-insensitively.
+///
+/// # Examples
+///
+/// ```
+/// use coda_core::config::AgentBackend;
+///
+/// let backend: AgentBackend = "codex".parse().unwrap();
+/// assert_eq!(backend, AgentBackend::Codex);
+/// assert_eq!(backend.to_string(), "codex");
+///
+/// // Case-insensitive
+/// let backend: AgentBackend = "CLAUDE".parse().unwrap();
+/// assert_eq!(backend, AgentBackend::Claude);
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AgentBackend {
+    /// Claude Code CLI (default).
+    #[default]
+    Claude,
+    /// OpenAI Codex CLI.
+    Codex,
+    /// Cursor Agent CLI.
+    Cursor,
+}
+
+impl AgentBackend {
+    /// Converts to the SDK's [`BackendKind`].
+    pub fn to_backend_kind(self) -> BackendKind {
+        match self {
+            Self::Claude => BackendKind::Claude,
+            Self::Codex => BackendKind::Codex,
+            Self::Cursor => BackendKind::Cursor,
+        }
+    }
+}
+
+impl std::fmt::Display for AgentBackend {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Claude => write!(f, "claude"),
+            Self::Codex => write!(f, "codex"),
+            Self::Cursor => write!(f, "cursor"),
+        }
+    }
+}
+
+impl FromStr for AgentBackend {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "claude" => Ok(Self::Claude),
+            "codex" => Ok(Self::Codex),
+            "cursor" => Ok(Self::Cursor),
+            other => Err(format!("unknown agent backend: {other}")),
+        }
+    }
+}
+
+impl serde::Serialize for AgentBackend {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&self.to_string())
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for AgentBackend {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let s = String::deserialize(deserializer)?;
+        s.parse::<AgentBackend>().map_err(serde::de::Error::custom)
+    }
+}
+
+/// Reasoning effort level for agent operations.
+///
+/// Controls how much reasoning the model applies. Higher levels produce
+/// more thorough results but cost more and are slower. The value is
+/// passed through to the CLI backend (e.g., as `--effort` for Claude,
+/// or `-c model_reasoning_effort=<value>` for Codex).
 ///
 /// Deserialization is case-insensitive and accepts legacy aliases:
 /// `minimal` maps to `Low`, `xhigh` maps to `High`.
@@ -163,6 +256,10 @@ impl std::fmt::Display for ReviewEngine {
 /// let minimal: ReasoningEffort = "minimal".parse().unwrap();
 /// assert_eq!(minimal, ReasoningEffort::Low);
 ///
+/// // Max variant (maps to SDK Effort::Max)
+/// let max: ReasoningEffort = "max".parse().unwrap();
+/// assert_eq!(max, ReasoningEffort::Max);
+///
 /// // Round-trip through serde
 /// let yaml = serde_yaml_ng::to_string(&effort).unwrap();
 /// let parsed: ReasoningEffort = serde_yaml_ng::from_str(&yaml).unwrap();
@@ -176,6 +273,8 @@ pub enum ReasoningEffort {
     Medium,
     /// Deep reasoning — most thorough, slowest, most expensive.
     High,
+    /// Maximum reasoning — deepest possible reasoning, highest cost.
+    Max,
 }
 
 /// Custom serialization: always lowercase canonical names.
@@ -197,12 +296,25 @@ impl<'de> serde::Deserialize<'de> for ReasoningEffort {
     }
 }
 
+impl ReasoningEffort {
+    /// Converts to the SDK's [`Effort`] enum.
+    pub fn to_sdk_effort(self) -> Effort {
+        match self {
+            Self::Low => Effort::Low,
+            Self::Medium => Effort::Medium,
+            Self::High => Effort::High,
+            Self::Max => Effort::Max,
+        }
+    }
+}
+
 impl std::fmt::Display for ReasoningEffort {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Low => write!(f, "low"),
             Self::Medium => write!(f, "medium"),
             Self::High => write!(f, "high"),
+            Self::Max => write!(f, "max"),
         }
     }
 }
@@ -215,6 +327,7 @@ impl FromStr for ReasoningEffort {
             "low" | "minimal" => Ok(Self::Low),
             "medium" | "moderate" => Ok(Self::Medium),
             "high" | "xhigh" => Ok(Self::High),
+            "max" => Ok(Self::Max),
             other => Err(format!("unknown reasoning effort: {other}")),
         }
     }
@@ -278,24 +391,6 @@ pub struct ReviewConfig {
     pub codex_reasoning_effort: ReasoningEffort,
 }
 
-impl Default for CodaConfig {
-    fn default() -> Self {
-        Self {
-            version: 1,
-            agent: AgentConfig::default(),
-            checks: vec![
-                "cargo build".to_string(),
-                "cargo +nightly fmt -- --check".to_string(),
-                "cargo clippy -- -D warnings".to_string(),
-            ],
-            prompts: PromptsConfig::default(),
-            git: GitConfig::default(),
-            review: ReviewConfig::default(),
-            verify: VerifyConfig::default(),
-        }
-    }
-}
-
 impl Default for AgentConfig {
     fn default() -> Self {
         Self {
@@ -337,6 +432,187 @@ impl Default for ReviewConfig {
             engine: ReviewEngine::default(),
             codex_model: "gpt-5.3-codex".to_string(),
             codex_reasoning_effort: ReasoningEffort::High,
+        }
+    }
+}
+
+/// Per-operation agent configuration.
+///
+/// All fields are optional; unset fields inherit from global defaults
+/// via the `resolve_*` methods on [`CodaConfig`].
+///
+/// # Examples
+///
+/// ```
+/// use coda_core::config::{AgentBackend, OperationAgentConfig, ReasoningEffort};
+///
+/// let op = OperationAgentConfig {
+///     backend: Some(AgentBackend::Codex),
+///     model: Some("gpt-5.3-codex".to_string()),
+///     effort: Some(ReasoningEffort::High),
+/// };
+/// assert_eq!(op.backend.unwrap(), AgentBackend::Codex);
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct OperationAgentConfig {
+    /// Which backend CLI to use for this operation.
+    pub backend: Option<AgentBackend>,
+    /// Model identifier override for this operation.
+    pub model: Option<String>,
+    /// Reasoning effort override for this operation.
+    pub effort: Option<ReasoningEffort>,
+}
+
+/// Container for per-operation agent overrides.
+///
+/// Each field corresponds to a CODA operation and holds optional
+/// overrides. Missing fields default to empty [`OperationAgentConfig`].
+///
+/// # Examples
+///
+/// ```
+/// use coda_core::config::AgentsConfig;
+///
+/// let agents = AgentsConfig::default();
+/// assert!(agents.init.backend.is_none());
+/// assert!(agents.review.model.is_none());
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct AgentsConfig {
+    /// Overrides for the `init` operation (analyze + setup phases).
+    pub init: OperationAgentConfig,
+    /// Overrides for the `plan` operation (interactive planning).
+    pub plan: OperationAgentConfig,
+    /// Overrides for the `run` operation (dev phases execution).
+    pub run: OperationAgentConfig,
+    /// Overrides for the `review` operation (code review phase).
+    pub review: OperationAgentConfig,
+}
+
+/// Fully resolved agent configuration for a single operation.
+///
+/// All fields are populated — no `Option`s. Created by the `resolve_*`
+/// methods on [`CodaConfig`] which merge per-operation overrides with
+/// global defaults and legacy fields.
+#[derive(Debug, Clone)]
+pub struct ResolvedAgentConfig {
+    /// Which backend CLI to use.
+    pub backend: AgentBackend,
+    /// Model identifier (e.g., `"claude-opus-4-6"` or `"gpt-5.3-codex"`).
+    pub model: String,
+    /// Reasoning effort level, if applicable for the backend.
+    pub effort: Option<ReasoningEffort>,
+}
+
+impl CodaConfig {
+    /// Resolves agent configuration for the `init` operation.
+    ///
+    /// Falls back to `agent.model` for model and `Claude` for backend.
+    pub fn resolve_init(&self) -> ResolvedAgentConfig {
+        ResolvedAgentConfig {
+            backend: self.agents.init.backend.unwrap_or_default(),
+            model: self
+                .agents
+                .init
+                .model
+                .clone()
+                .unwrap_or_else(|| self.agent.model.clone()),
+            effort: self.agents.init.effort,
+        }
+    }
+
+    /// Resolves agent configuration for the `plan` operation.
+    ///
+    /// Falls back to `agent.model` for model and `Claude` for backend.
+    pub fn resolve_plan(&self) -> ResolvedAgentConfig {
+        ResolvedAgentConfig {
+            backend: self.agents.plan.backend.unwrap_or_default(),
+            model: self
+                .agents
+                .plan
+                .model
+                .clone()
+                .unwrap_or_else(|| self.agent.model.clone()),
+            effort: self.agents.plan.effort,
+        }
+    }
+
+    /// Resolves agent configuration for the `run` operation.
+    ///
+    /// Falls back to `agent.model` for model and `Claude` for backend.
+    pub fn resolve_run(&self) -> ResolvedAgentConfig {
+        ResolvedAgentConfig {
+            backend: self.agents.run.backend.unwrap_or_default(),
+            model: self
+                .agents
+                .run
+                .model
+                .clone()
+                .unwrap_or_else(|| self.agent.model.clone()),
+            effort: self.agents.run.effort,
+        }
+    }
+
+    /// Resolves agent configuration for the `review` operation.
+    ///
+    /// Maintains backward compatibility with legacy `review.engine`,
+    /// `review.codex_model`, and `review.codex_reasoning_effort` fields:
+    ///
+    /// - **backend**: `agents.review.backend` → legacy `review.engine` mapping
+    /// - **model**: `agents.review.model` → legacy `review.codex_model` (for codex)
+    ///   or `agent.model` (for claude/cursor)
+    /// - **effort**: `agents.review.effort` → legacy `review.codex_reasoning_effort`
+    ///   (for codex) or `None` (for claude/cursor)
+    pub fn resolve_review(&self) -> ResolvedAgentConfig {
+        let backend = self
+            .agents
+            .review
+            .backend
+            .unwrap_or(match self.review.engine {
+                ReviewEngine::Claude => AgentBackend::Claude,
+                ReviewEngine::Codex => AgentBackend::Codex,
+            });
+
+        let model = self
+            .agents
+            .review
+            .model
+            .clone()
+            .unwrap_or_else(|| match backend {
+                AgentBackend::Codex => self.review.codex_model.clone(),
+                _ => self.agent.model.clone(),
+            });
+
+        let effort = self.agents.review.effort.or(match backend {
+            AgentBackend::Codex => Some(self.review.codex_reasoning_effort),
+            _ => None,
+        });
+
+        ResolvedAgentConfig {
+            backend,
+            model,
+            effort,
+        }
+    }
+}
+
+impl Default for CodaConfig {
+    fn default() -> Self {
+        Self {
+            version: 1,
+            agent: AgentConfig::default(),
+            checks: vec![
+                "cargo build".to_string(),
+                "cargo +nightly fmt -- --check".to_string(),
+                "cargo clippy -- -D warnings".to_string(),
+            ],
+            prompts: PromptsConfig::default(),
+            git: GitConfig::default(),
+            review: ReviewConfig::default(),
+            verify: VerifyConfig::default(),
+            agents: AgentsConfig::default(),
         }
     }
 }
@@ -517,6 +793,10 @@ verify:
             serde_json::to_string(&ReasoningEffort::High).unwrap(),
             "\"high\""
         );
+        assert_eq!(
+            serde_json::to_string(&ReasoningEffort::Max).unwrap(),
+            "\"max\""
+        );
     }
 
     #[test]
@@ -533,6 +813,10 @@ verify:
             serde_json::from_str::<ReasoningEffort>("\"high\"").unwrap(),
             ReasoningEffort::High
         );
+        assert_eq!(
+            serde_json::from_str::<ReasoningEffort>("\"max\"").unwrap(),
+            ReasoningEffort::Max
+        );
     }
 
     #[test]
@@ -541,6 +825,7 @@ verify:
             ReasoningEffort::Low,
             ReasoningEffort::Medium,
             ReasoningEffort::High,
+            ReasoningEffort::Max,
         ] {
             let json = serde_json::to_string(&effort).unwrap();
             let parsed: ReasoningEffort = serde_json::from_str(&json).unwrap();
@@ -553,6 +838,7 @@ verify:
         assert_eq!(ReasoningEffort::Low.to_string(), "low");
         assert_eq!(ReasoningEffort::Medium.to_string(), "medium");
         assert_eq!(ReasoningEffort::High.to_string(), "high");
+        assert_eq!(ReasoningEffort::Max.to_string(), "max");
     }
 
     #[test]
@@ -569,6 +855,10 @@ verify:
             "high".parse::<ReasoningEffort>().unwrap(),
             ReasoningEffort::High
         );
+        assert_eq!(
+            "MAX".parse::<ReasoningEffort>().unwrap(),
+            ReasoningEffort::Max
+        );
     }
 
     #[test]
@@ -582,6 +872,7 @@ verify:
             ReasoningEffort::Low,
             ReasoningEffort::Medium,
             ReasoningEffort::High,
+            ReasoningEffort::Max,
         ] {
             let displayed = effort.to_string();
             let parsed: ReasoningEffort = displayed.parse().unwrap();
@@ -595,6 +886,7 @@ verify:
             ("low", ReasoningEffort::Low),
             ("medium", ReasoningEffort::Medium),
             ("high", ReasoningEffort::High),
+            ("max", ReasoningEffort::Max),
         ] {
             let yaml = format!("version: 1\nreview:\n  codex_reasoning_effort: {yaml_val}\n");
             let config: CodaConfig = serde_yaml_ng::from_str(&yaml).unwrap();
@@ -634,5 +926,228 @@ verify:
         let yaml = "version: 1\nreview:\n  codex_reasoning_effort: LOW\n";
         let config: CodaConfig = serde_yaml_ng::from_str(yaml).unwrap();
         assert_eq!(config.review.codex_reasoning_effort, ReasoningEffort::Low);
+    }
+
+    // ── AgentBackend ──────────────────────────────────────────────────
+
+    #[test]
+    fn test_should_round_trip_agent_backend_serde() {
+        for backend in [
+            AgentBackend::Claude,
+            AgentBackend::Codex,
+            AgentBackend::Cursor,
+        ] {
+            let json = serde_json::to_string(&backend).unwrap();
+            let parsed: AgentBackend = serde_json::from_str(&json).unwrap();
+            assert_eq!(parsed, backend);
+        }
+    }
+
+    #[test]
+    fn test_should_parse_agent_backend_case_insensitive() {
+        assert_eq!(
+            "Claude".parse::<AgentBackend>().unwrap(),
+            AgentBackend::Claude
+        );
+        assert_eq!(
+            "CODEX".parse::<AgentBackend>().unwrap(),
+            AgentBackend::Codex
+        );
+        assert_eq!(
+            "cursor".parse::<AgentBackend>().unwrap(),
+            AgentBackend::Cursor
+        );
+    }
+
+    #[test]
+    fn test_should_reject_invalid_agent_backend() {
+        assert!("unknown".parse::<AgentBackend>().is_err());
+    }
+
+    #[test]
+    fn test_should_display_agent_backend_lowercase() {
+        assert_eq!(AgentBackend::Claude.to_string(), "claude");
+        assert_eq!(AgentBackend::Codex.to_string(), "codex");
+        assert_eq!(AgentBackend::Cursor.to_string(), "cursor");
+    }
+
+    #[test]
+    fn test_should_default_agent_backend_to_claude() {
+        assert_eq!(AgentBackend::default(), AgentBackend::Claude);
+    }
+
+    // ── AgentsConfig ──────────────────────────────────────────────────
+
+    #[test]
+    fn test_should_deserialize_config_with_agents_section() {
+        let yaml = r#"
+version: 1
+agents:
+  init:
+    backend: claude
+    model: claude-opus-4-6
+    effort: high
+  plan:
+    backend: claude
+    model: claude-sonnet-4-6
+    effort: medium
+  run:
+    backend: claude
+    model: claude-opus-4-6
+  review:
+    backend: codex
+    model: gpt-5.3-codex
+    effort: high
+"#;
+        let config: CodaConfig = serde_yaml_ng::from_str(yaml).unwrap();
+        assert_eq!(config.agents.init.backend, Some(AgentBackend::Claude));
+        assert_eq!(config.agents.init.model.as_deref(), Some("claude-opus-4-6"));
+        assert_eq!(config.agents.init.effort, Some(ReasoningEffort::High));
+        assert_eq!(
+            config.agents.plan.model.as_deref(),
+            Some("claude-sonnet-4-6")
+        );
+        assert_eq!(config.agents.plan.effort, Some(ReasoningEffort::Medium));
+        assert_eq!(config.agents.run.backend, Some(AgentBackend::Claude));
+        assert!(config.agents.run.effort.is_none());
+        assert_eq!(config.agents.review.backend, Some(AgentBackend::Codex));
+    }
+
+    #[test]
+    fn test_should_deserialize_config_without_agents_section() {
+        let yaml = "version: 1\n";
+        let config: CodaConfig = serde_yaml_ng::from_str(yaml).unwrap();
+        assert!(config.agents.init.backend.is_none());
+        assert!(config.agents.plan.backend.is_none());
+        assert!(config.agents.run.backend.is_none());
+        assert!(config.agents.review.backend.is_none());
+    }
+
+    #[test]
+    fn test_should_round_trip_agents_config_yaml() {
+        let yaml = r#"
+version: 1
+agents:
+  init:
+    backend: claude
+    model: claude-opus-4-6
+  review:
+    backend: codex
+    model: gpt-5.3-codex
+    effort: max
+"#;
+        let config: CodaConfig = serde_yaml_ng::from_str(yaml).unwrap();
+        let round_tripped = serde_yaml_ng::to_string(&config).unwrap();
+        let reloaded: CodaConfig = serde_yaml_ng::from_str(&round_tripped).unwrap();
+        assert_eq!(reloaded.agents.init.backend, Some(AgentBackend::Claude));
+        assert_eq!(reloaded.agents.review.effort, Some(ReasoningEffort::Max));
+    }
+
+    // ── resolve_* methods ─────────────────────────────────────────────
+
+    #[test]
+    fn test_should_resolve_init_with_defaults() {
+        let config = CodaConfig::default();
+        let resolved = config.resolve_init();
+        assert_eq!(resolved.backend, AgentBackend::Claude);
+        assert_eq!(resolved.model, "claude-opus-4-6");
+        assert!(resolved.effort.is_none());
+    }
+
+    #[test]
+    fn test_should_resolve_init_with_explicit_values() {
+        let mut config = CodaConfig::default();
+        config.agents.init.backend = Some(AgentBackend::Codex);
+        config.agents.init.model = Some("gpt-5.3-codex".to_string());
+        config.agents.init.effort = Some(ReasoningEffort::Max);
+        let resolved = config.resolve_init();
+        assert_eq!(resolved.backend, AgentBackend::Codex);
+        assert_eq!(resolved.model, "gpt-5.3-codex");
+        assert_eq!(resolved.effort, Some(ReasoningEffort::Max));
+    }
+
+    #[test]
+    fn test_should_resolve_plan_falls_back_to_agent_model() {
+        let mut config = CodaConfig::default();
+        config.agent.model = "claude-sonnet-4-6".to_string();
+        let resolved = config.resolve_plan();
+        assert_eq!(resolved.backend, AgentBackend::Claude);
+        assert_eq!(resolved.model, "claude-sonnet-4-6");
+    }
+
+    #[test]
+    fn test_should_resolve_run_with_effort() {
+        let mut config = CodaConfig::default();
+        config.agents.run.effort = Some(ReasoningEffort::High);
+        let resolved = config.resolve_run();
+        assert_eq!(resolved.effort, Some(ReasoningEffort::High));
+    }
+
+    #[test]
+    fn test_should_resolve_review_legacy_codex_defaults() {
+        let config = CodaConfig::default();
+        let resolved = config.resolve_review();
+        // Default review.engine is Codex
+        assert_eq!(resolved.backend, AgentBackend::Codex);
+        assert_eq!(resolved.model, "gpt-5.3-codex");
+        assert_eq!(resolved.effort, Some(ReasoningEffort::High));
+    }
+
+    #[test]
+    fn test_should_resolve_review_legacy_claude_engine() {
+        let mut config = CodaConfig::default();
+        config.review.engine = ReviewEngine::Claude;
+        let resolved = config.resolve_review();
+        assert_eq!(resolved.backend, AgentBackend::Claude);
+        assert_eq!(resolved.model, "claude-opus-4-6");
+        assert!(resolved.effort.is_none());
+    }
+
+    #[test]
+    fn test_should_resolve_review_explicit_overrides_legacy() {
+        let mut config = CodaConfig::default();
+        config.agents.review.backend = Some(AgentBackend::Claude);
+        config.agents.review.model = Some("claude-sonnet-4-6".to_string());
+        config.agents.review.effort = Some(ReasoningEffort::Medium);
+        let resolved = config.resolve_review();
+        assert_eq!(resolved.backend, AgentBackend::Claude);
+        assert_eq!(resolved.model, "claude-sonnet-4-6");
+        assert_eq!(resolved.effort, Some(ReasoningEffort::Medium));
+    }
+
+    #[test]
+    fn test_should_resolve_review_codex_with_custom_model() {
+        let mut config = CodaConfig::default();
+        config.review.codex_model = "o4-mini".to_string();
+        config.review.codex_reasoning_effort = ReasoningEffort::Low;
+        let resolved = config.resolve_review();
+        assert_eq!(resolved.backend, AgentBackend::Codex);
+        assert_eq!(resolved.model, "o4-mini");
+        assert_eq!(resolved.effort, Some(ReasoningEffort::Low));
+    }
+
+    #[test]
+    fn test_should_resolve_review_agents_override_partial() {
+        let mut config = CodaConfig::default();
+        // Set only backend in agents.review, rest should fall back
+        config.agents.review.backend = Some(AgentBackend::Codex);
+        let resolved = config.resolve_review();
+        assert_eq!(resolved.backend, AgentBackend::Codex);
+        // Model falls back to review.codex_model since backend is Codex
+        assert_eq!(resolved.model, "gpt-5.3-codex");
+        // Effort falls back to review.codex_reasoning_effort since backend is Codex
+        assert_eq!(resolved.effort, Some(ReasoningEffort::High));
+    }
+
+    #[test]
+    fn test_should_resolve_review_cursor_fallback() {
+        let mut config = CodaConfig::default();
+        config.agents.review.backend = Some(AgentBackend::Cursor);
+        let resolved = config.resolve_review();
+        assert_eq!(resolved.backend, AgentBackend::Cursor);
+        // Cursor falls back to agent.model
+        assert_eq!(resolved.model, "claude-opus-4-6");
+        // Cursor has no default effort
+        assert!(resolved.effort.is_none());
     }
 }

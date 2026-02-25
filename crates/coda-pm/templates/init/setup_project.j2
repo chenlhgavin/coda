@@ -15,7 +15,7 @@ Perform the following steps in order:
 {% if force %}
 ### 1. Update `.coda/config.yml`
 
-Read the existing config at `{{ project_root }}/.coda/config.yml`. **Preserve all user-customized settings** (such as `agent.max_budget_usd`, `agent.model`, `review.codex_reasoning_effort`, `git.branch_prefix`, etc.). Update the `checks` list to match the current tech stack detected in the analysis above. Set `review.engine` to `codex` (the current default). If any new config fields are missing from the existing file, add them with sensible defaults. **Important**: `review.codex_model` must be an OpenAI-compatible model (e.g., `gpt-5.3-codex`). If it is currently set to a Claude model (e.g., `claude-opus-4-6`), correct it to `gpt-5.3-codex`.
+Read the existing config at `{{ project_root }}/.coda/config.yml`. **Preserve all user-customized settings** (such as `agent.max_budget_usd`, `agent.model`, `agents.*`, `review.codex_reasoning_effort`, `git.branch_prefix`, etc.). Update the `checks` list to match the current tech stack detected in the analysis above. Set `review.engine` to `codex` (the current default). If any new config fields are missing from the existing file, add them with sensible defaults. **Important**: `review.codex_model` must be an OpenAI-compatible model (e.g., `gpt-5.3-codex`). If it is currently set to a Claude model (e.g., `claude-opus-4-6`), correct it to `gpt-5.3-codex`. Ensure the `agents` section exists with per-operation overrides for `init`, `plan`, `run`, and `review` (each may specify `backend`, `model`, and `effort`).
 
 ### 2. Regenerate `.coda.md`
 
@@ -103,6 +103,24 @@ agent:
   model: "claude-opus-4-6"
   permission_mode: "auto"
   max_retries: 3
+
+# Per-operation agent backend overrides.
+# Each operation can independently set backend (claude/codex/cursor), model, and effort.
+# Omitted fields inherit from agent.model (for claude/cursor) or review.codex_model (for codex).
+agents:
+  init:
+    backend: claude
+    model: "claude-opus-4-6"
+  plan:
+    backend: claude
+    model: "claude-sonnet-4-6"
+  run:
+    backend: claude
+    model: "claude-opus-4-6"
+  review:
+    backend: codex
+    model: "gpt-5.3-codex"
+    effort: "high"
 
 git:
   auto_commit: true

@@ -34,6 +34,11 @@ const HELP_TEXT: &str = "\
   `/coda status <slug>` — Show detailed status of a feature
   `/coda clean` — Clean up merged worktrees
 
+*Configuration*
+  `/coda config` — Show resolved agent configuration for all operations
+  `/coda config get <key>` — Get a config value (e.g., `agents.run.model`)
+  `/coda config set <key> <value>` — Set a config value
+
 *Other*
   `/coda cancel [slug]` — Cancel a running init or run task
   `/coda help` — Show this help message";
@@ -295,6 +300,7 @@ mod tests {
         assert!(HELP_TEXT.contains("/coda status"));
         assert!(HELP_TEXT.contains("/coda clean"));
         assert!(HELP_TEXT.contains("/coda cancel"));
+        assert!(HELP_TEXT.contains("/coda config"));
         assert!(HELP_TEXT.contains("/coda help"));
     }
 }

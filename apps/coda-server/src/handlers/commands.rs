@@ -74,6 +74,12 @@ pub enum CodaCommand {
         target: String,
     },
 
+    /// View or update agent configuration.
+    Config {
+        /// Raw arguments: `"show"`, `"get <key>"`, or `"set <key> <value>"`.
+        args: String,
+    },
+
     /// Show available commands.
     Help,
 }
@@ -156,6 +162,9 @@ impl CodaCommand {
             }
             "cancel" => Ok(Self::Cancel {
                 target: rest.to_string(),
+            }),
+            "config" => Ok(Self::Config {
+                args: rest.to_string(),
             }),
             "help" => Ok(Self::Help),
             _ => Ok(Self::Help),
@@ -250,6 +259,9 @@ pub async fn handle_slash_command(state: Arc<AppState>, payload: serde_json::Val
             commands::query::handle_status(Arc::clone(&state), &cmd_payload, &feature_slug).await
         }
         CodaCommand::Clean => commands::query::handle_clean(Arc::clone(&state), &cmd_payload).await,
+        CodaCommand::Config { args } => {
+            commands::config::handle_config(Arc::clone(&state), &cmd_payload, &args).await
+        }
         CodaCommand::Repos => commands::repos::handle_repos(Arc::clone(&state), &cmd_payload).await,
         CodaCommand::Switch { branch } => {
             commands::repos::handle_switch(Arc::clone(&state), &cmd_payload, &branch).await
@@ -437,6 +449,50 @@ mod tests {
         let result = CodaCommand::parse("switch");
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("branch"));
+    }
+
+    #[test]
+    fn test_should_parse_config_show() {
+        let cmd = CodaCommand::parse("config show").expect("parse");
+        assert_eq!(
+            cmd,
+            CodaCommand::Config {
+                args: "show".into()
+            }
+        );
+    }
+
+    #[test]
+    fn test_should_parse_config_get() {
+        let cmd = CodaCommand::parse("config get agents.run.model").expect("parse");
+        assert_eq!(
+            cmd,
+            CodaCommand::Config {
+                args: "get agents.run.model".into()
+            }
+        );
+    }
+
+    #[test]
+    fn test_should_parse_config_set() {
+        let cmd = CodaCommand::parse("config set agents.run.backend codex").expect("parse");
+        assert_eq!(
+            cmd,
+            CodaCommand::Config {
+                args: "set agents.run.backend codex".into()
+            }
+        );
+    }
+
+    #[test]
+    fn test_should_parse_config_empty_as_show() {
+        let cmd = CodaCommand::parse("config").expect("parse");
+        assert_eq!(
+            cmd,
+            CodaCommand::Config {
+                args: String::new()
+            }
+        );
     }
 
     #[test]

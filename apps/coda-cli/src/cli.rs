@@ -61,6 +61,12 @@ pub enum Commands {
         feature_slug: String,
     },
 
+    /// View or update agent configuration.
+    Config {
+        #[command(subcommand)]
+        action: ConfigAction,
+    },
+
     /// Remove worktrees whose PR has been merged or closed.
     Clean {
         /// Show what would be removed without actually deleting.
@@ -77,6 +83,27 @@ pub enum Commands {
     },
 }
 
+/// Subcommands for `coda config`.
+#[derive(Subcommand)]
+pub enum ConfigAction {
+    /// Show resolved agent configuration for all operations.
+    Show,
+
+    /// Get a specific config value by dot-path key.
+    Get {
+        /// Dot-path key (e.g., `agents.run.model`).
+        key: String,
+    },
+
+    /// Set a config value by dot-path key.
+    Set {
+        /// Dot-path key (e.g., `agents.run.backend`).
+        key: String,
+        /// Value to set.
+        value: String,
+    },
+}
+
 impl Cli {
     /// Executes the parsed CLI command.
     pub async fn run(self) -> Result<()> {
@@ -89,6 +116,7 @@ impl Cli {
                 feature_slug,
                 no_tui,
             } => app.run(&feature_slug, no_tui).await,
+            Commands::Config { action } => app.config(action),
             Commands::List => app.list(),
             Commands::Status { feature_slug } => app.status(&feature_slug),
             Commands::Clean { dry_run, yes, logs } => app.clean(dry_run, yes, logs),

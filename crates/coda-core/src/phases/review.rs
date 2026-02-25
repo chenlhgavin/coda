@@ -10,7 +10,7 @@ use tracing::{info, warn};
 
 use crate::CoreError;
 use crate::codex::{format_issues, is_codex_available, run_codex_review};
-use crate::config::ReviewEngine;
+use crate::config::AgentBackend;
 use crate::parser::parse_review_issues;
 use crate::runner::RunEvent;
 use crate::task::{Task, TaskResult, TaskStatus};
@@ -64,30 +64,22 @@ impl PhaseExecutor for ReviewPhaseExecutor {
             return Ok(task_result);
         }
 
-        let effective_engine = resolve_review_engine(&ctx.config.review.engine);
-        info!(engine = %effective_engine, "Starting review phase");
+        let resolved = ctx.config.resolve_review();
+        info!(backend = %resolved.backend, "Starting review phase");
 
-        match effective_engine {
-            ReviewEngine::Claude => run_review_claude(ctx, phase_idx).await,
-            ReviewEngine::Codex => run_review_codex(ctx, phase_idx).await,
-        }
-    }
-}
-
-/// Resolves the effective review engine, falling back to Claude if
-/// `codex` is not installed.
-fn resolve_review_engine(configured: &ReviewEngine) -> ReviewEngine {
-    match configured {
-        ReviewEngine::Claude => ReviewEngine::Claude,
-        ReviewEngine::Codex => {
-            if is_codex_available() {
-                ReviewEngine::Codex
-            } else {
-                warn!(
-                    configured = %configured,
-                    "Codex CLI not found on PATH, falling back to Claude review",
-                );
-                ReviewEngine::Claude
+        match resolved.backend {
+            AgentBackend::Claude => run_review_claude(ctx, phase_idx).await,
+            AgentBackend::Codex => {
+                if is_codex_available() {
+                    run_review_codex(ctx, phase_idx, &resolved).await
+                } else {
+                    warn!("Codex CLI not found, falling back to Claude review");
+                    run_review_claude(ctx, phase_idx).await
+                }
+            }
+            AgentBackend::Cursor => {
+                warn!("Cursor review not yet supported, falling back to Claude review");
+                run_review_claude(ctx, phase_idx).await
             }
         }
     }
@@ -154,10 +146,13 @@ async fn run_review_claude(
 async fn run_review_codex(
     ctx: &mut PhaseContext,
     phase_idx: usize,
+    resolved: &crate::config::ResolvedAgentConfig,
 ) -> Result<TaskResult, CoreError> {
     let max_rounds = ctx.config.review.max_review_rounds;
-    let codex_model = ctx.config.review.codex_model.clone();
-    let codex_effort = ctx.config.review.codex_reasoning_effort;
+    let codex_model = resolved.model.clone();
+    let codex_effort = resolved
+        .effort
+        .unwrap_or(crate::config::ReasoningEffort::High);
     let spec_path = ctx.spec_relative_path("design.md");
     let mut acc = PhaseMetricsAccumulator::new();
 
@@ -269,29 +264,31 @@ fn finalize_review_phase(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
-    // ── resolve_review_engine tests ─────────────────────────────
+    use crate::config::{AgentBackend, CodaConfig, ReviewEngine};
 
     #[test]
-    fn test_should_resolve_claude_engine_unchanged() {
-        let result = resolve_review_engine(&ReviewEngine::Claude);
-        assert!(
-            matches!(result, ReviewEngine::Claude),
-            "Claude engine should always resolve to Claude"
-        );
+    fn test_should_resolve_review_claude_backend() {
+        let mut config = CodaConfig::default();
+        config.review.engine = ReviewEngine::Claude;
+        let resolved = config.resolve_review();
+        assert_eq!(resolved.backend, AgentBackend::Claude);
     }
 
     #[test]
-    fn test_should_fallback_codex_to_claude_when_unavailable() {
-        // On CI/test machines, codex is almost certainly not on PATH.
-        // If it is, this test is still valid — just verifies the codex path.
-        let result = resolve_review_engine(&ReviewEngine::Codex);
-        // We can't control whether codex is installed, but we can verify
-        // the function returns a valid engine.
-        assert!(
-            matches!(result, ReviewEngine::Claude | ReviewEngine::Codex),
-            "Should resolve to Claude or Codex, got {result:?}"
-        );
+    fn test_should_resolve_review_codex_backend_from_legacy() {
+        let config = CodaConfig::default(); // default engine = Codex
+        let resolved = config.resolve_review();
+        assert_eq!(resolved.backend, AgentBackend::Codex);
+        assert_eq!(resolved.model, "gpt-5.3-codex");
+    }
+
+    #[test]
+    fn test_should_resolve_review_explicit_agents_override() {
+        let mut config = CodaConfig::default();
+        config.agents.review.backend = Some(AgentBackend::Claude);
+        config.agents.review.model = Some("claude-sonnet-4-6".to_string());
+        let resolved = config.resolve_review();
+        assert_eq!(resolved.backend, AgentBackend::Claude);
+        assert_eq!(resolved.model, "claude-sonnet-4-6");
     }
 }

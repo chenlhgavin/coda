@@ -10,10 +10,14 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use code_agent_sdk::options::{HookCallback, HookJSONOutput, SystemPromptConfig, ToolsConfig};
+use code_agent_sdk::options::{
+    CodexOptions, HookCallback, HookJSONOutput, SystemPromptConfig, ToolsConfig,
+};
 use code_agent_sdk::{AgentOptions, HookEvent, HookMatcher, PermissionMode};
 use regex::Regex;
 use tracing::debug;
+
+use crate::config::{AgentBackend, ResolvedAgentConfig};
 
 /// Agent profile controlling tool access and SDK configuration.
 ///
@@ -36,13 +40,17 @@ impl AgentProfile {
     ///
     /// Both profiles use the `claude_code` system prompt preset with
     /// custom appended instructions, and `BypassPermissions` mode.
+    ///
+    /// The `resolved` parameter controls backend, model, and effort.
+    /// For non-Claude backends the appropriate backend-specific options
+    /// are configured (e.g., `CodexOptions` for Codex).
     pub fn to_options(
         &self,
         system_append: &str,
         cwd: PathBuf,
         max_turns: u32,
         max_budget_usd: f64,
-        model: &str,
+        resolved: &ResolvedAgentConfig,
     ) -> AgentOptions {
         let system_prompt = SystemPromptConfig::Preset {
             preset: "claude_code".to_string(),
@@ -55,7 +63,7 @@ impl AgentProfile {
                 .cwd(cwd)
                 .max_turns(max_turns)
                 .max_budget_usd(max_budget_usd)
-                .model(model.to_string())
+                .model(resolved.model.clone())
                 .tools(ToolsConfig::from(["Read", "Glob", "Grep"]))
                 .build(),
 
@@ -64,13 +72,48 @@ impl AgentProfile {
                 .cwd(cwd)
                 .max_turns(max_turns)
                 .max_budget_usd(max_budget_usd)
-                .model(model.to_string())
+                .model(resolved.model.clone())
                 .tools(ToolsConfig::from(["Read", "Write", "Bash", "Glob", "Grep"]))
                 .hooks(build_safety_hooks())
                 .build(),
         };
+
         // Set system prompt directly (builder only supports String, not Preset)
         options.system_prompt = Some(system_prompt);
+
+        // Set backend
+        options.backend = Some(resolved.backend.to_backend_kind());
+
+        // Configure effort and backend-specific options
+        match resolved.backend {
+            AgentBackend::Claude => {
+                if let Some(effort) = resolved.effort {
+                    options.effort = Some(effort.to_sdk_effort());
+                }
+            }
+            AgentBackend::Codex => {
+                if let Some(effort) = resolved.effort {
+                    options.extra_args.insert(
+                        "model_reasoning_effort".to_string(),
+                        Some(effort.to_string()),
+                    );
+                }
+                let sandbox_mode = match self {
+                    Self::Planner => "read-only",
+                    Self::Coder => "danger-full-access",
+                };
+                options.codex = Some(CodexOptions {
+                    approval_policy: Some("full-auto".to_string()),
+                    sandbox_mode: Some(sandbox_mode.to_string()),
+                });
+            }
+            AgentBackend::Cursor => {
+                if let Some(effort) = resolved.effort {
+                    options.effort = Some(effort.to_sdk_effort());
+                }
+            }
+        }
+
         options
     }
 }
@@ -239,16 +282,19 @@ mod tests {
         assert_eq!(post_matchers[0].matcher, None);
     }
 
+    fn default_resolved() -> ResolvedAgentConfig {
+        ResolvedAgentConfig {
+            backend: AgentBackend::Claude,
+            model: "claude-opus-4-6".to_string(),
+            effort: None,
+        }
+    }
+
     #[test]
     fn test_should_create_planner_options() {
         let profile = AgentProfile::Planner;
-        let options = profile.to_options(
-            "Test append",
-            PathBuf::from("/tmp"),
-            10,
-            5.0,
-            "claude-opus-4-6",
-        );
+        let resolved = default_resolved();
+        let options = profile.to_options("Test append", PathBuf::from("/tmp"), 10, 5.0, &resolved);
 
         assert_eq!(options.max_turns, Some(10));
         assert_eq!(options.max_budget_usd, Some(5.0));
@@ -274,13 +320,8 @@ mod tests {
     #[test]
     fn test_should_create_coder_options() {
         let profile = AgentProfile::Coder;
-        let options = profile.to_options(
-            "Test append",
-            PathBuf::from("/tmp"),
-            20,
-            10.0,
-            "claude-opus-4-6",
-        );
+        let resolved = default_resolved();
+        let options = profile.to_options("Test append", PathBuf::from("/tmp"), 20, 10.0, &resolved);
 
         assert_eq!(options.max_turns, Some(20));
         assert_eq!(options.max_budget_usd, Some(10.0));
@@ -297,5 +338,63 @@ mod tests {
             }
             _ => panic!("Expected ToolsConfig::List for Coder"),
         }
+    }
+
+    #[test]
+    fn test_should_set_codex_backend_options() {
+        use crate::config::ReasoningEffort;
+
+        let profile = AgentProfile::Coder;
+        let resolved = ResolvedAgentConfig {
+            backend: AgentBackend::Codex,
+            model: "gpt-5.3-codex".to_string(),
+            effort: Some(ReasoningEffort::High),
+        };
+        let options = profile.to_options("Test", PathBuf::from("/tmp"), 10, 5.0, &resolved);
+
+        assert_eq!(
+            options.backend,
+            Some(code_agent_sdk::backend::BackendKind::Codex)
+        );
+        assert_eq!(options.model, Some("gpt-5.3-codex".to_string()));
+        assert_eq!(
+            options.extra_args.get("model_reasoning_effort"),
+            Some(&Some("high".to_string()))
+        );
+        let codex = options.codex.as_ref().expect("codex options should be set");
+        assert_eq!(codex.approval_policy.as_deref(), Some("full-auto"));
+        assert_eq!(codex.sandbox_mode.as_deref(), Some("danger-full-access"));
+    }
+
+    #[test]
+    fn test_should_set_codex_planner_read_only_sandbox() {
+        use crate::config::ReasoningEffort;
+
+        let profile = AgentProfile::Planner;
+        let resolved = ResolvedAgentConfig {
+            backend: AgentBackend::Codex,
+            model: "gpt-5.3-codex".to_string(),
+            effort: Some(ReasoningEffort::Medium),
+        };
+        let options = profile.to_options("Test", PathBuf::from("/tmp"), 10, 5.0, &resolved);
+
+        let codex = options.codex.as_ref().expect("codex options should be set");
+        assert_eq!(codex.sandbox_mode.as_deref(), Some("read-only"));
+    }
+
+    #[test]
+    fn test_should_set_claude_effort() {
+        use crate::config::ReasoningEffort;
+
+        let profile = AgentProfile::Planner;
+        let resolved = ResolvedAgentConfig {
+            backend: AgentBackend::Claude,
+            model: "claude-opus-4-6".to_string(),
+            effort: Some(ReasoningEffort::High),
+        };
+        let options = profile.to_options("Test", PathBuf::from("/tmp"), 10, 5.0, &resolved);
+
+        assert_eq!(options.effort, Some(code_agent_sdk::options::Effort::High));
+        assert!(options.codex.is_none());
     }
 }

@@ -316,12 +316,13 @@ impl Runner {
         let system_prompt = pm.render("run/system", minijinja::context!(coda_md => coda_md))?;
 
         // Create client with Coder profile, cwd = worktree
+        let resolved = config.resolve_run();
         let mut options = AgentProfile::Coder.to_options(
             &system_prompt,
             worktree_path.clone(),
             config.agent.max_turns,
             remaining_budget,
-            &config.agent.model,
+            &resolved,
         );
 
         // Enable partial messages so the SDK emits StreamEvent messages

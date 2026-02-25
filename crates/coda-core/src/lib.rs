@@ -39,10 +39,13 @@ pub mod state;
 pub mod task;
 
 pub use async_ops::{AsyncGhOps, AsyncGitOps};
-pub use config::{CodaConfig, ReasoningEffort};
+pub use config::{
+    AgentBackend, AgentsConfig, CodaConfig, OperationAgentConfig, ReasoningEffort,
+    ResolvedAgentConfig,
+};
 pub use engine::{
-    CleanedWorktree, Engine, InitEvent, commit_coda_artifacts, commit_with_hooks, emit,
-    remove_feature_logs, validate_feature_slug,
+    CleanedWorktree, Engine, InitEvent, ResolvedConfigSummary, commit_coda_artifacts,
+    commit_with_hooks, emit, remove_feature_logs, validate_feature_slug,
 };
 pub use error::CoreError;
 pub use gh::{DefaultGhOps, GhOps, PrState, PrStatus};

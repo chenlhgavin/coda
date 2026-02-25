@@ -19,6 +19,7 @@ use crate::error::ServerError;
 use crate::formatter;
 use crate::state::AppState;
 
+pub mod config;
 pub mod init;
 pub mod plan;
 pub mod query;

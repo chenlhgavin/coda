@@ -458,12 +458,13 @@ impl Engine {
 
         let phase_start = Instant::now();
 
+        let resolved = self.config.resolve_init();
         let mut options = AgentProfile::Planner.to_options(
             system_prompt,
             self.project_root.clone(),
             5, // max_turns for analysis
             self.config.agent.max_budget_usd,
-            &self.config.agent.model,
+            &resolved,
         );
         options.include_partial_messages = true;
         let mut session = AgentSession::new(
@@ -550,12 +551,13 @@ impl Engine {
 
         let phase_start = Instant::now();
 
+        let resolved = self.config.resolve_init();
         let mut options = AgentProfile::Coder.to_options(
             system_prompt,
             self.project_root.clone(),
             10, // max_turns for setup
             self.config.agent.max_budget_usd,
-            &self.config.agent.model,
+            &resolved,
         );
         options.include_partial_messages = true;
         let mut session = AgentSession::new(
@@ -899,6 +901,143 @@ impl Engine {
             pr_state: pr_status.state,
         }))
     }
+
+    // ── Config CRUD ─────────────────────────────────────────────────
+
+    /// Returns the resolved agent configuration for all four operations.
+    ///
+    /// Each row shows the effective backend, model, and effort after
+    /// merging per-operation overrides with global defaults.
+    pub fn config_show(&self) -> ResolvedConfigSummary {
+        ResolvedConfigSummary {
+            init: self.config.resolve_init(),
+            plan: self.config.resolve_plan(),
+            run: self.config.resolve_run(),
+            review: self.config.resolve_review(),
+        }
+    }
+
+    /// Reads a dot-path key from the configuration.
+    ///
+    /// Supported keys: `agents.<op>.backend`, `agents.<op>.model`,
+    /// `agents.<op>.effort`, `agent.model`, `review.engine`, etc.
+    ///
+    /// # Errors
+    ///
+    /// Returns `CoreError::ConfigError` if the key is not recognized.
+    pub fn config_get(&self, key: &str) -> Result<String, CoreError> {
+        let yaml = serde_yaml_ng::to_value(&self.config)
+            .map_err(|e| CoreError::ConfigError(format!("Failed to serialize config: {e}")))?;
+        resolve_yaml_path(&yaml, key)
+    }
+
+    /// Updates a dot-path key in the configuration file on disk.
+    ///
+    /// Loads the YAML file, updates the specified key, validates the
+    /// result can be deserialized back to [`CodaConfig`], and writes
+    /// the file. The in-memory config is **not** updated (the engine
+    /// should be recreated if the caller needs refreshed config).
+    ///
+    /// # Errors
+    ///
+    /// Returns `CoreError::ConfigError` if the key is invalid, the value
+    /// fails validation, or the file cannot be read/written.
+    pub fn config_set(&self, key: &str, value: &str) -> Result<(), CoreError> {
+        let config_path = self.project_root.join(".coda/config.yml");
+        let content = fs::read_to_string(&config_path).map_err(|e| {
+            CoreError::ConfigError(format!("Cannot read {}: {e}", config_path.display()))
+        })?;
+
+        let mut yaml: serde_yaml_ng::Value = serde_yaml_ng::from_str(&content)
+            .map_err(|e| CoreError::ConfigError(format!("Invalid YAML: {e}")))?;
+
+        set_yaml_path(&mut yaml, key, value)?;
+
+        // Validate the modified YAML can deserialize back to CodaConfig
+        let _: crate::config::CodaConfig = serde_yaml_ng::from_value(yaml.clone())
+            .map_err(|e| CoreError::ConfigError(format!("Invalid config after update: {e}")))?;
+
+        let output = serde_yaml_ng::to_string(&yaml)
+            .map_err(|e| CoreError::ConfigError(format!("Failed to serialize YAML: {e}")))?;
+        fs::write(&config_path, output).map_err(|e| {
+            CoreError::ConfigError(format!("Cannot write {}: {e}", config_path.display()))
+        })?;
+
+        info!(key, value, "Updated config");
+        Ok(())
+    }
+}
+
+/// Summary of resolved agent configurations for all operations.
+#[derive(Debug, Clone)]
+pub struct ResolvedConfigSummary {
+    /// Resolved config for `init`.
+    pub init: crate::config::ResolvedAgentConfig,
+    /// Resolved config for `plan`.
+    pub plan: crate::config::ResolvedAgentConfig,
+    /// Resolved config for `run`.
+    pub run: crate::config::ResolvedAgentConfig,
+    /// Resolved config for `review`.
+    pub review: crate::config::ResolvedAgentConfig,
+}
+
+/// Resolves a dot-path (e.g., `"agents.run.model"`) against a YAML value tree.
+fn resolve_yaml_path(yaml: &serde_yaml_ng::Value, key: &str) -> Result<String, CoreError> {
+    let parts: Vec<&str> = key.split('.').collect();
+    let mut current = yaml;
+    for part in &parts {
+        current = current
+            .get(*part)
+            .ok_or_else(|| CoreError::ConfigError(format!("Unknown config key: {key}")))?;
+    }
+    match current {
+        serde_yaml_ng::Value::Null => Ok("null".to_string()),
+        serde_yaml_ng::Value::Bool(b) => Ok(b.to_string()),
+        serde_yaml_ng::Value::Number(n) => Ok(n.to_string()),
+        serde_yaml_ng::Value::String(s) => Ok(s.clone()),
+        other => Ok(serde_yaml_ng::to_string(other).unwrap_or_else(|_| format!("{other:?}"))),
+    }
+}
+
+/// Sets a dot-path key in a YAML value tree, creating intermediate
+/// mappings as needed.
+fn set_yaml_path(yaml: &mut serde_yaml_ng::Value, key: &str, value: &str) -> Result<(), CoreError> {
+    let parts: Vec<&str> = key.split('.').collect();
+    if parts.is_empty() {
+        return Err(CoreError::ConfigError("Empty config key".to_string()));
+    }
+
+    let mut current = yaml;
+    for part in &parts[..parts.len() - 1] {
+        if !current.get(*part).is_some_and(|v| v.is_mapping()) {
+            current[*part] = serde_yaml_ng::Value::Mapping(serde_yaml_ng::Mapping::new());
+        }
+        current = current
+            .get_mut(*part)
+            .ok_or_else(|| CoreError::ConfigError(format!("Cannot traverse config key: {key}")))?;
+    }
+
+    let leaf = parts
+        .last()
+        .ok_or_else(|| CoreError::ConfigError("Empty config key".to_string()))?;
+
+    // Try to parse as bool, number, or string
+    let yaml_value = if value == "true" {
+        serde_yaml_ng::Value::Bool(true)
+    } else if value == "false" {
+        serde_yaml_ng::Value::Bool(false)
+    } else if value == "null" || value == "~" {
+        serde_yaml_ng::Value::Null
+    } else if let Ok(n) = value.parse::<i64>() {
+        serde_yaml_ng::Value::Number(n.into())
+    } else if let Ok(n) = value.parse::<f64>() {
+        serde_yaml_ng::Value::Number(serde_yaml_ng::Number::from(n))
+    } else {
+        serde_yaml_ng::Value::String(value.to_string())
+    };
+
+    current[*leaf] = yaml_value;
+    Ok(())
 }
 
 /// Result of cleaning a single worktree.
@@ -1066,13 +1205,14 @@ async fn fix_hook_errors_with_llm(
         minijinja::context!(hook_errors => hook_errors),
     )?;
 
+    let resolved = config.resolve_run();
     let options = AgentProfile::Coder.to_options(
         "You are a code formatter. Fix only the issues reported by pre-commit hooks. \
          Do not change semantic content.",
         cwd.to_path_buf(),
         3,
         config.agent.max_budget_usd,
-        &config.agent.model,
+        &resolved,
     );
 
     let mut client = AgentSdkClient::new(Some(options), None);

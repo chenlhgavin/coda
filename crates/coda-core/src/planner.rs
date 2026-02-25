@@ -119,12 +119,13 @@ impl PlanSession {
 
         let system_prompt = pm.render("plan/system", minijinja::context!(coda_md => coda_md))?;
 
+        let resolved = config.resolve_plan();
         let mut options = AgentProfile::Planner.to_options(
             &system_prompt,
             project_root.clone(),
             config.agent.max_turns,
             config.agent.max_budget_usd,
-            &config.agent.model,
+            &resolved,
         );
 
         // Enable partial messages so the SDK emits token-level text deltas,
