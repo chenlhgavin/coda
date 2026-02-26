@@ -1,64 +1,47 @@
-You are verifying a newly implemented feature against its verification plan.
+You are performing an independent verification review of a newly implemented feature.
+
+## Important Context
+
+All automated checks (build, test, lint, format) have already been executed by the system and passed. You do NOT need to re-run or re-verify them. The results are:
+
+{{ check_results }}
 
 ## Verification Plan
 
 {{ verification_spec }}
 
-## Task
+## Your Task
 
-Execute each item in the verification plan systematically:
+Evaluate the implementation for **functional correctness, design conformance, and integration soundness**. Focus only on aspects that require human judgment — automated checks are already verified.
 
-### 1. Automated Checks
+### What to Verify
 
-Run the following configured checks:
-{% for check in checks %}
-- `{{ check }}`
-{% endfor %}
+1. **Functional Correctness**: Does the implementation actually achieve what the verification plan specifies? Inspect relevant code paths and test cases.
+2. **Design Conformance**: Does the implementation match the design specification? Check type safety, error handling, API contracts.
+3. **Integration Points**: Are module boundaries and interfaces correct? Check data flow between components.
+4. **Edge Cases**: Are edge cases from the verification plan properly handled?
 
-### 2. Functional Verification
+### What NOT to Verify
 
-For each scenario in the verification plan:
-1. Set up the test conditions
-2. Execute the scenario
-3. Verify the expected outcome
-4. Record pass/fail
-
-### 3. Edge Cases
-
-Test each edge case listed in the verification plan.
-
-### 4. Integration Points
-
-Verify each integration point listed in the verification plan.
-
-## Execution Rules
-
-- Run checks in the order listed
-- If a check fails, STOP and report the failure — do NOT continue to the next check
-- For each failed check, provide:
-  - What was expected
-  - What actually happened
-  - The error output (if any)
+- Build compilation (already verified by system)
+- Test suite passing (already verified by system)
+- Lint/format compliance (already verified by system)
+- Vague qualities like "good performance" or "secure code" unless specific criteria exist
 
 ## Output Format
 
-After running all checks, respond with a YAML summary:
+Respond with a YAML block summarizing your findings:
 
 ```yaml
-result: "passed"  # or "failed"
-checks:
-  - name: "<check name>"
-    status: "passed"  # or "failed"
-    details: "<optional details>"
-
-  - name: "<check name>"
-    status: "failed"
-    details: "<what went wrong>"
-    error: |
-      <error output>
-
-failed_count: 0
-total_count: 12
+result: "passed"  # or "needs_attention"
+findings:
+  - area: "functional"
+    status: "pass"  # or "concern"
+    description: "Brief description of what was verified and the outcome"
+  - area: "design_conformance"
+    status: "concern"
+    description: "Description of the concern and what needs to change"
 ```
 
-If the result is "failed", also provide a brief analysis of what needs to be fixed and which files are likely involved.
+If result is "passed", all findings should have status "pass".
+If result is "needs_attention", at least one finding should have status "concern" with a clear, actionable description of what needs to change.

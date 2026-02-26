@@ -408,6 +408,29 @@ impl RunUi {
                     };
                 }
             }
+            RunEvent::CheckStarting {
+                command,
+                index,
+                total,
+            } => {
+                let label = format!("[{}/{}] {command} ...", index + 1, total);
+                tui_widgets::append_tool_activity(&mut self.content_lines, "[check]", &label);
+                if self.auto_scroll {
+                    self.scroll_offset = self.max_scroll_offset();
+                }
+            }
+            RunEvent::CheckCompleted {
+                command,
+                passed,
+                duration,
+            } => {
+                let status = if passed { "PASSED" } else { "FAILED" };
+                let label = format!("{command}: {status} ({:.1}s)", duration.as_secs_f64());
+                tui_widgets::append_tool_activity(&mut self.content_lines, "[check]", &label);
+                if self.auto_scroll {
+                    self.scroll_offset = self.max_scroll_offset();
+                }
+            }
             RunEvent::CreatingPr => {
                 self.pr_status = PrDisplayStatus::Creating;
             }

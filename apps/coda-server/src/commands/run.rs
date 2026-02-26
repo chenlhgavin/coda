@@ -645,7 +645,10 @@ async fn consume_run_events(
                         streamer.on_phase_failed(error).await;
                         true
                     }
-                    RunEvent::ReviewRound { .. } | RunEvent::VerifyAttempt { .. } => true,
+                    RunEvent::ReviewRound { .. }
+                    | RunEvent::VerifyAttempt { .. }
+                    | RunEvent::CheckStarting { .. }
+                    | RunEvent::CheckCompleted { .. } => true,
                     RunEvent::CreatingPr => {
                         tracker.phases.push(RunPhaseDisplay {
                             name: "create-pr".to_string(),

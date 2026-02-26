@@ -6,34 +6,24 @@ Based on the following design specification, generate a verification plan.
 
 ## Pre-configured Checks
 
-The following checks are configured for this project:
+The following checks are executed automatically by the system (do NOT include these in the verification plan — they are run as real subprocesses with real exit codes):
 {% for check in checks %}
 - `{{ check }}`
 {% endfor %}
 
 ## Output Format
 
-Generate a Markdown document with the following structure:
+Generate a Markdown document with the following structure. Focus on verification that **requires judgment** — the automated checks above are handled separately by the system.
 
 ```markdown
 # Verification Plan: {{ feature_slug }}
 
-## Automated Checks
-<List of automated checks that must pass>
-
-- [ ] All pre-configured checks pass:
-{% for check in checks %}
-  - [ ] `{{ check }}`
-{% endfor %}
-- [ ] All new tests pass
-- [ ] No regression in existing tests
-- [ ] Code coverage is maintained or improved
-
 ## Functional Verification
 <Specific scenarios to verify the feature works correctly>
+<Each scenario must specify HOW to verify: which test to run, which code path to inspect, or which command to execute>
 
 - [ ] Scenario 1: <description>
-  - Input: <what to provide>
+  - Verify by: <specific test name, code path, or command>
   - Expected: <what should happen>
 
 - [ ] Scenario 2: <description>
@@ -41,26 +31,32 @@ Generate a Markdown document with the following structure:
 
 ## Edge Cases
 <Edge cases and error conditions to verify>
+<Each must be tied to a specific test or code path>
 
 - [ ] <edge case 1>
+  - Verify by: <test name or code inspection>
 - [ ] <edge case 2>
 
 ## Integration Points
 <Verify integration with existing components>
+<Focus on interfaces, API contracts, and data flow between modules>
 
 - [ ] <integration check 1>
 - [ ] <integration check 2>
 
-## Performance (if applicable)
-<Any performance criteria to verify>
+## Design Conformance
+<Verify the implementation matches the design specification>
+<Check type safety, error handling patterns, API contracts>
 
-## Security (if applicable)
-<Security considerations to verify>
+- [ ] <conformance check 1>
+- [ ] <conformance check 2>
 ```
 
 ## Guidelines
 
-- Focus on behavioral verification, not implementation details
-- Each check should be independently verifiable
+- Do NOT include automated checks (build, test, lint, format) — these are run by the system
+- Focus on behavioral verification that requires judgment
+- Each check must specify a concrete verification method (test name, code path, command)
+- Do NOT include vague items like "Performance is acceptable" or "Security is adequate" unless the design spec defines specific measurable criteria
 - Include both happy path and error cases
 - Prioritize checks by importance (critical checks first)

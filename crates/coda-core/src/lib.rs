@@ -20,6 +20,7 @@
 //! - [`FeatureState`](state::FeatureState) tracks execution progress in `state.yml`
 
 pub mod async_ops;
+pub mod check_runner;
 pub mod codex;
 pub mod config;
 mod engine;

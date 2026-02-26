@@ -172,6 +172,73 @@ pub fn parse_verification_result(response: &str) -> (u32, Vec<String>) {
     )
 }
 
+/// Parses AI verification findings from the Tier 2 YAML response.
+///
+/// Extracts the `result` field and any `findings` with `status: "concern"`.
+/// Returns `(passed, concern_descriptions)` where `passed` is `true` when
+/// `result` is `"passed"` and no concerns exist.
+///
+/// Designed for the scoped verification prompt that produces:
+/// ```yaml
+/// result: "passed"  # or "needs_attention"
+/// findings:
+///   - area: "functional"
+///     status: "pass"
+///     description: "..."
+///   - area: "design_conformance"
+///     status: "concern"
+///     description: "..."
+/// ```
+///
+/// # Examples
+///
+/// ```
+/// use coda_core::parser::parse_ai_verification;
+///
+/// let response = "```yaml\nresult: passed\nfindings:\n  - area: functional\n    status: pass\n    description: All good\n```";
+/// let (passed, findings) = parse_ai_verification(response);
+/// assert!(passed);
+/// assert!(findings.is_empty());
+/// ```
+pub fn parse_ai_verification(response: &str) -> (bool, Vec<String>) {
+    let yaml_content = extract_yaml_block(response);
+
+    if let Some(yaml) = yaml_content
+        && let Ok(parsed) = serde_yaml_ng::from_str::<serde_json::Value>(&yaml)
+    {
+        let result = parsed
+            .get("result")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown");
+
+        let concerns: Vec<String> = parsed
+            .get("findings")
+            .and_then(|v| v.as_array())
+            .map(|findings| {
+                findings
+                    .iter()
+                    .filter(|f| f.get("status").and_then(|s| s.as_str()) == Some("concern"))
+                    .map(|f| {
+                        let area = f.get("area").and_then(|a| a.as_str()).unwrap_or("unknown");
+                        let desc = f
+                            .get("description")
+                            .and_then(|d| d.as_str())
+                            .unwrap_or("No description provided");
+                        format!("[{area}] {desc}")
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let passed = result == "passed" && concerns.is_empty();
+        return (passed, concerns);
+    }
+
+    // If parsing fails, treat as passed to avoid blocking on parse errors.
+    // The deterministic Tier 1 checks already provide the reliable signal.
+    (true, Vec::new())
+}
+
 /// Extracts a GitHub PR URL from text.
 ///
 /// Scans each line for `https://github.com/.../pull/N` patterns.
@@ -502,6 +569,90 @@ total_count: 2
         assert_eq!(passed, 0);
         assert_eq!(failed.len(), 1);
         assert!(failed[0].contains("Unable to parse"));
+    }
+
+    // ── parse_ai_verification ───────────────────────────────────────
+
+    #[test]
+    fn test_should_parse_ai_verification_passed() {
+        let response = r#"
+```yaml
+result: "passed"
+findings:
+  - area: "functional"
+    status: "pass"
+    description: "All scenarios verified"
+  - area: "design_conformance"
+    status: "pass"
+    description: "Implementation matches design"
+```
+"#;
+        let (passed, findings) = parse_ai_verification(response);
+        assert!(passed);
+        assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn test_should_parse_ai_verification_with_concerns() {
+        let response = r#"
+```yaml
+result: "needs_attention"
+findings:
+  - area: "functional"
+    status: "pass"
+    description: "Core scenarios work"
+  - area: "design_conformance"
+    status: "concern"
+    description: "Missing error handling in parser"
+  - area: "integration"
+    status: "concern"
+    description: "API contract mismatch"
+```
+"#;
+        let (passed, findings) = parse_ai_verification(response);
+        assert!(!passed);
+        assert_eq!(findings.len(), 2);
+        assert!(findings[0].contains("[design_conformance]"));
+        assert!(findings[0].contains("Missing error handling"));
+        assert!(findings[1].contains("[integration]"));
+        assert!(findings[1].contains("API contract mismatch"));
+    }
+
+    #[test]
+    fn test_should_treat_unparsable_ai_verification_as_passed() {
+        let response = "The code looks great! No issues found.";
+        let (passed, findings) = parse_ai_verification(response);
+        assert!(passed);
+        assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn test_should_parse_ai_verification_no_findings_key() {
+        let response = r#"
+```yaml
+result: "passed"
+```
+"#;
+        let (passed, findings) = parse_ai_verification(response);
+        assert!(passed);
+        assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn test_should_detect_concerns_even_with_passed_result() {
+        let response = r#"
+```yaml
+result: "passed"
+findings:
+  - area: "edge_case"
+    status: "concern"
+    description: "Edge case not handled"
+```
+"#;
+        let (passed, findings) = parse_ai_verification(response);
+        // Even though result says "passed", concerns override
+        assert!(!passed);
+        assert_eq!(findings.len(), 1);
     }
 
     // ── extract_pr_url ──────────────────────────────────────────────

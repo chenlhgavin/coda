@@ -433,6 +433,8 @@ pub struct ConfigKeyDescriptor {
 /// let config = VerifyConfig::default();
 /// assert_eq!(config.max_verify_retries, 3);
 /// assert!(!config.fail_on_max_attempts);
+/// assert!(config.ai_verification);
+/// assert_eq!(config.check_timeout_secs, 600);
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -450,6 +452,32 @@ pub struct VerifyConfig {
     /// Backward-compatible with the legacy `max_retries` key via serde alias.
     #[serde(alias = "max_retries")]
     pub max_verify_retries: u32,
+
+    /// Whether to run AI-assisted verification (Tier 2) after all
+    /// deterministic checks pass.
+    ///
+    /// When `true` (default), a Codex session evaluates functional
+    /// correctness, design conformance, and integration points.
+    /// Set to `false` to rely solely on the configured `checks`.
+    #[serde(default = "default_true")]
+    pub ai_verification: bool,
+
+    /// Per-command timeout in seconds for deterministic checks.
+    ///
+    /// Defaults to 600 seconds (10 minutes). Commands exceeding this
+    /// timeout are killed and reported as failed.
+    #[serde(default = "default_check_timeout")]
+    pub check_timeout_secs: u64,
+}
+
+/// Default value helper for `ai_verification`.
+const fn default_true() -> bool {
+    true
+}
+
+/// Default value helper for `check_timeout_secs`.
+const fn default_check_timeout() -> u64 {
+    600
 }
 
 impl Default for VerifyConfig {
@@ -457,6 +485,8 @@ impl Default for VerifyConfig {
         Self {
             fail_on_max_attempts: false,
             max_verify_retries: 3,
+            ai_verification: true,
+            check_timeout_secs: 600,
         }
     }
 }
