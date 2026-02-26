@@ -99,48 +99,22 @@ Create the file `{{ project_root }}/.coda/config.yml`. Based on the detected tec
 # CODA Project Configuration
 version: 1
 
-agent:
-  model: "claude-opus-4-6"
-  permission_mode: "auto"
-  max_retries: 3
+checks:
+  # Determine appropriate checks from the detected tech stack.
+  # Examples:
+  #   Rust: cargo build, cargo +nightly fmt -- --check, cargo clippy -- -D warnings
+  #   Node: npm run build, npm run lint, npm test
+  #   Python: ruff check, mypy, pytest
+  - "<fill based on tech stack>"
 
-# Per-operation agent backend overrides.
-# Each operation can independently set backend (claude/codex/cursor), model, and effort.
-# Omitted fields inherit from agent.model (for claude/cursor) or review.codex_model (for codex).
 agents:
-  init:
-    backend: claude
-    model: "claude-opus-4-6"
-  plan:
-    backend: claude
-    model: "claude-sonnet-4-6"
   run:
     backend: claude
-    model: "claude-opus-4-6"
+    model: "claude-sonnet-4-6"
   review:
     backend: codex
     model: "gpt-5.3-codex"
     effort: "high"
-
-git:
-  auto_commit: true
-  squash_before_push: true
-  branch_prefix: "feature"
-  commit_prefix: "feat"
-
-review:
-  enabled: true
-  engine: codex
-  codex_model: "gpt-5.3-codex"
-  codex_reasoning_effort: "high"
-  checks:
-    # Determine appropriate checks from the detected tech stack.
-    # Examples:
-    #   Rust: cargo build, cargo +nightly fmt -- --check, cargo clippy -- -D warnings
-    #   Node: npm run build, npm run lint, npm test
-    #   Python: ruff check, mypy, pytest
-    - "<fill based on tech stack>"
-  max_review_rounds: 5
 ```
 
 ### 4. Update `.gitignore`

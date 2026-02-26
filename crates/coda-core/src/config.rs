@@ -63,6 +63,7 @@ pub struct CodaConfig {
     /// independently specify a backend, model, and effort level. Unset
     /// fields inherit from global defaults (`agent.model`) or legacy
     /// review fields.
+    #[serde(skip_serializing_if = "AgentsConfig::is_empty")]
     pub agents: AgentsConfig,
 }
 
@@ -548,11 +549,21 @@ impl Default for ReviewConfig {
 #[serde(default)]
 pub struct OperationAgentConfig {
     /// Which backend CLI to use for this operation.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub backend: Option<AgentBackend>,
     /// Model identifier override for this operation.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
     /// Reasoning effort override for this operation.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub effort: Option<ReasoningEffort>,
+}
+
+impl OperationAgentConfig {
+    /// Returns `true` when all fields are `None` (no overrides set).
+    fn is_empty(&self) -> bool {
+        self.backend.is_none() && self.model.is_none() && self.effort.is_none()
+    }
 }
 
 /// Container for per-operation agent overrides.
@@ -574,15 +585,31 @@ pub struct OperationAgentConfig {
 #[serde(default)]
 pub struct AgentsConfig {
     /// Overrides for the `init` operation (analyze + setup phases).
+    #[serde(skip_serializing_if = "OperationAgentConfig::is_empty")]
     pub init: OperationAgentConfig,
     /// Overrides for the `plan` operation (interactive planning).
+    #[serde(skip_serializing_if = "OperationAgentConfig::is_empty")]
     pub plan: OperationAgentConfig,
     /// Overrides for the `run` operation (dev phases execution).
+    #[serde(skip_serializing_if = "OperationAgentConfig::is_empty")]
     pub run: OperationAgentConfig,
     /// Overrides for the `review` operation (code review phase).
+    #[serde(skip_serializing_if = "OperationAgentConfig::is_empty")]
     pub review: OperationAgentConfig,
     /// Overrides for the `verify` operation (build/format/lint/test checks).
+    #[serde(skip_serializing_if = "OperationAgentConfig::is_empty")]
     pub verify: OperationAgentConfig,
+}
+
+impl AgentsConfig {
+    /// Returns `true` when every operation has no overrides.
+    fn is_empty(&self) -> bool {
+        self.init.is_empty()
+            && self.plan.is_empty()
+            && self.run.is_empty()
+            && self.review.is_empty()
+            && self.verify.is_empty()
+    }
 }
 
 /// Fully resolved agent configuration for a single operation.
