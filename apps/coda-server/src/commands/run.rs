@@ -141,11 +141,20 @@ async fn run_feature_task(
         "engine.run() completed"
     );
 
-    // Wait for event consumer to finish processing remaining events
-    let pr_url = match event_handle.await {
-        Ok(url) => url,
-        Err(e) => {
+    // Wait for event consumer to finish processing remaining events.
+    // Bounded timeout prevents hanging if a leaked sender clone
+    // (e.g. from an orphaned stderr reader task) keeps the channel open.
+    let pr_url = match tokio::time::timeout(Duration::from_secs(10), event_handle).await {
+        Ok(Ok(url)) => url,
+        Ok(Err(e)) => {
             warn!(error = %e, "Run event consumer task panicked");
+            None
+        }
+        Err(_) => {
+            warn!(
+                slug,
+                "Run event consumer did not finish within 10s, proceeding"
+            );
             None
         }
     };

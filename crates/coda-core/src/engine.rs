@@ -489,6 +489,7 @@ impl Engine {
 
         session.connect().await?;
         let result = session.send(&analyze_prompt, None).await;
+        session.clear_event_sender();
         session.disconnect().await;
         let resp = result?;
 
@@ -582,6 +583,7 @@ impl Engine {
 
         session.connect().await?;
         let result = session.send(&setup_prompt, None).await;
+        session.clear_event_sender();
         session.disconnect().await;
         let resp = result?;
 

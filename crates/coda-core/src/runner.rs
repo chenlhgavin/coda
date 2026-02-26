@@ -462,6 +462,14 @@ impl Runner {
                 .emit_event(RunEvent::RunFinished { success: false });
         }
 
+        // Clear the session event sender BEFORE disconnect so the
+        // spawned SessionEvent→RunEvent forwarder task (Runner::new line 360)
+        // observes channel closure and terminates promptly, dropping its
+        // clone of progress_tx. Without this, a slow/timed-out disconnect
+        // leaves the forwarder alive, keeping the RunEvent channel open
+        // and blocking the event consumer in run_feature_task.
+        self.ctx.session.clear_event_sender();
+
         // Always disconnect the agent session to clean up the
         // subprocess, even on error or cancellation paths.
         self.ctx.session.disconnect().await;

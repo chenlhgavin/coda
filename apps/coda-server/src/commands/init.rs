@@ -136,11 +136,16 @@ async fn run_init_task(
         "engine.init() completed"
     );
 
-    // Wait for event consumer to finish and retrieve accumulated phase state
-    let display_phases = match event_handle.await {
-        Ok(phases) => phases,
-        Err(e) => {
+    // Wait for event consumer to finish and retrieve accumulated phase state.
+    // Bounded timeout prevents hanging if a leaked sender clone keeps the channel open.
+    let display_phases = match tokio::time::timeout(Duration::from_secs(10), event_handle).await {
+        Ok(Ok(phases)) => phases,
+        Ok(Err(e)) => {
             warn!(error = %e, "Init event consumer task panicked");
+            Vec::new()
+        }
+        Err(_) => {
+            warn!("Init event consumer did not finish within 10s, proceeding");
             Vec::new()
         }
     };
