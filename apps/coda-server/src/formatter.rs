@@ -25,6 +25,24 @@ pub const CONFIG_KEY_SELECT_ACTION: &str = "coda_config_key_select";
 /// Action ID for the config value select dropdown.
 pub const CONFIG_VALUE_SELECT_ACTION: &str = "coda_config_value_select";
 
+/// Action ID for the init start button (proceed with current config).
+pub const INIT_START_ACTION: &str = "coda_init_start";
+
+/// Action ID for the init modify button (enter config modification flow).
+pub const INIT_MODIFY_ACTION: &str = "coda_init_modify";
+
+/// Action ID for the init operation select dropdown.
+pub const INIT_OP_SELECT_ACTION: &str = "coda_init_op_select";
+
+/// Action ID for the init backend select dropdown.
+pub const INIT_BACKEND_SELECT_ACTION: &str = "coda_init_backend_select";
+
+/// Action ID for the init model select dropdown.
+pub const INIT_MODEL_SELECT_ACTION: &str = "coda_init_model_select";
+
+/// Action ID for the init effort select dropdown.
+pub const INIT_EFFORT_SELECT_ACTION: &str = "coda_init_effort_select";
+
 /// Serializable representation of a clean candidate for button payloads.
 ///
 /// Encoded as JSON in the clean confirm button's `value` field and
@@ -1213,6 +1231,260 @@ fn config_value_dropdown(key: &str, label: &str, options: &[String]) -> Vec<serd
     ]
 }
 
+// ---------------------------------------------------------------------------
+// Init config interactive flow formatters
+// ---------------------------------------------------------------------------
+
+/// Builds a config preview table with Start/Modify buttons for the init flow.
+///
+/// Shows the resolved config for all operations (init/plan/run/review/verify)
+/// and two action buttons: "Start Init" and "Modify Settings".
+pub fn init_config_preview(
+    summary: &coda_core::ResolvedConfigSummary,
+    force: bool,
+) -> Vec<serde_json::Value> {
+    let force_str = if force { "true" } else { "false" };
+
+    let rows: Vec<String> = [
+        ("init", &summary.init),
+        ("plan", &summary.plan),
+        ("run", &summary.run),
+        ("review", &summary.review),
+        ("verify", &summary.verify),
+    ]
+    .iter()
+    .map(|(name, resolved)| {
+        format!(
+            "  {:<10} {:<10} {:<26} {}",
+            name, resolved.backend, resolved.model, resolved.effort,
+        )
+    })
+    .collect();
+
+    let table_header = format!(
+        "  {:<10} {:<10} {:<26} {}",
+        "Operation", "Backend", "Model", "Effort"
+    );
+    let separator = format!("  {}", "─".repeat(56));
+    let table = format!("```\n{table_header}\n{separator}\n{}\n```", rows.join("\n"));
+
+    vec![
+        header("Init — Config Preview"),
+        section(&table),
+        serde_json::json!({
+            "type": "actions",
+            "elements": [
+                {
+                    "type": "button",
+                    "text": { "type": "plain_text", "text": "Start Init" },
+                    "action_id": INIT_START_ACTION,
+                    "value": force_str,
+                    "style": "primary",
+                },
+                {
+                    "type": "button",
+                    "text": { "type": "plain_text", "text": "Modify Settings" },
+                    "action_id": INIT_MODIFY_ACTION,
+                    "value": force_str,
+                },
+            ],
+        }),
+    ]
+}
+
+/// Builds an operation select dropdown for the init config modification flow.
+///
+/// Each option shows the operation name with its current backend/model/effort
+/// inline. The selected value encodes `"{op}|{force}"` for the next step.
+pub fn init_config_op_select(
+    summaries: &[coda_core::OperationSummary],
+    force: bool,
+) -> Vec<serde_json::Value> {
+    let force_str = if force { "true" } else { "false" };
+
+    let options: Vec<serde_json::Value> = summaries
+        .iter()
+        .map(|op| {
+            let desc = format!("{} / {} / {}", op.backend, op.model, op.effort);
+            serde_json::json!({
+                "text": { "type": "plain_text", "text": &op.label },
+                "description": { "type": "plain_text", "text": truncate_str(&desc, SELECT_OPTION_TEXT_MAX) },
+                "value": format!("{}|{force_str}", op.name),
+            })
+        })
+        .collect();
+
+    vec![
+        header("Init — Select Operation"),
+        serde_json::json!({
+            "type": "actions",
+            "elements": [{
+                "type": "static_select",
+                "placeholder": { "type": "plain_text", "text": "Select an operation..." },
+                "action_id": INIT_OP_SELECT_ACTION,
+                "options": options,
+            }],
+        }),
+        context("_Select an operation to configure its backend, model, and effort_"),
+    ]
+}
+
+/// Builds a backend select dropdown for the init config modification flow.
+///
+/// The selected value encodes `"{op}|{backend}|{force}"` for the next step.
+pub fn init_config_backend_select(
+    op: &str,
+    options: &[String],
+    current: &str,
+    force: bool,
+) -> Vec<serde_json::Value> {
+    let force_str = if force { "true" } else { "false" };
+
+    let select_options: Vec<serde_json::Value> = options
+        .iter()
+        .map(|backend| {
+            serde_json::json!({
+                "text": { "type": "plain_text", "text": backend },
+                "value": format!("{op}|{backend}|{force_str}"),
+            })
+        })
+        .collect();
+
+    let initial_option = options.iter().position(|b| b == current).map(|idx| {
+        serde_json::json!({
+            "text": { "type": "plain_text", "text": &options[idx] },
+            "value": format!("{op}|{}|{force_str}", options[idx]),
+        })
+    });
+
+    let mut select = serde_json::json!({
+        "type": "static_select",
+        "placeholder": { "type": "plain_text", "text": "Select backend..." },
+        "action_id": INIT_BACKEND_SELECT_ACTION,
+        "options": select_options,
+    });
+    if let Some(initial) = initial_option {
+        select["initial_option"] = initial;
+    }
+
+    vec![
+        header(&format!("Init — {op} Backend")),
+        serde_json::json!({
+            "type": "actions",
+            "elements": [select],
+        }),
+        context(&format!("_Current: `{current}`_")),
+    ]
+}
+
+/// Builds a model select dropdown for the init config modification flow.
+///
+/// The selected value encodes `"{op}|{backend}|{model}|{force}"` for the
+/// next step. Includes a hint about using `/coda config set` for custom models.
+pub fn init_config_model_select(
+    op: &str,
+    backend: &str,
+    suggestions: &[String],
+    current: &str,
+    force: bool,
+) -> Vec<serde_json::Value> {
+    let force_str = if force { "true" } else { "false" };
+
+    let select_options: Vec<serde_json::Value> = suggestions
+        .iter()
+        .map(|model| {
+            serde_json::json!({
+                "text": { "type": "plain_text", "text": truncate_str(model, SELECT_OPTION_TEXT_MAX) },
+                "value": format!("{op}|{backend}|{model}|{force_str}"),
+            })
+        })
+        .collect();
+
+    let initial_option = suggestions
+        .iter()
+        .position(|m| m == current)
+        .map(|idx| {
+            serde_json::json!({
+                "text": { "type": "plain_text", "text": truncate_str(&suggestions[idx], SELECT_OPTION_TEXT_MAX) },
+                "value": format!("{op}|{backend}|{}|{force_str}", suggestions[idx]),
+            })
+        });
+
+    let mut select = serde_json::json!({
+        "type": "static_select",
+        "placeholder": { "type": "plain_text", "text": "Select model..." },
+        "action_id": INIT_MODEL_SELECT_ACTION,
+        "options": select_options,
+    });
+    if let Some(initial) = initial_option {
+        select["initial_option"] = initial;
+    }
+
+    vec![
+        header(&format!("Init — {op} Model")),
+        serde_json::json!({
+            "type": "actions",
+            "elements": [select],
+        }),
+        context(&format!(
+            "_Current: `{current}` · For custom models use `/coda config set agents.{op}.model <name>`_"
+        )),
+    ]
+}
+
+/// Builds an effort select dropdown for the init config modification flow.
+///
+/// The selected value encodes `"{op}|{backend}|{model}|{effort}|{force}"`
+/// which triggers the batch config apply at the interaction handler.
+pub fn init_config_effort_select(
+    op: &str,
+    backend: &str,
+    model: &str,
+    options: &[String],
+    current: &str,
+    force: bool,
+) -> Vec<serde_json::Value> {
+    let force_str = if force { "true" } else { "false" };
+
+    let select_options: Vec<serde_json::Value> = options
+        .iter()
+        .map(|effort| {
+            serde_json::json!({
+                "text": { "type": "plain_text", "text": effort },
+                "value": format!("{op}|{backend}|{model}|{effort}|{force_str}"),
+            })
+        })
+        .collect();
+
+    let initial_option = options.iter().position(|e| e == current).map(|idx| {
+        serde_json::json!({
+            "text": { "type": "plain_text", "text": &options[idx] },
+            "value": format!("{op}|{backend}|{model}|{}|{force_str}", options[idx]),
+        })
+    });
+
+    let mut select = serde_json::json!({
+        "type": "static_select",
+        "placeholder": { "type": "plain_text", "text": "Select effort..." },
+        "action_id": INIT_EFFORT_SELECT_ACTION,
+        "options": select_options,
+    });
+    if let Some(initial) = initial_option {
+        select["initial_option"] = initial;
+    }
+
+    vec![
+        header(&format!("Init — {op} Effort")),
+        serde_json::json!({
+            "type": "actions",
+            "elements": [select],
+        }),
+        context(&format!(
+            "_Current: `{current}` · Backend: `{backend}` · Model: `{model}`_"
+        )),
+    ]
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::{Path, PathBuf};
@@ -2170,5 +2442,231 @@ mod tests {
         assert_eq!(blocks.len(), 2);
         let text = blocks[0]["text"]["text"].as_str().unwrap_or("");
         assert!(text.contains("feature"));
+    }
+
+    // -----------------------------------------------------------------------
+    // Init config preview & modification flow tests
+    // -----------------------------------------------------------------------
+
+    fn make_resolved_config_summary() -> coda_core::ResolvedConfigSummary {
+        use coda_core::config::{AgentBackend, ReasoningEffort};
+
+        coda_core::ResolvedConfigSummary {
+            init: coda_core::ResolvedAgentConfig {
+                backend: AgentBackend::Claude,
+                model: "claude-opus-4-6".to_string(),
+                effort: ReasoningEffort::High,
+            },
+            plan: coda_core::ResolvedAgentConfig {
+                backend: AgentBackend::Claude,
+                model: "claude-opus-4-6".to_string(),
+                effort: ReasoningEffort::High,
+            },
+            run: coda_core::ResolvedAgentConfig {
+                backend: AgentBackend::Claude,
+                model: "claude-opus-4-6".to_string(),
+                effort: ReasoningEffort::High,
+            },
+            review: coda_core::ResolvedAgentConfig {
+                backend: AgentBackend::Codex,
+                model: "gpt-5.3-codex".to_string(),
+                effort: ReasoningEffort::High,
+            },
+            verify: coda_core::ResolvedAgentConfig {
+                backend: AgentBackend::Codex,
+                model: "gpt-5.3-codex".to_string(),
+                effort: ReasoningEffort::High,
+            },
+        }
+    }
+
+    fn make_operation_summaries() -> Vec<coda_core::OperationSummary> {
+        let backend_opts = vec![
+            "claude".to_string(),
+            "codex".to_string(),
+            "cursor".to_string(),
+        ];
+        let effort_opts = vec![
+            "low".to_string(),
+            "medium".to_string(),
+            "high".to_string(),
+            "max".to_string(),
+        ];
+
+        vec![
+            coda_core::OperationSummary {
+                name: "init".to_string(),
+                label: "Init".to_string(),
+                backend: "claude".to_string(),
+                model: "claude-opus-4-6".to_string(),
+                effort: "high".to_string(),
+                backend_options: backend_opts.clone(),
+                model_suggestions: vec!["claude-opus-4-6".to_string()],
+                effort_options: effort_opts.clone(),
+            },
+            coda_core::OperationSummary {
+                name: "run".to_string(),
+                label: "Run".to_string(),
+                backend: "codex".to_string(),
+                model: "gpt-5.3-codex".to_string(),
+                effort: "high".to_string(),
+                backend_options: backend_opts,
+                model_suggestions: vec!["gpt-5.3-codex".to_string()],
+                effort_options: effort_opts,
+            },
+        ]
+    }
+
+    #[test]
+    fn test_should_build_init_config_preview_with_start_and_modify_buttons() {
+        let summary = make_resolved_config_summary();
+        let blocks = init_config_preview(&summary, false);
+
+        // header + section (table) + actions
+        assert_eq!(blocks.len(), 3);
+        assert_eq!(blocks[0]["type"], "header");
+        assert_eq!(blocks[1]["type"], "section");
+        assert_eq!(blocks[2]["type"], "actions");
+
+        // Verify both buttons exist with correct action IDs
+        let elements = blocks[2]["elements"].as_array().unwrap();
+        assert_eq!(elements.len(), 2);
+        assert_eq!(elements[0]["action_id"], INIT_START_ACTION);
+        assert_eq!(elements[1]["action_id"], INIT_MODIFY_ACTION);
+
+        // Verify force flag is encoded in button values
+        assert_eq!(elements[0]["value"], "false");
+        assert_eq!(elements[1]["value"], "false");
+    }
+
+    #[test]
+    fn test_should_encode_force_true_in_init_config_preview() {
+        let summary = make_resolved_config_summary();
+        let blocks = init_config_preview(&summary, true);
+
+        let elements = blocks[2]["elements"].as_array().unwrap();
+        assert_eq!(elements[0]["value"], "true");
+        assert_eq!(elements[1]["value"], "true");
+    }
+
+    #[test]
+    fn test_should_include_all_operations_in_config_preview_table() {
+        let summary = make_resolved_config_summary();
+        let blocks = init_config_preview(&summary, false);
+
+        let table_text = blocks[1]["text"]["text"].as_str().unwrap();
+        for op in &["init", "plan", "run", "review", "verify"] {
+            assert!(table_text.contains(op), "Table should contain '{op}'");
+        }
+    }
+
+    #[test]
+    fn test_should_build_init_config_op_select_with_dropdown() {
+        let summaries = make_operation_summaries();
+        let blocks = init_config_op_select(&summaries, false);
+
+        // header + actions + context
+        assert_eq!(blocks.len(), 3);
+        assert_eq!(blocks[0]["type"], "header");
+        assert_eq!(blocks[1]["type"], "actions");
+
+        let select = &blocks[1]["elements"][0];
+        assert_eq!(select["action_id"], INIT_OP_SELECT_ACTION);
+
+        let options = select["options"].as_array().unwrap();
+        assert_eq!(options.len(), 2);
+
+        // Verify pipe-delimited encoding: "{op}|{force}"
+        assert_eq!(options[0]["value"], "init|false");
+        assert_eq!(options[1]["value"], "run|false");
+    }
+
+    #[test]
+    fn test_should_build_init_config_backend_select() {
+        let options = vec![
+            "claude".to_string(),
+            "codex".to_string(),
+            "cursor".to_string(),
+        ];
+        let blocks = init_config_backend_select("run", &options, "codex", true);
+
+        assert_eq!(blocks.len(), 3);
+        let select = &blocks[1]["elements"][0];
+        assert_eq!(select["action_id"], INIT_BACKEND_SELECT_ACTION);
+
+        let select_opts = select["options"].as_array().unwrap();
+        assert_eq!(select_opts.len(), 3);
+
+        // Verify pipe-delimited encoding: "{op}|{backend}|{force}"
+        assert_eq!(select_opts[0]["value"], "run|claude|true");
+        assert_eq!(select_opts[1]["value"], "run|codex|true");
+        assert_eq!(select_opts[2]["value"], "run|cursor|true");
+
+        // Verify initial_option is set to current value
+        let initial = &select["initial_option"];
+        assert_eq!(initial["value"], "run|codex|true");
+    }
+
+    #[test]
+    fn test_should_build_init_config_model_select() {
+        let suggestions = vec!["gpt-5.3-codex".to_string(), "gpt-4.1".to_string()];
+        let blocks = init_config_model_select("run", "codex", &suggestions, "gpt-5.3-codex", false);
+
+        assert_eq!(blocks.len(), 3);
+        let select = &blocks[1]["elements"][0];
+        assert_eq!(select["action_id"], INIT_MODEL_SELECT_ACTION);
+
+        let select_opts = select["options"].as_array().unwrap();
+        assert_eq!(select_opts.len(), 2);
+
+        // Verify pipe-delimited encoding: "{op}|{backend}|{model}|{force}"
+        assert_eq!(select_opts[0]["value"], "run|codex|gpt-5.3-codex|false");
+        assert_eq!(select_opts[1]["value"], "run|codex|gpt-4.1|false");
+
+        // Verify custom model hint in context
+        let ctx = blocks[2]["elements"][0]["text"].as_str().unwrap();
+        assert!(ctx.contains("/coda config set"));
+    }
+
+    #[test]
+    fn test_should_build_init_config_effort_select() {
+        let options = vec![
+            "low".to_string(),
+            "medium".to_string(),
+            "high".to_string(),
+            "max".to_string(),
+        ];
+        let blocks =
+            init_config_effort_select("run", "codex", "gpt-5.3-codex", &options, "high", true);
+
+        assert_eq!(blocks.len(), 3);
+        let select = &blocks[1]["elements"][0];
+        assert_eq!(select["action_id"], INIT_EFFORT_SELECT_ACTION);
+
+        let select_opts = select["options"].as_array().unwrap();
+        assert_eq!(select_opts.len(), 4);
+
+        // Verify pipe-delimited encoding: "{op}|{backend}|{model}|{effort}|{force}"
+        assert_eq!(select_opts[0]["value"], "run|codex|gpt-5.3-codex|low|true");
+        assert_eq!(select_opts[2]["value"], "run|codex|gpt-5.3-codex|high|true");
+
+        // Verify initial_option is set to current value
+        let initial = &select["initial_option"];
+        assert_eq!(initial["value"], "run|codex|gpt-5.3-codex|high|true");
+
+        // Verify context shows backend and model info
+        let ctx = blocks[2]["elements"][0]["text"].as_str().unwrap();
+        assert!(ctx.contains("codex"));
+        assert!(ctx.contains("gpt-5.3-codex"));
+    }
+
+    #[test]
+    fn test_should_handle_no_initial_option_when_current_not_in_list() {
+        let options = vec!["claude".to_string(), "codex".to_string()];
+        let blocks = init_config_backend_select("run", &options, "unknown-backend", false);
+
+        let select = &blocks[1]["elements"][0];
+        // initial_option should not be present when current isn't in the list
+        assert!(select.get("initial_option").is_none());
     }
 }

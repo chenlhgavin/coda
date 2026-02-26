@@ -7,6 +7,11 @@
 //! Phase transitions (`PhaseStarting`, `PhaseCompleted`, `PhaseFailed`)
 //! trigger an immediate `chat.update`. High-frequency events
 //! (`StreamText`) are batched with updates at most every 3 seconds.
+//!
+//! Before launching init, the handler posts a config preview message
+//! with Start/Modify buttons so the user can review and optionally
+//! adjust operation settings (backend, model, effort) via interactive
+//! dropdowns — matching the CLI's interactive config flow.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -28,15 +33,15 @@ const UPDATE_DEBOUNCE: Duration = Duration::from_secs(3);
 
 /// Handles `/coda init`.
 ///
-/// Resolves the channel binding, checks for duplicate tasks, posts an
-/// initial progress message, then spawns a background task that drives
-/// the init pipeline and updates the Slack message in real time.
+/// Resolves the channel binding, creates an Engine, and posts a config
+/// preview message with Start/Modify buttons. The actual init launch
+/// is deferred to [`start_init`] which is triggered by the interaction
+/// handler when the user clicks "Start Init".
 ///
 /// # Errors
 ///
-/// Returns `ServerError` if the initial Slack message post fails or
-/// the engine cannot be created. Errors during the background init
-/// are reported by updating the Slack message.
+/// Returns `ServerError` if the Slack message post fails or the engine
+/// cannot be created.
 #[instrument(skip(state, payload), fields(channel = %payload.channel_id))]
 pub async fn handle_init(
     state: Arc<AppState>,
@@ -45,7 +50,39 @@ pub async fn handle_init(
 ) -> Result<(), ServerError> {
     let channel = payload.channel_id.clone();
 
-    let Some((repo_path, engine)) = resolve_engine(state.as_ref(), &channel).await? else {
+    let Some((_repo_path, engine)) = resolve_engine(state.as_ref(), &channel).await? else {
+        return Ok(());
+    };
+
+    info!(channel, "Posting init config preview");
+
+    let summary = engine.config_show();
+    let blocks = formatter::init_config_preview(&summary, force);
+    state.slack().post_message(&channel, blocks).await?;
+
+    Ok(())
+}
+
+/// Launches the init pipeline for a channel.
+///
+/// Resolves the engine, checks for duplicate tasks, acquires the repo
+/// lock, posts an initial progress message (by updating `message_ts`),
+/// and spawns a background task that drives the init pipeline.
+///
+/// Called by the interaction handler when the user clicks "Start Init".
+///
+/// # Errors
+///
+/// Returns `ServerError` if the Slack API call fails or the engine
+/// cannot be created.
+#[instrument(skip(state), fields(channel = %channel))]
+pub(crate) async fn start_init(
+    state: Arc<AppState>,
+    channel: &str,
+    message_ts: &str,
+    force: bool,
+) -> Result<(), ServerError> {
+    let Some((repo_path, engine)) = resolve_engine(state.as_ref(), channel).await? else {
         return Ok(());
     };
 
@@ -53,7 +90,10 @@ pub async fn handle_init(
     let task_key = format!("init:{}", repo_path.display());
     if state.running_tasks().is_running(&task_key) {
         let blocks = formatter::error("An init is already running for this repository.");
-        state.slack().post_message(&channel, blocks).await?;
+        state
+            .slack()
+            .update_message(channel, message_ts, blocks)
+            .await?;
         return Ok(());
     }
 
@@ -62,23 +102,29 @@ pub async fn handle_init(
         let blocks = formatter::error(&format!(
             "Repository is busy (`{holder}`). Try again later."
         ));
-        state.slack().post_message(&channel, blocks).await?;
+        state
+            .slack()
+            .update_message(channel, message_ts, blocks)
+            .await?;
         return Ok(());
     }
 
     info!(channel, "Starting init command");
 
-    // Post initial progress message
+    // Update the existing message with initial progress
     let initial_blocks = formatter::init_progress(&[]);
-    let resp = state.slack().post_message(&channel, initial_blocks).await?;
-    let message_ts = resp.ts;
+    state
+        .slack()
+        .update_message(channel, message_ts, initial_blocks)
+        .await?;
 
     // Create cancellation token and store it with the task
     let cancel_token = CancellationToken::new();
 
     // Spawn background task
     let state_clone = Arc::clone(&state);
-    let channel_clone = channel.clone();
+    let channel_clone = channel.to_string();
+    let message_ts_clone = message_ts.to_string();
     let repo_path_clone = repo_path.clone();
     let cancel_token_clone = cancel_token.clone();
 
@@ -87,7 +133,7 @@ pub async fn handle_init(
             state_clone,
             engine,
             channel_clone,
-            message_ts,
+            message_ts_clone,
             repo_path_clone,
             force,
             cancel_token_clone,
