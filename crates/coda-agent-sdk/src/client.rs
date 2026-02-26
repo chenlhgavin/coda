@@ -223,6 +223,14 @@ impl AgentSdkClient {
         }
     }
 
+    /// Returns whether the backend process is still alive.
+    ///
+    /// Delegates to the active session's [`Session::is_process_alive`].
+    /// Returns `None` when no session is active.
+    pub fn is_process_alive(&self) -> Option<bool> {
+        self.session.as_ref().and_then(|s| s.is_process_alive())
+    }
+
     /// Disconnect from the agent.
     pub async fn disconnect(&mut self) -> Result<()> {
         if let Some(mut s) = self.session.take() {
@@ -256,6 +264,10 @@ struct LegacyQuerySession {
 
 #[async_trait::async_trait]
 impl Session for LegacyQuerySession {
+    fn is_process_alive(&self) -> Option<bool> {
+        self.query.is_process_alive()
+    }
+
     async fn send_message(&mut self, prompt: Prompt, session_id: &str) -> Result<()> {
         match prompt {
             Prompt::Text(text) => self.query.write_user_message(&text, session_id).await,

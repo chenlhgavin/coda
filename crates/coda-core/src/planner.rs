@@ -192,6 +192,7 @@ impl PlanSession {
             tool_execution_timeout_secs: config.agent.tool_execution_timeout_secs,
             idle_retries: config.agent.idle_retries,
             max_budget_usd: config.agent.max_budget_usd,
+            max_alive_idle_secs: config.agent.max_alive_idle_secs,
         };
         let session = AgentSession::new(client, session_config);
 

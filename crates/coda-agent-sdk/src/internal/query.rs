@@ -13,7 +13,7 @@ use futures::Stream;
 use std::collections::HashMap;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use tokio::sync::{broadcast, mpsc};
 
 const INITIALIZE_TIMEOUT_SECS: u64 = 60;
@@ -32,6 +32,9 @@ pub struct Query {
     message_tx: broadcast::Sender<ControlMessage>,
     request_counter: AtomicU64,
     init_result: tokio::sync::RwLock<Option<serde_json::Value>>,
+    /// Tracks whether the subprocess stdout pipe is still open.
+    /// Set to `false` by the read task when EOF is observed.
+    process_alive: Arc<AtomicBool>,
 }
 
 impl Query {
@@ -56,6 +59,8 @@ impl Query {
             let _ = transport.close().await;
         });
 
+        let process_alive = Arc::new(AtomicBool::new(true));
+        let process_alive_for_read = process_alive.clone();
         let write_tx_for_read = write_tx.clone();
         tokio::spawn(async move {
             use futures::StreamExt;
@@ -110,6 +115,7 @@ impl Query {
                     }
                 }
             }
+            process_alive_for_read.store(false, Ordering::Release);
             let _ = msg_tx.send(ControlMessage::End);
         });
 
@@ -118,6 +124,7 @@ impl Query {
             message_tx,
             request_counter: AtomicU64::new(0),
             init_result: tokio::sync::RwLock::new(None),
+            process_alive,
         }
     }
 
@@ -281,7 +288,11 @@ impl Query {
                         yield Err(Error::Other(e));
                         break;
                     }
-                    Err(_) => break,
+                    Err(broadcast::error::RecvError::Lagged(n)) => {
+                        tracing::warn!(skipped = n, "Broadcast receiver lagged");
+                        continue;
+                    }
+                    Err(broadcast::error::RecvError::Closed) => break,
                 }
             }
         };
@@ -316,12 +327,21 @@ impl Query {
                         yield Err(Error::Other(e));
                         break;
                     }
-                    Err(_) => break,
+                    Err(broadcast::error::RecvError::Lagged(n)) => {
+                        tracing::warn!(skipped = n, "Broadcast receiver lagged");
+                        continue;
+                    }
+                    Err(broadcast::error::RecvError::Closed) => break,
                 }
             }
         };
 
         Box::pin(stream)
+    }
+
+    /// Returns whether the backend process is still alive.
+    pub fn is_process_alive(&self) -> Option<bool> {
+        Some(self.process_alive.load(Ordering::Acquire))
     }
 
     pub async fn get_server_info(&self) -> Option<serde_json::Value> {

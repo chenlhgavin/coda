@@ -22,6 +22,8 @@ use async_stream::stream;
 use futures::Stream;
 use std::pin::Pin;
 use std::process::Stdio;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Child;
 use tokio::sync::{broadcast, mpsc};
@@ -58,6 +60,9 @@ pub struct CodexSession {
     write_task: Option<JoinHandle<()>>,
     read_task: Option<JoinHandle<()>>,
     process: Option<Child>,
+    /// Tracks whether the subprocess stdout pipe is still open.
+    /// Set to `false` by the read task when EOF is observed.
+    process_alive: Arc<AtomicBool>,
 }
 
 impl std::fmt::Debug for CodexSession {
@@ -148,6 +153,8 @@ impl CodexSession {
         let msg_tx = message_tx.clone();
         let can_use_tool_for_read = options.can_use_tool.clone();
         let write_tx_for_read = write_tx.clone();
+        let process_alive = Arc::new(AtomicBool::new(true));
+        let process_alive_for_read = process_alive.clone();
 
         let read_task = tokio::spawn(async move {
             let reader = BufReader::new(stdout);
@@ -213,6 +220,7 @@ impl CodexSession {
                 }
             }
 
+            process_alive_for_read.store(false, Ordering::Release);
             let _ = msg_tx.send(AppServerMessage::End);
         });
 
@@ -281,6 +289,7 @@ impl CodexSession {
             write_task: Some(write_task),
             read_task: Some(read_task),
             process: Some(process),
+            process_alive,
         };
 
         // Start a thread
@@ -449,6 +458,10 @@ async fn handle_server_request(
 
 #[async_trait::async_trait]
 impl Session for CodexSession {
+    fn is_process_alive(&self) -> Option<bool> {
+        Some(self.process_alive.load(Ordering::Acquire))
+    }
+
     async fn send_message(&mut self, prompt: Prompt, _session_id: &str) -> Result<()> {
         let prompt_text = match prompt {
             Prompt::Text(s) => s,
@@ -476,7 +489,11 @@ impl Session for CodexSession {
                     Ok(AppServerMessage::Response(_)) => {
                         continue;
                     }
-                    Err(_) => break,
+                    Err(broadcast::error::RecvError::Lagged(n)) => {
+                        tracing::warn!(skipped = n, "Broadcast receiver lagged");
+                        continue;
+                    }
+                    Err(broadcast::error::RecvError::Closed) => break,
                 }
             }
         };
@@ -505,7 +522,11 @@ impl Session for CodexSession {
                     Ok(AppServerMessage::Response(_)) => {
                         continue;
                     }
-                    Err(_) => break,
+                    Err(broadcast::error::RecvError::Lagged(n)) => {
+                        tracing::warn!(skipped = n, "Broadcast receiver lagged");
+                        continue;
+                    }
+                    Err(broadcast::error::RecvError::Closed) => break,
                 }
             }
         };

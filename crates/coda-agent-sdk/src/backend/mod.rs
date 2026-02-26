@@ -131,6 +131,17 @@ pub trait Session: Send {
     /// Get server info from the initialization handshake, if available.
     async fn get_server_info(&self) -> Option<serde_json::Value>;
 
+    /// Returns whether the backend process is still alive.
+    ///
+    /// - `Some(true)` — process is alive (stdout pipe open, read task blocking).
+    /// - `Some(false)` — process has exited (EOF observed on stdout pipe).
+    /// - `None` — liveness unknown (backend does not track process state).
+    ///
+    /// The default implementation returns `None`.
+    fn is_process_alive(&self) -> Option<bool> {
+        None
+    }
+
     /// Close the session and release resources.
     async fn close(&mut self) -> Result<()>;
 }

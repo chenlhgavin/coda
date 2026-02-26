@@ -208,6 +208,10 @@ struct ClaudeSession {
 
 #[async_trait]
 impl Session for ClaudeSession {
+    fn is_process_alive(&self) -> Option<bool> {
+        self.query.is_process_alive()
+    }
+
     async fn send_message(&mut self, prompt: Prompt, session_id: &str) -> Result<()> {
         match prompt {
             Prompt::Text(text) => self.query.write_user_message(&text, session_id).await,

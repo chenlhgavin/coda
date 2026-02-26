@@ -661,6 +661,7 @@ impl Engine {
             tool_execution_timeout_secs: self.config.agent.tool_execution_timeout_secs,
             idle_retries: self.config.agent.idle_retries,
             max_budget_usd: self.config.agent.max_budget_usd,
+            max_alive_idle_secs: self.config.agent.max_alive_idle_secs,
         }
     }
 

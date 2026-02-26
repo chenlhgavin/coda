@@ -107,6 +107,13 @@ pub struct AgentConfig {
     /// (plus backoff delays between reconnection attempts).
     pub idle_retries: u32,
 
+    /// Hard cap (in seconds) for total waiting when the backend process
+    /// is alive but producing no output. When the process is still running
+    /// (e.g., deep thinking or waiting for API), the idle timeout does not
+    /// trigger reconnection — instead, the session keeps waiting until
+    /// this cap is reached. Defaults to 1800 (30 min).
+    pub max_alive_idle_secs: u64,
+
     /// When `true` (default), quality phases (review, verify, update-docs)
     /// use isolated session IDs instead of the main dev session. This
     /// significantly reduces input token consumption because quality phases
@@ -537,6 +544,7 @@ impl Default for AgentConfig {
             idle_timeout_secs: 300,
             tool_execution_timeout_secs: 600,
             idle_retries: 2,
+            max_alive_idle_secs: 1800,
             isolate_quality_phases: true,
             default_effort: ReasoningEffort::High,
             isolate_dev_phases: false,

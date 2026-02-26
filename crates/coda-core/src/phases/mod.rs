@@ -303,6 +303,7 @@ impl PhaseContext {
             tool_execution_timeout_secs: self.config.agent.tool_execution_timeout_secs,
             idle_retries: self.config.agent.idle_retries,
             max_budget_usd: self.remaining_budget,
+            max_alive_idle_secs: self.config.agent.max_alive_idle_secs,
         };
 
         let mut session = AgentSession::new(client, session_config);

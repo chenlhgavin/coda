@@ -31,6 +31,7 @@
 //!     tool_execution_timeout_secs: 600,
 //!     idle_retries: 3,
 //!     max_budget_usd: 100.0,
+//!     max_alive_idle_secs: 1800,
 //! };
 //! // let client = AgentSdkClient::new(Some(options), None);
 //! // let mut session = AgentSession::new(client, config);
@@ -113,6 +114,16 @@ pub enum SessionEvent {
         /// How many seconds of silence elapsed.
         idle_secs: u64,
     },
+    /// Process is alive but silent (extended thinking / API wait).
+    ///
+    /// Emitted when a timeout fires but the backend process is still
+    /// running. The session continues waiting instead of reconnecting.
+    AliveIdle {
+        /// Cumulative seconds the process has been alive but silent.
+        alive_idle_total_secs: u64,
+        /// Hard cap configured via `max_alive_idle_secs`.
+        max_alive_idle_secs: u64,
+    },
     /// The agent subprocess is being reconnected after an idle timeout.
     Reconnecting {
         /// Which reconnection attempt this is (1-based).
@@ -134,6 +145,7 @@ pub enum SessionEvent {
 ///     tool_execution_timeout_secs: 600,
 ///     idle_retries: 3,
 ///     max_budget_usd: 100.0,
+///     max_alive_idle_secs: 1800,
 /// };
 /// assert_eq!(config.idle_retries, 3);
 /// ```
@@ -147,6 +159,11 @@ pub struct SessionConfig {
     pub idle_retries: u32,
     /// Maximum budget in USD for the session.
     pub max_budget_usd: f64,
+    /// Hard cap (in seconds) for total alive-idle waiting.
+    /// When the backend process is alive but silent (e.g., deep thinking),
+    /// the session keeps waiting instead of reconnecting. If this cap is
+    /// reached, the session aborts. Defaults to 1800 (30 min).
+    pub max_alive_idle_secs: u64,
 }
 
 /// Collected output from a single agent interaction.
@@ -240,6 +257,7 @@ impl AgentSession {
     ///     tool_execution_timeout_secs: 600,
     ///     idle_retries: 3,
     ///     max_budget_usd: 100.0,
+    ///     max_alive_idle_secs: 1800,
     /// };
     /// let session = AgentSession::new(client, config);
     /// # }
@@ -297,6 +315,7 @@ impl AgentSession {
     ///     tool_execution_timeout_secs: 600,
     ///     idle_retries: 3,
     ///     max_budget_usd: 100.0,
+    ///     max_alive_idle_secs: 1800,
     /// };
     /// let mut session = AgentSession::new(client, config);
     /// let token = CancellationToken::new();
@@ -425,6 +444,8 @@ impl AgentSession {
         let mut resp = AgentResponse::default();
         let mut turn_count: u32 = 0;
         let mut in_tool_execution = false;
+        let mut alive_idle_total_secs: u64 = 0;
+        let max_alive_idle = self.config.max_alive_idle_secs;
 
         'outer: loop {
             // Check cancellation at the start of each reconnection cycle
@@ -452,61 +473,104 @@ impl AgentSession {
                 let result = match timed_result {
                     Ok(Some(result)) => {
                         consecutive_timeouts = 0;
+                        alive_idle_total_secs = 0;
                         result
                     }
                     Ok(None) => break 'outer,
                     Err(_) => {
-                        consecutive_timeouts += 1;
                         let idle_secs = if in_tool_execution {
                             self.config.tool_execution_timeout_secs
                         } else {
                             self.config.idle_timeout_secs
                         };
+                        let process_alive = self.client.is_process_alive();
 
-                        if consecutive_timeouts <= max_idle_retries {
-                            warn!(
-                                idle_secs,
-                                attempt = consecutive_timeouts,
-                                max_retries = max_idle_retries,
-                                turns = turn_count,
-                                in_tool_execution,
-                                "Agent idle timeout — reconnecting subprocess",
-                            );
-                            self.emit_event(SessionEvent::IdleWarning {
-                                attempt: consecutive_timeouts,
-                                max_retries: max_idle_retries,
-                                idle_secs,
-                            });
+                        match process_alive {
+                            Some(true) => {
+                                // Process is alive but silent — continue waiting
+                                alive_idle_total_secs += idle_secs;
 
-                            // Drop stream before reconnecting (releases borrow)
-                            drop(stream);
+                                if max_alive_idle > 0 && alive_idle_total_secs >= max_alive_idle {
+                                    error!(
+                                        alive_idle_total_secs,
+                                        max_alive_idle,
+                                        "Process alive but exceeded max alive-idle cap",
+                                    );
+                                    drop(stream);
+                                    self.disconnect().await;
+                                    return Err(CoreError::IdleTimeout {
+                                        total_idle_secs: alive_idle_total_secs,
+                                        retries_exhausted: 0,
+                                    });
+                                }
 
-                            self.reconnect_and_resend(
-                                prompt,
-                                session_id,
-                                consecutive_timeouts,
-                                max_idle_retries,
-                            )
-                            .await?;
+                                warn!(
+                                    idle_secs,
+                                    alive_idle_total_secs,
+                                    max_alive_idle,
+                                    in_tool_execution,
+                                    "Process alive but idle — continuing to wait",
+                                );
+                                self.emit_event(SessionEvent::AliveIdle {
+                                    alive_idle_total_secs,
+                                    max_alive_idle_secs: max_alive_idle,
+                                });
+                                continue;
+                            }
+                            Some(false) | None => {
+                                // Process dead or unknown — original reconnect logic
+                                consecutive_timeouts += 1;
 
-                            // Reset accumulator — partial data is unreliable
-                            resp = AgentResponse::default();
-                            turn_count = 0;
-                            in_tool_execution = false;
+                                if consecutive_timeouts <= max_idle_retries {
+                                    warn!(
+                                        idle_secs,
+                                        attempt = consecutive_timeouts,
+                                        max_retries = max_idle_retries,
+                                        turns = turn_count,
+                                        in_tool_execution,
+                                        "Agent idle timeout — reconnecting subprocess",
+                                    );
+                                    self.emit_event(SessionEvent::IdleWarning {
+                                        attempt: consecutive_timeouts,
+                                        max_retries: max_idle_retries,
+                                        idle_secs,
+                                    });
 
-                            continue 'outer;
+                                    // Drop stream before reconnecting (releases borrow)
+                                    drop(stream);
+
+                                    self.reconnect_and_resend(
+                                        prompt,
+                                        session_id,
+                                        consecutive_timeouts,
+                                        max_idle_retries,
+                                    )
+                                    .await?;
+
+                                    // Reset accumulator — partial data is unreliable
+                                    resp = AgentResponse::default();
+                                    turn_count = 0;
+                                    in_tool_execution = false;
+                                    alive_idle_total_secs = 0;
+
+                                    continue 'outer;
+                                }
+
+                                // All retries exhausted — clean up and abort
+                                let total_secs = idle_secs * u64::from(max_idle_retries + 1);
+                                error!(
+                                    total_idle_secs = total_secs,
+                                    turns = turn_count,
+                                    "Agent idle timeout — all retries exhausted",
+                                );
+                                drop(stream);
+                                self.disconnect().await;
+                                return Err(CoreError::IdleTimeout {
+                                    total_idle_secs: total_secs,
+                                    retries_exhausted: max_idle_retries,
+                                });
+                            }
                         }
-
-                        let total_secs = idle_secs * u64::from(max_idle_retries + 1);
-                        error!(
-                            total_idle_secs = total_secs,
-                            turns = turn_count,
-                            "Agent idle timeout — all retries exhausted",
-                        );
-                        return Err(CoreError::IdleTimeout {
-                            total_idle_secs: total_secs,
-                            retries_exhausted: max_idle_retries,
-                        });
                     }
                 };
                 let msg = result.map_err(|e| CoreError::AgentError(e.to_string()))?;
@@ -1170,6 +1234,7 @@ mod tests {
             tool_execution_timeout_secs: 600,
             idle_retries: 3,
             max_budget_usd: 50.0,
+            max_alive_idle_secs: 1800,
         };
         assert_eq!(config.idle_timeout_secs, 300);
         assert_eq!(config.tool_execution_timeout_secs, 600);
@@ -1186,6 +1251,7 @@ mod tests {
             tool_execution_timeout_secs: 600,
             idle_retries: 3,
             max_budget_usd: 100.0,
+            max_alive_idle_secs: 1800,
         };
         let session = AgentSession::new(
             AgentSdkClient::new(
@@ -1213,6 +1279,7 @@ mod tests {
             tool_execution_timeout_secs: 600,
             idle_retries: 3,
             max_budget_usd: 100.0,
+            max_alive_idle_secs: 1800,
         };
         let session = AgentSession::new(
             AgentSdkClient::new(
@@ -1252,6 +1319,7 @@ mod tests {
             tool_execution_timeout_secs: 600,
             idle_retries: 3,
             max_budget_usd: 100.0,
+            max_alive_idle_secs: 1800,
         };
         let session = AgentSession::new(
             AgentSdkClient::new(
@@ -1280,6 +1348,7 @@ mod tests {
             tool_execution_timeout_secs: 600,
             idle_retries: 3,
             max_budget_usd: 10.0,
+            max_alive_idle_secs: 1800,
         };
         let session = AgentSession::new(
             AgentSdkClient::new(
@@ -1319,6 +1388,7 @@ mod tests {
             tool_execution_timeout_secs: 600,
             idle_retries: 3,
             max_budget_usd: 100.0,
+            max_alive_idle_secs: 1800,
         };
         let session = AgentSession::new(
             AgentSdkClient::new(
@@ -1349,6 +1419,7 @@ mod tests {
             tool_execution_timeout_secs: 600,
             idle_retries: 3,
             max_budget_usd: 100.0,
+            max_alive_idle_secs: 1800,
         };
         let mut session = AgentSession::new(
             AgentSdkClient::new(
@@ -1431,6 +1502,7 @@ mod tests {
             tool_execution_timeout_secs: 2,
             idle_retries: 0,
             max_budget_usd: 10.0,
+            max_alive_idle_secs: 1800,
         };
         AgentSession::new(AgentSdkClient::new(Some(options), None), config)
     }

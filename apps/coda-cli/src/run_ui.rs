@@ -495,6 +495,21 @@ impl RunUi {
                     self.scroll_offset = self.max_scroll_offset();
                 }
             }
+            RunEvent::AliveIdle {
+                alive_idle_total_secs,
+                max_alive_idle_secs,
+            } => {
+                tui_widgets::append_tool_activity(
+                    &mut self.content_lines,
+                    "[info]",
+                    &format!(
+                        "Process alive but idle ({alive_idle_total_secs}s / {max_alive_idle_secs}s cap) — waiting",
+                    ),
+                );
+                if self.auto_scroll {
+                    self.scroll_offset = self.max_scroll_offset();
+                }
+            }
             RunEvent::Reconnecting {
                 attempt,
                 max_retries,

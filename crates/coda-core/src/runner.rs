@@ -227,6 +227,16 @@ pub enum RunEvent {
         /// How many seconds of silence elapsed.
         idle_secs: u64,
     },
+    /// Emitted when the backend process is alive but producing no output.
+    ///
+    /// The session keeps waiting instead of reconnecting because the
+    /// subprocess stdout pipe is still open (deep thinking / API wait).
+    AliveIdle {
+        /// Cumulative seconds the process has been alive but silent.
+        alive_idle_total_secs: u64,
+        /// Hard cap configured via `max_alive_idle_secs`.
+        max_alive_idle_secs: u64,
+    },
     /// Emitted when the agent subprocess is being reconnected after an
     /// idle timeout.
     ///
@@ -483,6 +493,7 @@ impl Runner {
             tool_execution_timeout_secs: config.agent.tool_execution_timeout_secs,
             idle_retries: config.agent.idle_retries,
             max_budget_usd: remaining_budget,
+            max_alive_idle_secs: config.agent.max_alive_idle_secs,
         };
         let mut session = AgentSession::new(client, session_config);
 
@@ -512,6 +523,13 @@ impl Runner {
                             attempt,
                             max_retries,
                             idle_secs,
+                        },
+                        SessionEvent::AliveIdle {
+                            alive_idle_total_secs,
+                            max_alive_idle_secs,
+                        } => RunEvent::AliveIdle {
+                            alive_idle_total_secs,
+                            max_alive_idle_secs,
                         },
                         SessionEvent::Reconnecting {
                             attempt,
