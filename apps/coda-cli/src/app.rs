@@ -114,8 +114,21 @@ impl App {
         // If engine completed but select! picked the UI branch first (both
         // were ready simultaneously), await the engine future now — it will
         // return immediately since it already completed.
+        // Use a bounded timeout to prevent blocking if the engine is still
+        // tearing down (e.g., session disconnect). The UI may have finished
+        // early because it received a completion event before disconnect.
         if engine_result.is_none() && ui_result.is_ok() {
-            engine_result = Some(engine_future.as_mut().await);
+            match tokio::time::timeout(CANCEL_CLEANUP_TIMEOUT, engine_future.as_mut()).await {
+                Ok(result) => {
+                    engine_result = Some(result);
+                }
+                Err(_) => {
+                    info!(
+                        "Engine did not complete within {}s after UI finished, proceeding",
+                        CANCEL_CLEANUP_TIMEOUT.as_secs(),
+                    );
+                }
+            }
         }
 
         // If UI errored (Ctrl+C), cancel the engine and await its cleanup
@@ -671,8 +684,21 @@ impl App {
         // If engine completed but select! picked the UI branch first (both
         // were ready simultaneously), await the engine future now — it will
         // return immediately since it already completed.
+        // Use a bounded timeout to prevent blocking if the engine is still
+        // tearing down (e.g., session disconnect). The UI may have finished
+        // early because it received a completion event before disconnect.
         if engine_result.is_none() && ui_result.is_ok() {
-            engine_result = Some(engine_future.as_mut().await);
+            match tokio::time::timeout(CANCEL_CLEANUP_TIMEOUT, engine_future.as_mut()).await {
+                Ok(result) => {
+                    engine_result = Some(result);
+                }
+                Err(_) => {
+                    info!(
+                        "Engine did not complete within {}s after UI finished, proceeding",
+                        CANCEL_CLEANUP_TIMEOUT.as_secs(),
+                    );
+                }
+            }
         }
 
         // If UI errored (Ctrl+C), cancel the engine and await its cleanup

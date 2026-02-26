@@ -448,6 +448,18 @@ impl Runner {
         // regardless of success, failure, or cancellation.
         let result = self.run_pipeline().await;
 
+        // Emit RunFinished for failure paths BEFORE disconnect so that
+        // TUI and Slack consumers receive a definitive completion signal
+        // without waiting for the (potentially slow) session teardown.
+        // Success path already emits RunFinished inside run_pipeline().
+        // Cancellation is handled separately by callers (not a "finish").
+        if let Err(ref e) = result
+            && !matches!(e, CoreError::Cancelled)
+        {
+            self.ctx
+                .emit_event(RunEvent::RunFinished { success: false });
+        }
+
         // Always disconnect the agent session to clean up the
         // subprocess, even on error or cancellation paths.
         self.ctx.session.disconnect().await;

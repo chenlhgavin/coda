@@ -337,12 +337,24 @@ impl AgentSession {
 
     /// Disconnects the underlying `AgentSdkClient`.
     ///
-    /// Safe to call multiple times or when not connected.
+    /// Safe to call multiple times or when not connected. Uses a bounded
+    /// timeout to prevent indefinite hangs if the subprocess is unresponsive.
     pub async fn disconnect(&mut self) {
+        const DISCONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+
         if self.connected {
-            let _ = self.client.disconnect().await;
+            match tokio::time::timeout(DISCONNECT_TIMEOUT, self.client.disconnect()).await {
+                Ok(_) => {
+                    debug!("AgentSession disconnected from Claude");
+                }
+                Err(_) => {
+                    warn!(
+                        "Session disconnect timed out after {}s, proceeding",
+                        DISCONNECT_TIMEOUT.as_secs(),
+                    );
+                }
+            }
             self.connected = false;
-            debug!("AgentSession disconnected from Claude");
         }
     }
 
