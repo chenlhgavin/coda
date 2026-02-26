@@ -124,6 +124,25 @@ pub struct AgentConfig {
     ///
     /// Defaults to `High` for a good balance of quality and cost.
     pub default_effort: ReasoningEffort,
+
+    /// When `true`, each dev phase after the first uses an independent
+    /// session ID, preventing conversation history from accumulating
+    /// across phases. The design spec and resume context are injected
+    /// explicitly so each phase has sufficient context.
+    ///
+    /// Set to `false` (default) to share a single conversation across
+    /// all dev phases (legacy behavior).
+    pub isolate_dev_phases: bool,
+
+    /// When `true` (default), deterministic checks (`config.checks`)
+    /// are run after each dev phase completes. If checks fail, the agent
+    /// is prompted to fix the issues (up to 2 additional attempts)
+    /// before proceeding to the next phase.
+    ///
+    /// Set to `false` to skip per-phase checks entirely (the verify
+    /// phase still runs checks at the end).
+    #[serde(default = "default_true")]
+    pub dev_phase_checks: bool,
 }
 
 /// Configuration for prompt template directories.
@@ -530,6 +549,8 @@ impl Default for AgentConfig {
             idle_retries: 2,
             isolate_quality_phases: true,
             default_effort: ReasoningEffort::High,
+            isolate_dev_phases: false,
+            dev_phase_checks: true,
         }
     }
 }
@@ -885,6 +906,18 @@ impl CodaConfig {
             label: "Isolate quality phases".to_string(),
             value_type: ConfigValueType::Bool,
             current_value: self.agent.isolate_quality_phases.to_string(),
+        });
+        keys.push(ConfigKeyDescriptor {
+            key: "agent.isolate_dev_phases".to_string(),
+            label: "Isolate dev phases".to_string(),
+            value_type: ConfigValueType::Bool,
+            current_value: self.agent.isolate_dev_phases.to_string(),
+        });
+        keys.push(ConfigKeyDescriptor {
+            key: "agent.dev_phase_checks".to_string(),
+            label: "Dev phase checks".to_string(),
+            value_type: ConfigValueType::Bool,
+            current_value: self.agent.dev_phase_checks.to_string(),
         });
 
         // Git keys
@@ -1669,8 +1702,8 @@ agents:
     fn test_should_return_config_keys_for_default_config() {
         let config = CodaConfig::default();
         let keys = config.config_keys();
-        // 5 ops * 3 keys + 6 agent + 4 git + 3 review + 2 verify = 30
-        assert_eq!(keys.len(), 30);
+        // 5 ops * 3 keys + 8 agent + 4 git + 3 review + 2 verify = 32
+        assert_eq!(keys.len(), 32);
     }
 
     #[test]
@@ -1804,5 +1837,62 @@ agents:
             .expect("agent.max_retries key should exist");
         assert_eq!(retries.value_type, ConfigValueType::U32);
         assert_eq!(retries.current_value, "3");
+    }
+
+    // ── New Agent Config Fields ─────────────────────────────────────
+
+    #[test]
+    fn test_should_default_isolate_dev_phases_to_false() {
+        let config = CodaConfig::default();
+        assert!(!config.agent.isolate_dev_phases);
+    }
+
+    #[test]
+    fn test_should_default_dev_phase_checks_to_true() {
+        let config = CodaConfig::default();
+        assert!(config.agent.dev_phase_checks);
+    }
+
+    #[test]
+    fn test_should_round_trip_new_agent_fields_yaml() {
+        let mut config = CodaConfig::default();
+        config.agent.isolate_dev_phases = true;
+        config.agent.dev_phase_checks = false;
+        let yaml = serde_yaml_ng::to_string(&config).unwrap();
+        let loaded: CodaConfig = serde_yaml_ng::from_str(&yaml).unwrap();
+        assert!(loaded.agent.isolate_dev_phases);
+        assert!(!loaded.agent.dev_phase_checks);
+    }
+
+    #[test]
+    fn test_should_deserialize_new_agent_fields_from_yaml() {
+        let yaml = r#"
+version: 1
+agent:
+  isolate_dev_phases: true
+  dev_phase_checks: false
+"#;
+        let config: CodaConfig = serde_yaml_ng::from_str(yaml).unwrap();
+        assert!(config.agent.isolate_dev_phases);
+        assert!(!config.agent.dev_phase_checks);
+    }
+
+    #[test]
+    fn test_should_include_new_agent_keys_in_config_schema() {
+        let config = CodaConfig::default();
+        let keys = config.config_keys();
+        let isolate_dev = keys
+            .iter()
+            .find(|k| k.key == "agent.isolate_dev_phases")
+            .expect("agent.isolate_dev_phases key should exist");
+        assert_eq!(isolate_dev.value_type, ConfigValueType::Bool);
+        assert_eq!(isolate_dev.current_value, "false");
+
+        let dev_checks = keys
+            .iter()
+            .find(|k| k.key == "agent.dev_phase_checks")
+            .expect("agent.dev_phase_checks key should exist");
+        assert_eq!(dev_checks.value_type, ConfigValueType::Bool);
+        assert_eq!(dev_checks.current_value, "true");
     }
 }

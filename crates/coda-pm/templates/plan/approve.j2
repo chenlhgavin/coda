@@ -38,6 +38,8 @@ Choose the structure that best fits the task type we discussed. Use the appropri
 - **Tasks**:
   - <specific task 1>
   - <specific task 2>
+- **Expected file changes**: <list of files to create/modify>
+- **Test expectations**: <what tests should be added/modified>
 - **Commit message**: "<conventional commit message>"
 
 ### Phase 2: <name>
@@ -69,6 +71,8 @@ Choose the structure that best fits the task type we discussed. Use the appropri
 - **Tasks**:
   - <specific task 1>
   - <specific task 2>
+- **Expected file changes**: <list of files to create/modify>
+- **Test expectations**: <what tests should be added/modified>
 - **Commit message**: "<conventional commit message>"
 
 ### Phase 2: <name>
@@ -103,6 +107,8 @@ Choose the structure that best fits the task type we discussed. Use the appropri
 - **Tasks**:
   - <specific task 1>
   - <specific task 2>
+- **Expected file changes**: <list of files to create/modify>
+- **Test expectations**: <what tests should be added/modified>
 - **Commit message**: "<conventional commit message>"
 
 ### Phase 2: <name>
@@ -115,6 +121,24 @@ Choose the structure that best fits the task type we discussed. Use the appropri
 
 - Each phase MUST result in code that compiles and passes existing tests
 - Phases should be ordered from foundational to feature-complete
-- Keep phases small — ideally 1-3 files changed per phase
+- Keep phases small — ideally 2-5 files changed per phase, 1-3 concrete sub-tasks
+- If a phase has more than 5 tasks, split it into smaller phases
 - Use conventional commit messages (feat:, fix:, refactor:, test:, docs:)
 - Reference existing patterns in the codebase where applicable
+
+## Phase Summary
+
+At the very end of the document, include a structured phase list in exactly this YAML format
+inside a fenced code block tagged `yaml-phases`:
+
+    ```yaml-phases
+    phases:
+      - name: "<Phase 1 short name>"
+        goal: "<one-line goal>"
+        files: ["path/to/file1.rs", "path/to/file2.rs"]
+      - name: "<Phase 2 short name>"
+        goal: "<one-line goal>"
+        files: ["path/to/file3.rs"]
+    ```
+
+This structured block MUST match the phases described in the "Development Phases" section.

@@ -714,6 +714,51 @@ impl Engine {
         )
     }
 
+    /// Resumes a previously interrupted planning session.
+    ///
+    /// Loads the saved session state from `.coda/<slug>/plan-session.json`
+    /// and creates a new `PlanSession` that can be restored via
+    /// [`PlanSession::resume_from_state`].
+    ///
+    /// # Errors
+    ///
+    /// Returns `CoreError::PlanError` if the project is not initialized,
+    /// no saved session exists, or session creation fails.
+    pub fn resume_plan(
+        &self,
+        feature_slug: &str,
+    ) -> Result<(PlanSession, crate::planner::PlanSessionState), CoreError> {
+        validate_feature_slug(feature_slug)?;
+
+        if !self.is_project_initialized() {
+            return Err(CoreError::PlanError(
+                "Project not initialized. Run `coda init` first.".into(),
+            ));
+        }
+
+        let saved = PlanSession::load_session_state(&self.project_root, feature_slug)?.ok_or_else(
+            || {
+                CoreError::PlanError(format!(
+                    "No saved planning session found for '{feature_slug}'. \
+                     Use `coda plan {feature_slug}` to start a new session.",
+                ))
+            },
+        )?;
+
+        // Allow resume even if the worktree already exists (the previous
+        // session may have been interrupted after finalize failed).
+        info!(feature_slug, "Resuming planning session");
+        let session = PlanSession::new(
+            feature_slug.to_string(),
+            self.project_root.clone(),
+            &self.pm,
+            &self.config,
+            Arc::clone(&self.git),
+        )?;
+
+        Ok((session, saved))
+    }
+
     /// Lists all features: active worktrees from `.trees/` and merged
     /// features from `.coda/`.
     ///

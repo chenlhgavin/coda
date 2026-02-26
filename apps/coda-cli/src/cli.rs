@@ -40,6 +40,10 @@ pub enum Commands {
     Plan {
         /// URL-safe feature slug (e.g., "add-user-auth").
         feature_slug: String,
+
+        /// Resume a previously interrupted planning session.
+        #[arg(long)]
+        resume: bool,
     },
 
     /// Execute feature development.
@@ -115,7 +119,10 @@ impl Cli {
 
         match self.command {
             Commands::Init { no_commit, force } => app.init(no_commit, force).await,
-            Commands::Plan { feature_slug } => app.plan(&feature_slug).await,
+            Commands::Plan {
+                feature_slug,
+                resume,
+            } => app.plan(&feature_slug, resume).await,
             Commands::Run {
                 feature_slug,
                 no_tui,

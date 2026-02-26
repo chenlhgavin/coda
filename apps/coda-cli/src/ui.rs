@@ -7,7 +7,8 @@
 use std::io::{self, Stdout};
 
 use anyhow::Result;
-use coda_core::planner::{PlanOutput, PlanSession};
+use chrono::Utc;
+use coda_core::planner::{PlanConversationTurn, PlanOutput, PlanSession};
 use crossterm::{
     event::{self, Event, KeyCode, KeyEventKind, KeyModifiers},
     execute,
@@ -91,6 +92,8 @@ pub struct PlanUi {
     phase: PlanPhase,
     /// Resolved config display string (e.g., "claude / claude-opus-4-6 / high").
     config_info: Option<String>,
+    /// Conversation turns persisted for session resume.
+    conversation_turns: Vec<PlanConversationTurn>,
 }
 
 impl PlanUi {
@@ -117,6 +120,7 @@ impl PlanUi {
                 feature_slug: String::new(),
                 phase: PlanPhase::Discussing,
                 config_info: None,
+                conversation_turns: Vec::new(),
             })
         };
 
@@ -287,6 +291,11 @@ impl PlanUi {
                         role: USER_ROLE.to_string(),
                         content: input.clone(),
                     });
+                    self.conversation_turns.push(PlanConversationTurn {
+                        role: "user".to_string(),
+                        content: input.clone(),
+                        timestamp: Utc::now(),
+                    });
                     self.scroll_to_bottom();
 
                     // Send to agent with animated spinner
@@ -298,8 +307,15 @@ impl PlanUi {
                         Ok(Some(response)) => {
                             self.messages.push(ChatMessage {
                                 role: AGENT_ROLE.to_string(),
-                                content: response,
+                                content: response.clone(),
                             });
+                            self.conversation_turns.push(PlanConversationTurn {
+                                role: "assistant".to_string(),
+                                content: response,
+                                timestamp: Utc::now(),
+                            });
+                            // Persist conversation state for resume
+                            let _ = session.save_session_state(&self.conversation_turns);
                             self.scroll_to_bottom();
                             self.phase = PlanPhase::Discussing;
                         }

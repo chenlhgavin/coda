@@ -52,11 +52,14 @@ pub use error::CoreError;
 pub use gh::{DefaultGhOps, GhOps, PrState, PrStatus};
 pub use git::{DefaultGitOps, GitOps};
 pub use phases::{CommitInfo, ReviewSummary, VerificationSummary};
-pub use planner::{PlanOutput, PlanSession, PlanStreamUpdate};
+pub use planner::{
+    PlanConversationTurn, PlanOutput, PlanSession, PlanSessionState, PlanStreamUpdate,
+    StructuredPhase,
+};
 pub use profile::{AgentProfile, build_safety_hooks};
 pub use project::find_project_root;
 pub use reviewer::{ReviewResult, ReviewSeverity};
-pub use runner::{RunEvent, RunProgress, Runner};
+pub use runner::{PhaseSummary, RunEvent, RunProgress, RunSummaryReport, Runner, TotalRunStats};
 pub use scanner::FeatureScanner;
 pub use session::{AgentResponse, AgentSession, SessionConfig, SessionEvent};
 pub use state::{PhaseOutcome, StateManager};

@@ -12,8 +12,10 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use chrono::{DateTime, Utc};
 use coda_agent_sdk::AgentSdkClient;
 use coda_pm::PromptManager;
+use serde::{Deserialize, Serialize};
 use tracing::{debug, info, warn};
 
 use crate::CoreError;
@@ -60,8 +62,60 @@ pub struct PlanOutput {
     pub worktree: PathBuf,
 }
 
+/// A single conversation turn in a planning session.
+///
+/// Used to persist and restore the planning conversation across sessions.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PlanConversationTurn {
+    /// Role of the speaker (`"user"` or `"assistant"`).
+    pub role: String,
+    /// Content of the message.
+    pub content: String,
+    /// When this turn was recorded.
+    pub timestamp: DateTime<Utc>,
+}
+
+/// Serializable state of a planning session for resume support.
+///
+/// Persisted to `.coda/<slug>/plan-session.json` after each conversation
+/// turn so the session can be recovered if the process exits.
+///
+/// # Examples
+///
+/// ```
+/// use coda_core::planner::PlanSessionState;
+/// use chrono::Utc;
+///
+/// let state = PlanSessionState {
+///     feature_slug: "add-auth".to_string(),
+///     turns: vec![],
+///     planning_cost_usd: 0.0,
+///     planning_turns: 0,
+///     saved_at: Utc::now(),
+/// };
+/// let json = serde_json::to_string(&state).unwrap();
+/// let loaded: PlanSessionState = serde_json::from_str(&json).unwrap();
+/// assert_eq!(loaded.feature_slug, "add-auth");
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PlanSessionState {
+    /// Feature slug identifying this planning session.
+    pub feature_slug: String,
+    /// All conversation turns in order.
+    pub turns: Vec<PlanConversationTurn>,
+    /// Accumulated cost in USD.
+    pub planning_cost_usd: f64,
+    /// Total conversation turns count.
+    pub planning_turns: u32,
+    /// When this state was last saved.
+    pub saved_at: DateTime<Utc>,
+}
+
 /// Fixed quality-assurance phase names appended after dynamic dev phases.
 const QUALITY_PHASES: &[&str] = &["review", "verify", "update-docs"];
+
+/// Directory within `.coda/` where plan session state is stored.
+const PLAN_SESSION_FILE: &str = "plan-session.json";
 
 /// An interactive planning session wrapping an [`AgentSession`] with the
 /// Planner profile for multi-turn feature planning conversations.
@@ -499,6 +553,112 @@ impl PlanSession {
     pub fn feature_slug(&self) -> &str {
         &self.feature_slug
     }
+
+    /// Saves the current planning session state to disk.
+    ///
+    /// Writes to `.coda/<slug>/plan-session.json` in the project root
+    /// (not the worktree, since it may not exist yet during planning).
+    ///
+    /// # Errors
+    ///
+    /// Returns `CoreError::PlanError` if the state cannot be serialized or written.
+    pub fn save_session_state(&self, turns: &[PlanConversationTurn]) -> Result<(), CoreError> {
+        let state = PlanSessionState {
+            feature_slug: self.feature_slug.clone(),
+            turns: turns.to_vec(),
+            planning_cost_usd: self.planning_cost_usd,
+            planning_turns: self.planning_turns,
+            saved_at: Utc::now(),
+        };
+
+        let dir = self.project_root.join(".coda").join(&self.feature_slug);
+        std::fs::create_dir_all(&dir)
+            .map_err(|e| CoreError::PlanError(format!("Cannot create plan session dir: {e}")))?;
+
+        let path = dir.join(PLAN_SESSION_FILE);
+        let json = serde_json::to_string_pretty(&state)
+            .map_err(|e| CoreError::PlanError(format!("Cannot serialize plan session: {e}")))?;
+        std::fs::write(&path, json).map_err(|e| {
+            CoreError::PlanError(format!(
+                "Cannot write plan session to {}: {e}",
+                path.display()
+            ))
+        })?;
+        debug!(path = %path.display(), "Saved plan session state");
+        Ok(())
+    }
+
+    /// Loads a previously saved plan session state from disk.
+    ///
+    /// Returns `None` if the session file does not exist.
+    ///
+    /// # Errors
+    ///
+    /// Returns `CoreError::PlanError` if the file exists but cannot be parsed.
+    pub fn load_session_state(
+        project_root: &Path,
+        slug: &str,
+    ) -> Result<Option<PlanSessionState>, CoreError> {
+        let path = project_root
+            .join(".coda")
+            .join(slug)
+            .join(PLAN_SESSION_FILE);
+
+        match std::fs::read_to_string(&path) {
+            Ok(content) => {
+                let state: PlanSessionState = serde_json::from_str(&content).map_err(|e| {
+                    CoreError::PlanError(format!(
+                        "Cannot parse plan session at {}: {e}",
+                        path.display()
+                    ))
+                })?;
+                Ok(Some(state))
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(CoreError::PlanError(format!(
+                "Cannot read plan session at {}: {e}",
+                path.display()
+            ))),
+        }
+    }
+
+    /// Resumes a planning session from previously saved state.
+    ///
+    /// Sends a summary of the prior conversation to the agent so it can
+    /// continue where the session left off. Restores cost/turn counters.
+    ///
+    /// # Errors
+    ///
+    /// Returns `CoreError` if the agent interaction fails.
+    pub async fn resume_from_state(
+        &mut self,
+        saved: &PlanSessionState,
+    ) -> Result<String, CoreError> {
+        self.planning_cost_usd = saved.planning_cost_usd;
+        self.planning_turns = saved.planning_turns;
+
+        // Build a summary of the prior conversation for the agent
+        let mut summary = String::from(
+            "We are resuming a previous planning session. \
+             Here is a summary of our conversation so far:\n\n",
+        );
+
+        for turn in &saved.turns {
+            let role_label = if turn.role == "user" {
+                "**User**"
+            } else {
+                "**Assistant**"
+            };
+            summary.push_str(&format!("{role_label}: {}\n\n", turn.content));
+        }
+
+        summary.push_str(
+            "Please continue from where we left off. \
+             What would you like to discuss or refine?",
+        );
+
+        self.send(&summary).await
+    }
 }
 
 impl std::fmt::Debug for PlanSession {
@@ -511,7 +671,87 @@ impl std::fmt::Debug for PlanSession {
     }
 }
 
+/// Structured phase metadata extracted from a design spec's `yaml-phases` block.
+///
+/// Each phase includes its display name, a one-line goal, and the list of
+/// files expected to be modified.
+///
+/// # Examples
+///
+/// ```
+/// use coda_core::planner::StructuredPhase;
+///
+/// let phase = StructuredPhase {
+///     name: "Config Extension".to_string(),
+///     goal: "Add new config fields".to_string(),
+///     files: vec!["src/config.rs".to_string()],
+/// };
+/// assert_eq!(phase.name, "Config Extension");
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StructuredPhase {
+    /// Human-readable phase name.
+    pub name: String,
+    /// One-line description of what this phase achieves.
+    pub goal: String,
+    /// Files expected to be created or modified.
+    #[serde(default)]
+    pub files: Vec<String>,
+}
+
+/// Intermediate type for deserializing the `yaml-phases` code block.
+#[derive(Debug, Deserialize)]
+struct YamlPhasesBlock {
+    phases: Vec<StructuredPhase>,
+}
+
+/// Extracts structured phase metadata from a design spec's `yaml-phases` block.
+///
+/// Searches for a fenced code block tagged `` ```yaml-phases `` and parses
+/// its YAML content into a list of [`StructuredPhase`] entries.
+///
+/// Returns `None` if no `yaml-phases` block is found or if parsing fails.
+///
+/// # Examples
+///
+/// ```
+/// # use coda_core::planner::extract_structured_phases;
+/// let spec = "```yaml-phases\nphases:\n  - name: \"Config\"\n    goal: \"Add fields\"\n    files: [\"src/config.rs\"]\n```\n";
+/// let phases = extract_structured_phases(spec).unwrap();
+/// assert_eq!(phases.len(), 1);
+/// assert_eq!(phases[0].name, "Config");
+/// ```
+pub fn extract_structured_phases(design_content: &str) -> Option<Vec<StructuredPhase>> {
+    // Find the ```yaml-phases block
+    let start_marker = "```yaml-phases";
+    let end_marker = "```";
+
+    let start_idx = design_content.find(start_marker)?;
+    let yaml_start = start_idx + start_marker.len();
+
+    // Find the closing ``` after the opening marker
+    let rest = &design_content[yaml_start..];
+    let end_idx = rest.find(end_marker)?;
+    let yaml_content = &rest[..end_idx];
+
+    let block: YamlPhasesBlock = serde_yaml_ng::from_str(yaml_content)
+        .map_err(|e| {
+            warn!("Failed to parse yaml-phases block: {e}");
+            e
+        })
+        .ok()?;
+
+    if block.phases.is_empty() {
+        return None;
+    }
+
+    Some(block.phases)
+}
+
 /// Extracts development phase names from a design specification.
+///
+/// Prefers structured extraction from a `yaml-phases` code block. Falls back
+/// to heading-based regex matching if no structured block is found.
 ///
 /// Matches headings like `## Phase 1: <name>`, `### Phase 1: <name>`, or
 /// `#### Phase 1: <name>` (2–4 `#` levels). Parenthetical annotations
@@ -527,6 +767,19 @@ impl std::fmt::Debug for PlanSession {
 /// assert_eq!(phases, vec!["type-definitions", "transport-layer"]);
 /// ```
 pub fn extract_dev_phases(design_content: &str) -> Vec<String> {
+    // Prefer structured extraction from yaml-phases block
+    if let Some(structured) = extract_structured_phases(design_content) {
+        let names: Vec<String> = structured
+            .iter()
+            .map(|p| slugify_phase_name(&p.name))
+            .filter(|s| !s.is_empty())
+            .collect();
+        if !names.is_empty() {
+            return names;
+        }
+    }
+
+    // Fall back to heading-based extraction
     let mut phases = Vec::new();
 
     for line in design_content.lines() {
@@ -938,5 +1191,169 @@ mod tests {
             matches!(update4, PlanStreamUpdate::Text(ref t) if t == "Fresh response"),
             "After reconnect, accumulated text should not contain pre-reconnect data"
         );
+    }
+
+    // ── extract_structured_phases ───────────────────────────────────
+
+    #[test]
+    fn test_should_extract_structured_phases_from_yaml_block() {
+        let spec = r#"
+# Feature: test
+
+## Development Phases
+
+### Phase 1: Config Extension
+
+```yaml-phases
+phases:
+  - name: "Config Extension"
+    goal: "Add new config fields"
+    files: ["src/config.rs", "src/lib.rs"]
+  - name: "Parsing"
+    goal: "Add structured phase extraction"
+    files: ["src/planner.rs"]
+```
+"#;
+        let phases = extract_structured_phases(spec).unwrap();
+        assert_eq!(phases.len(), 2);
+        assert_eq!(phases[0].name, "Config Extension");
+        assert_eq!(phases[0].goal, "Add new config fields");
+        assert_eq!(phases[0].files, vec!["src/config.rs", "src/lib.rs"]);
+        assert_eq!(phases[1].name, "Parsing");
+    }
+
+    #[test]
+    fn test_should_return_none_for_missing_yaml_phases_block() {
+        let spec = "## Design\n\nNo yaml-phases block here.";
+        assert!(extract_structured_phases(spec).is_none());
+    }
+
+    #[test]
+    fn test_should_return_none_for_empty_phases_list() {
+        let spec = r#"
+```yaml-phases
+phases: []
+```
+"#;
+        assert!(extract_structured_phases(spec).is_none());
+    }
+
+    #[test]
+    fn test_should_return_none_for_invalid_yaml() {
+        let spec = r#"
+```yaml-phases
+this is not valid yaml: [
+```
+"#;
+        assert!(extract_structured_phases(spec).is_none());
+    }
+
+    #[test]
+    fn test_should_prefer_structured_phases_in_extract_dev_phases() {
+        let spec = r#"
+### Phase 1: Heading Name
+
+```yaml-phases
+phases:
+  - name: "Structured Name"
+    goal: "goal"
+    files: []
+```
+"#;
+        let phases = extract_dev_phases(spec);
+        assert_eq!(phases, vec!["structured-name"]);
+    }
+
+    #[test]
+    fn test_should_fallback_to_heading_when_yaml_phases_absent() {
+        let spec = "### Phase 1: Type Definitions\n### Phase 2: Transport Layer\n";
+        let phases = extract_dev_phases(spec);
+        assert_eq!(phases, vec!["type-definitions", "transport-layer"]);
+    }
+
+    #[test]
+    fn test_should_handle_phases_with_default_files() {
+        let spec = r#"
+```yaml-phases
+phases:
+  - name: "No Files Phase"
+    goal: "A phase without files field"
+```
+"#;
+        let phases = extract_structured_phases(spec).unwrap();
+        assert_eq!(phases.len(), 1);
+        assert!(phases[0].files.is_empty());
+    }
+
+    // ── PlanSessionState ────────────────────────────────────────────
+
+    #[test]
+    fn test_should_round_trip_plan_session_state_json() {
+        let now = Utc::now();
+        let state = PlanSessionState {
+            feature_slug: "add-auth".to_string(),
+            turns: vec![
+                PlanConversationTurn {
+                    role: "user".to_string(),
+                    content: "Build user authentication".to_string(),
+                    timestamp: now,
+                },
+                PlanConversationTurn {
+                    role: "assistant".to_string(),
+                    content: "I'll design an auth system...".to_string(),
+                    timestamp: now,
+                },
+            ],
+            planning_cost_usd: 1.5,
+            planning_turns: 2,
+            saved_at: now,
+        };
+
+        let json = serde_json::to_string_pretty(&state).unwrap();
+        let loaded: PlanSessionState = serde_json::from_str(&json).unwrap();
+        assert_eq!(loaded.feature_slug, "add-auth");
+        assert_eq!(loaded.turns.len(), 2);
+        assert_eq!(loaded.turns[0].role, "user");
+        assert_eq!(loaded.turns[1].role, "assistant");
+        assert!((loaded.planning_cost_usd - 1.5).abs() < f64::EPSILON);
+        assert_eq!(loaded.planning_turns, 2);
+    }
+
+    #[test]
+    fn test_should_load_session_state_returns_none_for_missing_file() {
+        let tmp = std::env::temp_dir().join("coda-test-missing-session");
+        let result = PlanSession::load_session_state(&tmp, "nonexistent").unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_should_load_session_state_from_file() {
+        let tmp = std::env::temp_dir().join("coda-test-load-session");
+        let slug = "test-load";
+        let dir = tmp.join(".coda").join(slug);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let state = PlanSessionState {
+            feature_slug: slug.to_string(),
+            turns: vec![PlanConversationTurn {
+                role: "user".to_string(),
+                content: "hello".to_string(),
+                timestamp: Utc::now(),
+            }],
+            planning_cost_usd: 0.5,
+            planning_turns: 1,
+            saved_at: Utc::now(),
+        };
+        let json = serde_json::to_string(&state).unwrap();
+        std::fs::write(dir.join(PLAN_SESSION_FILE), json).unwrap();
+
+        let loaded = PlanSession::load_session_state(&tmp, slug)
+            .unwrap()
+            .unwrap();
+        assert_eq!(loaded.feature_slug, slug);
+        assert_eq!(loaded.turns.len(), 1);
+
+        // Cleanup
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 }

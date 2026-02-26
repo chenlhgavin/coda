@@ -17,6 +17,7 @@ path = "src/main.rs"
 [dependencies]
 coda-core = { workspace = true }
 coda-pm = { workspace = true }
+chrono = { workspace = true }
 clap = { workspace = true }
 dialoguer = { workspace = true }
 ratatui = { workspace = true }

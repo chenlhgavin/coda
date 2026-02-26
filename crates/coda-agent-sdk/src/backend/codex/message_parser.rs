@@ -13,7 +13,7 @@
 //! | `item/completed` (command_execution) | `AssistantMessage { content: [ToolUseBlock, ToolResultBlock] }` |
 //! | `item/completed` (file_change) | `AssistantMessage { content: [ToolUseBlock, ToolResultBlock] }` |
 //! | `turn/completed` | `ResultMessage { usage, duration_ms, ... }` |
-//! | `item/agentMessage/delta` | `AssistantMessage { content: [TextBlock] }` (partial) |
+//! | `item/agentMessage/delta` | `StreamEvent { content_block_delta }` (streaming) |
 
 use crate::error::Result;
 use crate::types::*;
@@ -362,13 +362,22 @@ fn parse_agent_message_delta(params: &Value) -> Result<Option<Message>> {
         return Ok(None);
     }
 
-    Ok(Some(Message::Assistant(AssistantMessage {
-        content: vec![ContentBlock::Text(TextBlock {
-            text: text.to_string(),
-        })],
-        model: String::new(),
+    // Emit as StreamEvent so session.rs extract_text_delta() picks it up
+    // and forwards it to the TUI via SessionEvent::TextDelta.
+    // Using Message::Assistant here would: (a) not trigger streaming display,
+    // (b) double-count text with the final item/completed message, and
+    // (c) spuriously increment turn_count.
+    Ok(Some(Message::StreamEvent(StreamEvent {
+        uuid: String::new(),
+        session_id: String::new(),
+        event: serde_json::json!({
+            "type": "content_block_delta",
+            "delta": {
+                "type": "text_delta",
+                "text": text,
+            }
+        }),
         parent_tool_use_id: None,
-        error: None,
     })))
 }
 
@@ -717,6 +726,37 @@ mod tests {
     fn test_should_return_none_for_unknown_exec_event() {
         let data = json!({"type": "some.unknown.event"});
         let msg = parse_exec_event(&data).unwrap();
+        assert!(msg.is_none());
+    }
+
+    // ── parse_agent_message_delta tests ──────────────────────────
+
+    #[test]
+    fn test_should_parse_agent_message_delta_as_stream_event() {
+        let params = json!({"delta": "Hello from Codex"});
+        let msg = parse_app_server_notification("item/agentMessage/delta", &params).unwrap();
+        let msg = msg.expect("should parse");
+        match msg {
+            Message::StreamEvent(se) => {
+                assert_eq!(se.event["type"], "content_block_delta");
+                assert_eq!(se.event["delta"]["type"], "text_delta");
+                assert_eq!(se.event["delta"]["text"], "Hello from Codex");
+            }
+            _ => panic!("expected StreamEvent, got {:?}", msg),
+        }
+    }
+
+    #[test]
+    fn test_should_return_none_for_empty_agent_message_delta() {
+        let params = json!({"delta": ""});
+        let msg = parse_app_server_notification("item/agentMessage/delta", &params).unwrap();
+        assert!(msg.is_none());
+    }
+
+    #[test]
+    fn test_should_return_none_for_missing_agent_message_delta() {
+        let params = json!({});
+        let msg = parse_app_server_notification("item/agentMessage/delta", &params).unwrap();
         assert!(msg.is_none());
     }
 }

@@ -244,17 +244,44 @@ impl App {
     /// # Errors
     ///
     /// Returns an error if the planning session or UI fails.
-    pub async fn plan(&self, feature_slug: &str) -> Result<()> {
-        let mut session = match self.engine.plan(feature_slug) {
-            Ok(s) => s,
-            Err(e) => {
-                println!();
-                println!("  CODA Plan: {feature_slug} — FAILED");
-                println!("  ═══════════════════════════════════════");
-                println!("  Error: {e}");
-                println!("  ═══════════════════════════════════════");
-                println!();
-                std::process::exit(1);
+    pub async fn plan(&self, feature_slug: &str, resume: bool) -> Result<()> {
+        let mut session = if resume {
+            match self.engine.resume_plan(feature_slug) {
+                Ok((mut sess, saved)) => {
+                    // Resume the session by sending the conversation summary
+                    if let Err(e) = sess.resume_from_state(&saved).await {
+                        println!();
+                        println!("  CODA Plan: {feature_slug} — RESUME FAILED");
+                        println!("  ═══════════════════════════════════════");
+                        println!("  Error: {e}");
+                        println!("  ═══════════════════════════════════════");
+                        println!();
+                        std::process::exit(1);
+                    }
+                    sess
+                }
+                Err(e) => {
+                    println!();
+                    println!("  CODA Plan: {feature_slug} — RESUME FAILED");
+                    println!("  ═══════════════════════════════════════");
+                    println!("  Error: {e}");
+                    println!("  ═══════════════════════════════════════");
+                    println!();
+                    std::process::exit(1);
+                }
+            }
+        } else {
+            match self.engine.plan(feature_slug) {
+                Ok(s) => s,
+                Err(e) => {
+                    println!();
+                    println!("  CODA Plan: {feature_slug} — FAILED");
+                    println!("  ═══════════════════════════════════════");
+                    println!("  Error: {e}");
+                    println!("  ═══════════════════════════════════════");
+                    println!();
+                    std::process::exit(1);
+                }
             }
         };
         let mut ui = PlanUi::new()?;

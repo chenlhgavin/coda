@@ -33,6 +33,9 @@ use tokio::sync::mpsc::UnboundedSender;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 
+use chrono::{DateTime, Utc};
+use serde::Serialize;
+
 use crate::CoreError;
 use crate::async_ops::{AsyncGhOps, AsyncGitOps};
 use crate::config::CodaConfig;
@@ -236,6 +239,114 @@ pub enum RunEvent {
         /// Maximum reconnection attempts before aborting.
         max_retries: u32,
     },
+    /// Emitted after all phases complete with a structured run summary.
+    ///
+    /// Contains per-phase metrics and aggregated totals, suitable for
+    /// display in TUI, Slack, or writing to a summary file.
+    RunSummary {
+        /// The structured run summary report.
+        summary: RunSummaryReport,
+    },
+}
+
+/// Structured summary report for a completed run.
+///
+/// Generated from the feature state after all phases complete. Written
+/// to `.coda/<slug>/logs/run-summary.yml` and emitted as a `RunEvent`.
+///
+/// # Examples
+///
+/// ```
+/// use coda_core::runner::{RunSummaryReport, PhaseSummary, TotalRunStats};
+/// use chrono::Utc;
+/// use coda_core::state::PhaseKind;
+///
+/// let report = RunSummaryReport {
+///     feature_slug: "add-auth".to_string(),
+///     completed_at: Utc::now(),
+///     phases: vec![],
+///     total: TotalRunStats::default(),
+/// };
+/// let yaml = serde_yaml_ng::to_string(&report).unwrap();
+/// assert!(yaml.contains("add-auth"));
+/// ```
+#[derive(Debug, Clone, Serialize)]
+pub struct RunSummaryReport {
+    /// Feature slug.
+    pub feature_slug: String,
+    /// When the run completed.
+    pub completed_at: DateTime<Utc>,
+    /// Per-phase summary metrics.
+    pub phases: Vec<PhaseSummary>,
+    /// Aggregated totals across all phases.
+    pub total: TotalRunStats,
+}
+
+/// Summary metrics for a single phase within a run.
+#[derive(Debug, Clone, Serialize)]
+pub struct PhaseSummary {
+    /// Phase name.
+    pub name: String,
+    /// Whether this is a dev or quality phase.
+    pub kind: PhaseKind,
+    /// Phase completion status.
+    pub status: PhaseStatus,
+    /// Number of agent conversation turns.
+    pub turns: u32,
+    /// Cost in USD.
+    pub cost_usd: f64,
+    /// Input tokens consumed.
+    pub input_tokens: u64,
+    /// Output tokens produced.
+    pub output_tokens: u64,
+    /// Wall-clock duration in seconds.
+    pub duration_secs: u64,
+}
+
+/// Aggregated totals for a run summary report.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct TotalRunStats {
+    /// Total conversation turns.
+    pub turns: u32,
+    /// Total cost in USD.
+    pub cost_usd: f64,
+    /// Total input tokens.
+    pub input_tokens: u64,
+    /// Total output tokens.
+    pub output_tokens: u64,
+    /// Total wall-clock duration in seconds.
+    pub duration_secs: u64,
+}
+
+/// Generates a [`RunSummaryReport`] from the current feature state.
+fn generate_run_summary(state: &FeatureState) -> RunSummaryReport {
+    let phases: Vec<PhaseSummary> = state
+        .phases
+        .iter()
+        .map(|p| PhaseSummary {
+            name: p.name.clone(),
+            kind: p.kind.clone(),
+            status: p.status,
+            turns: p.turns,
+            cost_usd: p.cost_usd,
+            input_tokens: p.cost.input_tokens,
+            output_tokens: p.cost.output_tokens,
+            duration_secs: p.duration_secs,
+        })
+        .collect();
+
+    RunSummaryReport {
+        feature_slug: state.feature.slug.clone(),
+        completed_at: Utc::now(),
+        phases,
+        total: TotalRunStats {
+            turns: state.total.turns,
+            cost_usd: state.total.cost_usd,
+            input_tokens: state.total.cost.input_tokens,
+            output_tokens: state.total.cost.output_tokens,
+            duration_secs: state.total.duration_secs,
+        },
+    }
 }
 
 /// Progress tracking for a multi-phase feature development run.
@@ -717,6 +828,27 @@ impl Runner {
         // (excludes create_pr phase itself, which is a meta-operation)
         self.ctx.state_manager.update_totals();
         self.ctx.state_manager.save()?;
+
+        // Generate and persist run summary report
+        let summary = generate_run_summary(self.ctx.state());
+        let slug = &self.ctx.state().feature.slug;
+        let logs_dir = self.ctx.worktree_path.join(".coda").join(slug).join("logs");
+        std::fs::create_dir_all(&logs_dir)
+            .map_err(|e| CoreError::StateError(format!("Cannot create logs dir: {e}")))?;
+        let summary_path = logs_dir.join("run-summary.yml");
+        let summary_yaml = serde_yaml_ng::to_string(&summary)
+            .map_err(|e| CoreError::StateError(format!("Cannot serialize run summary: {e}")))?;
+        std::fs::write(&summary_path, &summary_yaml).map_err(|e| {
+            CoreError::StateError(format!(
+                "Cannot write run summary to {}: {e}",
+                summary_path.display()
+            ))
+        })?;
+        info!(path = %summary_path.display(), "Wrote run summary");
+        self.ctx.emit_event(RunEvent::RunSummary {
+            summary: summary.clone(),
+        });
+
         self.ctx.commit_coda_state().await?;
 
         self.ctx.check_cancelled()?;
@@ -926,4 +1058,98 @@ fn restore_summaries_from_state(state: &FeatureState) -> (ReviewSummary, Verific
     }
 
     (review, verify)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::state::{FeatureInfo, FeatureState, GitInfo, PhaseRecord, TokenCost, TotalStats};
+
+    fn sample_state() -> FeatureState {
+        let now = Utc::now();
+        FeatureState {
+            feature: FeatureInfo {
+                slug: "test-feature".to_string(),
+                created_at: now,
+                updated_at: now,
+            },
+            status: FeatureStatus::InProgress,
+            current_phase: 0,
+            git: GitInfo {
+                worktree_path: ".trees/test-feature".into(),
+                branch: "feature/test-feature".to_string(),
+                base_branch: "main".to_string(),
+            },
+            phases: vec![
+                PhaseRecord {
+                    name: "type-definitions".to_string(),
+                    kind: PhaseKind::Dev,
+                    status: PhaseStatus::Completed,
+                    started_at: Some(now),
+                    completed_at: Some(now),
+                    turns: 5,
+                    cost_usd: 1.5,
+                    cost: TokenCost {
+                        input_tokens: 1000,
+                        output_tokens: 500,
+                    },
+                    duration_secs: 120,
+                    details: serde_json::json!({}),
+                },
+                PhaseRecord {
+                    name: "review".to_string(),
+                    kind: PhaseKind::Quality,
+                    status: PhaseStatus::Completed,
+                    started_at: Some(now),
+                    completed_at: Some(now),
+                    turns: 2,
+                    cost_usd: 0.5,
+                    cost: TokenCost {
+                        input_tokens: 500,
+                        output_tokens: 200,
+                    },
+                    duration_secs: 60,
+                    details: serde_json::json!({}),
+                },
+            ],
+            pr: None,
+            total: TotalStats {
+                turns: 7,
+                cost_usd: 2.0,
+                cost: TokenCost {
+                    input_tokens: 1500,
+                    output_tokens: 700,
+                },
+                duration_secs: 180,
+            },
+        }
+    }
+
+    #[test]
+    fn test_should_generate_run_summary_from_state() {
+        let state = sample_state();
+        let summary = generate_run_summary(&state);
+
+        assert_eq!(summary.feature_slug, "test-feature");
+        assert_eq!(summary.phases.len(), 2);
+        assert_eq!(summary.phases[0].name, "type-definitions");
+        assert_eq!(summary.phases[0].turns, 5);
+        assert!((summary.phases[0].cost_usd - 1.5).abs() < f64::EPSILON);
+        assert_eq!(summary.phases[0].input_tokens, 1000);
+        assert_eq!(summary.phases[0].output_tokens, 500);
+        assert_eq!(summary.phases[0].duration_secs, 120);
+        assert_eq!(summary.phases[1].name, "review");
+        assert_eq!(summary.total.turns, 7);
+        assert!((summary.total.cost_usd - 2.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_should_round_trip_run_summary_yaml() {
+        let state = sample_state();
+        let summary = generate_run_summary(&state);
+        let yaml = serde_yaml_ng::to_string(&summary).unwrap();
+        assert!(yaml.contains("test-feature"));
+        assert!(yaml.contains("type-definitions"));
+        assert!(yaml.contains("review"));
+    }
 }

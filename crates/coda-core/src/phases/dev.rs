@@ -4,13 +4,92 @@
 //! the `run/dev_phase` prompt template and sends it to the agent, then
 //! validates that meaningful work was produced.
 
-use tracing::error;
+use tracing::{error, info, warn};
 
 use crate::CoreError;
+use crate::planner::extract_structured_phases;
+use crate::runner::RunEvent;
 use crate::state::PhaseKind;
 use crate::task::{Task, TaskResult, TaskStatus};
 
 use super::{PhaseContext, PhaseExecutor, PhaseMetricsAccumulator};
+
+/// Maximum number of fix attempts after dev-phase check failures.
+const MAX_FIX_ATTEMPTS: u32 = 2;
+
+/// Per-phase goal and expected file changes extracted from the design spec.
+#[derive(Debug, Default)]
+struct PhaseSection {
+    goal: String,
+    files: Vec<String>,
+}
+
+/// Extracts the goal and expected file changes for a specific dev phase.
+///
+/// Prefers the structured `yaml-phases` block (matching by 0-based index).
+/// Falls back to parsing the `### Phase N:` heading section for `**Goal**:`
+/// and `**Expected file changes**:` fields.
+fn extract_phase_section(
+    design_content: &str,
+    _phase_name: &str,
+    phase_number: usize,
+) -> PhaseSection {
+    // Try structured extraction first (phase_number is 1-based)
+    if let Some(phases) = extract_structured_phases(design_content) {
+        let idx = phase_number.saturating_sub(1);
+        if let Some(phase) = phases.get(idx) {
+            return PhaseSection {
+                goal: phase.goal.clone(),
+                files: phase.files.clone(),
+            };
+        }
+    }
+
+    // Fall back to heading-based extraction
+    let heading_prefix = format!("Phase {phase_number}:");
+    let mut in_section = false;
+    let mut goal = String::new();
+    let mut files = Vec::new();
+
+    for line in design_content.lines() {
+        let trimmed = line.trim();
+
+        // Detect start of our phase heading
+        if !in_section {
+            let is_phase_heading = (trimmed.starts_with("## ")
+                || trimmed.starts_with("### ")
+                || trimmed.starts_with("#### "))
+                && trimmed.contains(&heading_prefix);
+            if is_phase_heading {
+                in_section = true;
+            }
+            continue;
+        }
+
+        // End of section at next heading of same or higher level
+        if (trimmed.starts_with("## ") || trimmed.starts_with("### "))
+            && !trimmed.contains(&heading_prefix)
+        {
+            break;
+        }
+
+        // Extract goal
+        if let Some(rest) = trimmed.strip_prefix("- **Goal**:") {
+            goal = rest.trim().to_string();
+        }
+
+        // Extract expected file changes
+        if let Some(rest) = trimmed.strip_prefix("- **Expected file changes**:") {
+            files = rest
+                .split(',')
+                .map(|s| s.trim().trim_matches('`').to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
+        }
+    }
+
+    PhaseSection { goal, files }
+}
 
 /// Executes a single development phase from the design spec.
 ///
@@ -40,10 +119,24 @@ impl PhaseExecutor for DevPhaseExecutor {
 
         let mut acc = PhaseMetricsAccumulator::new();
 
-        // Only load full design spec for the first dev phase; subsequent
-        // phases reference it from conversation history to reduce token usage.
-        let design_spec = if phase_idx == 0 {
-            ctx.load_spec("design.md")?
+        // Always load the full spec for phase section extraction.
+        let full_spec = ctx.load_spec("design.md")?;
+
+        // When isolate_dev_phases is enabled and this is not the first
+        // phase, use an independent session ID so conversation history
+        // does not accumulate across phases. The design spec and resume
+        // context are injected explicitly.
+        let use_isolated_session = ctx.config.agent.isolate_dev_phases && phase_idx > 0;
+        let session_id = if use_isolated_session {
+            Some(format!("dev-phase-{phase_idx}"))
+        } else {
+            None
+        };
+
+        // Inject full design spec for the first phase, or when using
+        // isolated sessions (since each session starts fresh).
+        let design_spec = if phase_idx == 0 || use_isolated_session {
+            full_spec.clone()
         } else {
             String::new()
         };
@@ -65,10 +158,13 @@ impl PhaseExecutor for DevPhaseExecutor {
             .iter()
             .filter(|p| p.kind == PhaseKind::Dev)
             .count();
-        let is_first = phase_idx == 0;
+        let is_first = phase_idx == 0 || use_isolated_session;
 
-        // Build resume context if resuming mid-phase
-        let resume_context = if was_running {
+        // Extract per-phase goal and expected file changes
+        let section = extract_phase_section(&full_spec, &phase_name, dev_phase_number);
+
+        // Build resume context if resuming mid-phase or isolated session
+        let resume_context = if was_running || use_isolated_session {
             ctx.build_resume_context()?
         } else {
             String::new()
@@ -85,10 +181,12 @@ impl PhaseExecutor for DevPhaseExecutor {
                 checks => checks,
                 feature_slug => feature_slug,
                 resume_context => resume_context,
+                phase_goal => section.goal,
+                phase_files => section.files,
             ),
         )?;
 
-        let resp = ctx.send_and_collect(&prompt, None).await?;
+        let resp = ctx.send_and_collect(&prompt, session_id.as_deref()).await?;
         let incremental = ctx.metrics.record(&resp.result);
         if let Some(logger) = &mut ctx.run_logger {
             logger.log_interaction(&prompt, &resp, &incremental);
@@ -114,6 +212,65 @@ impl PhaseExecutor for DevPhaseExecutor {
             )));
         }
 
+        // Run deterministic checks after dev phase if configured
+        if ctx.config.agent.dev_phase_checks && !ctx.config.checks.is_empty() {
+            for attempt in 0..=MAX_FIX_ATTEMPTS {
+                let total_checks = ctx.config.checks.len() as u32;
+                for (i, cmd) in ctx.config.checks.iter().enumerate() {
+                    ctx.emit_event(RunEvent::CheckStarting {
+                        command: cmd.clone(),
+                        index: i as u32,
+                        total: total_checks,
+                    });
+                }
+
+                let check_result = crate::check_runner::run_checks(
+                    &ctx.worktree_path,
+                    &ctx.config.checks,
+                    ctx.config.verify.check_timeout_secs,
+                )
+                .await?;
+
+                for check in &check_result.checks {
+                    ctx.emit_event(RunEvent::CheckCompleted {
+                        command: check.command.clone(),
+                        passed: check.passed,
+                        duration: check.duration,
+                    });
+                }
+
+                if check_result.all_passed() {
+                    info!(
+                        phase = %phase_name,
+                        attempt = attempt,
+                        "Dev phase checks passed"
+                    );
+                    break;
+                }
+
+                if attempt == MAX_FIX_ATTEMPTS {
+                    warn!(
+                        phase = %phase_name,
+                        "Dev phase checks still failing after {MAX_FIX_ATTEMPTS} fix attempts"
+                    );
+                    break;
+                }
+
+                let failures = check_result.failed_details().join("\n\n");
+                let fix_prompt = format!(
+                    "The automated checks failed after phase completion:\n\n\
+                     {failures}\n\n\
+                     Fix the issues and ensure all checks pass.",
+                );
+                let fix_resp = ctx.send_and_collect(&fix_prompt, None).await?;
+                let fix_incremental = ctx.metrics.record(&fix_resp.result);
+                if let Some(logger) = &mut ctx.run_logger {
+                    logger.log_interaction(&fix_prompt, &fix_resp, &fix_incremental);
+                }
+                acc.record(&fix_resp, fix_incremental);
+            }
+        }
+
         let outcome = acc.into_outcome(serde_json::json!({}));
         let task_result = TaskResult {
             task: Task::DevPhase {
@@ -129,5 +286,86 @@ impl PhaseExecutor for DevPhaseExecutor {
         ctx.state_manager.complete_phase(phase_idx, &outcome)?;
 
         Ok(task_result)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_should_extract_phase_section_from_yaml_phases() {
+        let spec = r#"
+## Development Phases
+
+### Phase 1: Config Extension
+- **Goal**: Add new config fields
+- **Expected file changes**: `src/config.rs`, `src/lib.rs`
+
+```yaml-phases
+phases:
+  - name: "Config Extension"
+    goal: "Add isolate_dev_phases and dev_phase_checks fields"
+    files: ["src/config.rs", "src/lib.rs"]
+  - name: "Parsing"
+    goal: "Add structured phase extraction"
+    files: ["src/planner.rs"]
+```
+"#;
+        let section = extract_phase_section(spec, "config-extension", 1);
+        assert_eq!(
+            section.goal,
+            "Add isolate_dev_phases and dev_phase_checks fields"
+        );
+        assert_eq!(section.files, vec!["src/config.rs", "src/lib.rs"]);
+
+        let section2 = extract_phase_section(spec, "parsing", 2);
+        assert_eq!(section2.goal, "Add structured phase extraction");
+        assert_eq!(section2.files, vec!["src/planner.rs"]);
+    }
+
+    #[test]
+    fn test_should_fallback_to_heading_extraction() {
+        let spec = r#"
+## Development Phases
+
+### Phase 1: Config Extension
+- **Goal**: Add new config fields
+- **Expected file changes**: `src/config.rs`, `src/lib.rs`
+- **Tasks**:
+  - Add field A
+  - Add field B
+
+### Phase 2: Parsing
+- **Goal**: Add structured parsing
+- **Expected file changes**: `src/planner.rs`
+"#;
+        let section = extract_phase_section(spec, "config-extension", 1);
+        assert_eq!(section.goal, "Add new config fields");
+        assert_eq!(section.files, vec!["src/config.rs", "src/lib.rs"]);
+    }
+
+    #[test]
+    fn test_should_return_empty_section_for_missing_phase() {
+        let spec = "## Some other content\n\nNo phases here.";
+        let section = extract_phase_section(spec, "nonexistent", 1);
+        assert!(section.goal.is_empty());
+        assert!(section.files.is_empty());
+    }
+
+    #[test]
+    fn test_should_handle_out_of_range_yaml_phase_index() {
+        let spec = r#"
+```yaml-phases
+phases:
+  - name: "Only Phase"
+    goal: "Single phase"
+    files: ["src/main.rs"]
+```
+"#;
+        // Phase 2 is out of range, should fall back to heading extraction
+        // (which also finds nothing), returning empty
+        let section = extract_phase_section(spec, "nonexistent", 5);
+        assert!(section.goal.is_empty());
     }
 }

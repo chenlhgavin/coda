@@ -17,6 +17,13 @@ Refer to the full design specification provided in the first development phase a
 ## Current Phase
 
 You are working on **Phase {{ phase_number }}: {{ phase_name }}** of the development plan. Locate the corresponding phase in the "Development Phases" section of the design spec above and implement it completely.
+{% if phase_goal %}
+
+**Phase Goal**: {{ phase_goal }}
+{% endif %}
+{% if phase_files %}
+**Expected File Changes**: {{ phase_files | join(", ") }}
+{% endif %}
 
 {% if is_first %}
 ## First Phase — Setup & Scaffolding
