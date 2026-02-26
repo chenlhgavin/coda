@@ -5,10 +5,10 @@
 //!
 //! ## Per-Operation Agent Configuration
 //!
-//! The `agents` section allows each operation (`init`, `plan`, `run`, `review`)
-//! to independently configure which backend (claude/codex/cursor), model, and
-//! effort level to use. Unspecified fields fall back to global defaults
-//! (`agent.model`) or legacy fields (`review.engine`, `review.codex_model`).
+//! The `agents` section allows each operation (`init`, `plan`, `run`, `review`,
+//! `verify`) to independently configure which backend (claude/codex/cursor),
+//! model, and effort level to use. Unspecified fields fall back to global
+//! defaults (`agent.model`) or legacy fields (`review.engine`, `review.codex_model`).
 
 use std::str::FromStr;
 
@@ -59,9 +59,10 @@ pub struct CodaConfig {
 
     /// Per-operation agent backend overrides.
     ///
-    /// Each operation (`init`, `plan`, `run`, `review`) can independently
-    /// specify a backend, model, and effort level. Unset fields inherit
-    /// from global defaults (`agent.model`) or legacy review fields.
+    /// Each operation (`init`, `plan`, `run`, `review`, `verify`) can
+    /// independently specify a backend, model, and effort level. Unset
+    /// fields inherit from global defaults (`agent.model`) or legacy
+    /// review fields.
     pub agents: AgentsConfig,
 }
 
@@ -375,6 +376,15 @@ fn model_suggestions_for(backend: Option<AgentBackend>) -> Vec<String> {
     models.iter().map(|s| (*s).to_string()).collect()
 }
 
+/// Returns suggested model names for a backend specified by name string.
+///
+/// Falls back to Claude suggestions when the backend name is unrecognized.
+/// This is the public API for use by CLI interactive prompts.
+pub fn model_suggestions_for_backend(backend_name: &str) -> Vec<String> {
+    let backend = backend_name.parse::<AgentBackend>().ok();
+    model_suggestions_for(backend)
+}
+
 /// The type of value a config key accepts.
 ///
 /// Used by interactive config UIs to decide which input widget to show
@@ -558,6 +568,7 @@ pub struct OperationAgentConfig {
 /// let agents = AgentsConfig::default();
 /// assert!(agents.init.backend.is_none());
 /// assert!(agents.review.model.is_none());
+/// assert!(agents.verify.effort.is_none());
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(default)]
@@ -570,6 +581,8 @@ pub struct AgentsConfig {
     pub run: OperationAgentConfig,
     /// Overrides for the `review` operation (code review phase).
     pub review: OperationAgentConfig,
+    /// Overrides for the `verify` operation (build/format/lint/test checks).
+    pub verify: OperationAgentConfig,
 }
 
 /// Fully resolved agent configuration for a single operation.
@@ -681,6 +694,27 @@ impl CodaConfig {
         }
     }
 
+    /// Resolves agent configuration for the `verify` operation.
+    ///
+    /// Falls back to `agent.model` for model, `Claude` for backend,
+    /// and `agent.default_effort` for effort.
+    pub fn resolve_verify(&self) -> ResolvedAgentConfig {
+        ResolvedAgentConfig {
+            backend: self.agents.verify.backend.unwrap_or_default(),
+            model: self
+                .agents
+                .verify
+                .model
+                .clone()
+                .unwrap_or_else(|| self.agent.model.clone()),
+            effort: self
+                .agents
+                .verify
+                .effort
+                .unwrap_or(self.agent.default_effort),
+        }
+    }
+
     /// Returns descriptors for all settable config keys.
     ///
     /// Each descriptor includes the dot-path key, a human-readable label,
@@ -709,6 +743,7 @@ impl CodaConfig {
             ("plan", "Plan", &self.agents.plan),
             ("run", "Run", &self.agents.run),
             ("review", "Review", &self.agents.review),
+            ("verify", "Verify", &self.agents.verify),
         ];
 
         let mut keys = Vec::new();
@@ -844,6 +879,80 @@ impl CodaConfig {
 
         keys
     }
+
+    /// Returns summaries for all operations with resolved values.
+    ///
+    /// Used by the CLI grouped interactive prompt to show current
+    /// configuration alongside each operation name.
+    pub fn operation_summaries(&self) -> Vec<OperationSummary> {
+        let backend_options: Vec<String> = vec![
+            "claude".to_string(),
+            "codex".to_string(),
+            "cursor".to_string(),
+        ];
+        let effort_options: Vec<String> = vec![
+            "low".to_string(),
+            "medium".to_string(),
+            "high".to_string(),
+            "max".to_string(),
+        ];
+
+        let build =
+            |name: &str, label: &str, resolved: ResolvedAgentConfig, op: &OperationAgentConfig| {
+                OperationSummary {
+                    name: name.to_string(),
+                    label: label.to_string(),
+                    backend: resolved.backend.to_string(),
+                    model: resolved.model,
+                    effort: resolved.effort.to_string(),
+                    backend_options: backend_options.clone(),
+                    model_suggestions: model_suggestions_for(op.backend),
+                    effort_options: effort_options.clone(),
+                }
+            };
+
+        vec![
+            build("init", "Init", self.resolve_init(), &self.agents.init),
+            build("plan", "Plan", self.resolve_plan(), &self.agents.plan),
+            build("run", "Run", self.resolve_run(), &self.agents.run),
+            build(
+                "review",
+                "Review",
+                self.resolve_review(),
+                &self.agents.review,
+            ),
+            build(
+                "verify",
+                "Verify",
+                self.resolve_verify(),
+                &self.agents.verify,
+            ),
+        ]
+    }
+}
+
+/// Summary of a single operation's resolved agent configuration.
+///
+/// Used by the CLI grouped interactive prompt to display current
+/// values and available options for each operation.
+#[derive(Debug, Clone)]
+pub struct OperationSummary {
+    /// Operation identifier (e.g., `"init"`, `"run"`, `"verify"`).
+    pub name: String,
+    /// Human-readable label (e.g., `"Init"`, `"Run"`, `"Verify"`).
+    pub label: String,
+    /// Currently resolved backend name.
+    pub backend: String,
+    /// Currently resolved model identifier.
+    pub model: String,
+    /// Currently resolved effort level.
+    pub effort: String,
+    /// Available backend options.
+    pub backend_options: Vec<String>,
+    /// Suggested models for the current backend.
+    pub model_suggestions: Vec<String>,
+    /// Available effort options.
+    pub effort_options: Vec<String>,
 }
 
 impl Default for CodaConfig {
@@ -1269,6 +1378,7 @@ agents:
         assert!(config.agents.plan.backend.is_none());
         assert!(config.agents.run.backend.is_none());
         assert!(config.agents.review.backend.is_none());
+        assert!(config.agents.verify.backend.is_none());
     }
 
     #[test]
@@ -1401,6 +1511,44 @@ agents:
     }
 
     #[test]
+    fn test_should_resolve_verify_with_defaults() {
+        let config = CodaConfig::default();
+        let resolved = config.resolve_verify();
+        assert_eq!(resolved.backend, AgentBackend::Claude);
+        assert_eq!(resolved.model, "claude-opus-4-6");
+        assert_eq!(resolved.effort, ReasoningEffort::High);
+    }
+
+    #[test]
+    fn test_should_resolve_verify_with_explicit_values() {
+        let mut config = CodaConfig::default();
+        config.agents.verify.backend = Some(AgentBackend::Codex);
+        config.agents.verify.model = Some("gpt-5.3-codex".to_string());
+        config.agents.verify.effort = Some(ReasoningEffort::Max);
+        let resolved = config.resolve_verify();
+        assert_eq!(resolved.backend, AgentBackend::Codex);
+        assert_eq!(resolved.model, "gpt-5.3-codex");
+        assert_eq!(resolved.effort, ReasoningEffort::Max);
+    }
+
+    #[test]
+    fn test_should_resolve_verify_falls_back_to_agent_model() {
+        let mut config = CodaConfig::default();
+        config.agent.model = "claude-sonnet-4-6".to_string();
+        let resolved = config.resolve_verify();
+        assert_eq!(resolved.model, "claude-sonnet-4-6");
+    }
+
+    #[test]
+    fn test_should_return_five_operation_summaries() {
+        let config = CodaConfig::default();
+        let summaries = config.operation_summaries();
+        assert_eq!(summaries.len(), 5);
+        let names: Vec<&str> = summaries.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, vec!["init", "plan", "run", "review", "verify"]);
+    }
+
+    #[test]
     fn test_should_resolve_init_with_custom_default_effort() {
         let mut config = CodaConfig::default();
         config.agent.default_effort = ReasoningEffort::Medium;
@@ -1430,8 +1578,8 @@ agents:
     fn test_should_return_config_keys_for_default_config() {
         let config = CodaConfig::default();
         let keys = config.config_keys();
-        // 4 ops * 3 keys + 6 agent + 4 git + 3 review + 2 verify = 27
-        assert_eq!(keys.len(), 27);
+        // 5 ops * 3 keys + 6 agent + 4 git + 3 review + 2 verify = 30
+        assert_eq!(keys.len(), 30);
     }
 
     #[test]
@@ -1456,6 +1604,25 @@ agents:
             .expect("agents.run.model key should exist");
         assert!(matches!(&model_key.value_type, ConfigValueType::Suggest(_)));
         assert_eq!(model_key.current_value, "(default)");
+    }
+
+    #[test]
+    fn test_should_include_verify_keys_in_config_schema() {
+        let config = CodaConfig::default();
+        let keys = config.config_keys();
+        let verify_keys: Vec<&str> = keys
+            .iter()
+            .filter(|k| k.key.starts_with("agents.verify."))
+            .map(|k| k.key.as_str())
+            .collect();
+        assert_eq!(
+            verify_keys,
+            vec![
+                "agents.verify.backend",
+                "agents.verify.model",
+                "agents.verify.effort",
+            ]
+        );
     }
 
     #[test]

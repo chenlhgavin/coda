@@ -59,6 +59,7 @@ pub async fn handle_config(
                 ("plan", &summary.plan),
                 ("run", &summary.run),
                 ("review", &summary.review),
+                ("verify", &summary.verify),
             ] {
                 lines.push(format!(
                     "`{:<10}` `{:<10}` `{:<26}` `{:<8}`",

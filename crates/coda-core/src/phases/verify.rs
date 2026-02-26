@@ -9,6 +9,7 @@ use tracing::{error, info, warn};
 use crate::CoreError;
 use crate::parser::parse_verification_result;
 use crate::runner::RunEvent;
+use crate::session::AgentResponse;
 use crate::task::{Task, TaskResult, TaskStatus};
 
 use super::{PhaseContext, PhaseExecutor, PhaseMetricsAccumulator};
@@ -29,6 +30,26 @@ use super::{PhaseContext, PhaseExecutor, PhaseMetricsAccumulator};
 /// ```
 pub struct VerifyPhaseExecutor;
 
+impl VerifyPhaseExecutor {
+    /// Sends a prompt using the appropriate session (isolated or shared).
+    ///
+    /// When an isolated verify session exists, uses it directly (no session_id
+    /// needed since the whole subprocess is dedicated). Otherwise falls back to
+    /// the shared session with optional session_id isolation.
+    async fn send(
+        ctx: &mut PhaseContext,
+        isolated_session: &mut Option<crate::session::AgentSession>,
+        session_id: Option<&str>,
+        prompt: &str,
+    ) -> Result<AgentResponse, CoreError> {
+        if let Some(session) = isolated_session {
+            session.send(prompt, None).await
+        } else {
+            ctx.send_and_collect(prompt, session_id).await
+        }
+    }
+}
+
 impl PhaseExecutor for VerifyPhaseExecutor {
     async fn execute(
         &mut self,
@@ -40,11 +61,31 @@ impl PhaseExecutor for VerifyPhaseExecutor {
         let verification_spec = ctx.load_spec("verification.md")?;
         let checks = ctx.config.checks.clone();
         let max_retries = ctx.config.verify.max_verify_retries;
-        let session_id = if ctx.config.agent.isolate_quality_phases {
-            Some("verify")
+
+        // Determine whether we need an isolated subprocess for verify.
+        // When isolate_quality_phases is enabled AND verify config differs
+        // from run config (different backend or model), create a dedicated
+        // AgentSession so the verify phase uses its own agent subprocess.
+        let verify_resolved = ctx.config.resolve_verify();
+        let run_resolved = ctx.config.resolve_run();
+        let needs_isolated_subprocess = ctx.config.agent.isolate_quality_phases
+            && (verify_resolved.backend != run_resolved.backend
+                || verify_resolved.model != run_resolved.model);
+
+        let (mut isolated_session, session_id) = if needs_isolated_subprocess {
+            info!(
+                verify_backend = %verify_resolved.backend,
+                verify_model = %verify_resolved.model,
+                "Creating isolated verify session (differs from run config)",
+            );
+            let session = ctx.create_isolated_session(&verify_resolved)?;
+            (Some(session), None)
+        } else if ctx.config.agent.isolate_quality_phases {
+            (None, Some("verify"))
         } else {
-            None
+            (None, None)
         };
+
         // Total attempts = 1 initial + max_retries
         let max_attempts = 1 + max_retries;
         let mut acc = PhaseMetricsAccumulator::new();
@@ -66,7 +107,7 @@ impl PhaseExecutor for VerifyPhaseExecutor {
                 ),
             )?;
 
-            let resp = ctx.send_and_collect(&verify_prompt, session_id).await?;
+            let resp = Self::send(ctx, &mut isolated_session, session_id, &verify_prompt).await?;
             let m = ctx.metrics.record(&resp.result);
             if let Some(logger) = &mut ctx.run_logger {
                 logger.log_interaction(&verify_prompt, &resp, &m);
@@ -124,7 +165,7 @@ impl PhaseExecutor for VerifyPhaseExecutor {
                  Refer to the design specification and verification plan provided earlier.",
             );
 
-            let fix_resp = ctx.send_and_collect(&fix_prompt, session_id).await?;
+            let fix_resp = Self::send(ctx, &mut isolated_session, session_id, &fix_prompt).await?;
             let fm = ctx.metrics.record(&fix_resp.result);
             if let Some(logger) = &mut ctx.run_logger {
                 logger.log_interaction(&fix_prompt, &fix_resp, &fm);

@@ -4,34 +4,8 @@
 //! when `coda config set` is invoked without arguments.
 
 use anyhow::{Context, Result};
-use coda_core::{ConfigKeyDescriptor, ConfigValueType};
-use dialoguer::{FuzzySelect, Input, Select, theme::ColorfulTheme};
-
-/// Prompts the user to select a config key from the full schema,
-/// then prompts for a value based on the key's type.
-///
-/// Returns `(key, value)` ready to pass to `Engine::config_set()`.
-///
-/// # Errors
-///
-/// Returns an error if the user cancels the prompt or input is invalid.
-pub fn prompt_key_and_value(schema: &[ConfigKeyDescriptor]) -> Result<(String, String)> {
-    let items: Vec<String> = schema
-        .iter()
-        .map(|d| format!("{:<36} [current: {}]", d.key, d.current_value))
-        .collect();
-
-    let selection = FuzzySelect::with_theme(&ColorfulTheme::default())
-        .with_prompt("Select config key")
-        .items(&items)
-        .default(0)
-        .interact()
-        .context("Config key selection cancelled")?;
-
-    let descriptor = &schema[selection];
-    let value = prompt_value(descriptor)?;
-    Ok((descriptor.key.clone(), value))
-}
+use coda_core::{ConfigKeyDescriptor, ConfigValueType, OperationSummary};
+use dialoguer::{Input, Select, theme::ColorfulTheme};
 
 /// Prompts the user to select or input a value for a specific config key.
 ///
@@ -125,4 +99,108 @@ fn prompt_input(descriptor: &ConfigKeyDescriptor) -> Result<String> {
 
     let value: String = input.interact_text().context("Value input cancelled")?;
     Ok(value)
+}
+
+/// Prompts the user to select an operation, then configures backend/model/effort together.
+///
+/// Returns a vec of `(key, value)` pairs to set, e.g.:
+/// `[("agents.run.backend", "claude"), ("agents.run.model", "claude-opus-4-6"), ...]`
+///
+/// # Errors
+///
+/// Returns an error if the user cancels any prompt.
+pub fn prompt_operation_config(ops: &[OperationSummary]) -> Result<Vec<(String, String)>> {
+    let theme = ColorfulTheme::default();
+
+    // Step 1: Select operation — show current config inline
+    let items: Vec<String> = ops
+        .iter()
+        .map(|op| {
+            format!(
+                "{:<8} [{} / {} / {}]",
+                op.name, op.backend, op.model, op.effort,
+            )
+        })
+        .collect();
+
+    let op_idx = Select::with_theme(&theme)
+        .with_prompt("Select operation to configure")
+        .items(&items)
+        .default(0)
+        .interact()
+        .context("Operation selection cancelled")?;
+
+    let op = &ops[op_idx];
+
+    // Step 2: Select backend
+    let backend_default = op
+        .backend_options
+        .iter()
+        .position(|b| *b == op.backend)
+        .unwrap_or(0);
+
+    let backend_idx = Select::with_theme(&theme)
+        .with_prompt("Backend")
+        .items(&op.backend_options)
+        .default(backend_default)
+        .interact()
+        .context("Backend selection cancelled")?;
+
+    let selected_backend = &op.backend_options[backend_idx];
+
+    // Step 3: Select model — rebuild suggestions based on selected backend
+    let model_suggestions = coda_core::config::model_suggestions_for_backend(selected_backend);
+    let mut model_items: Vec<String> = model_suggestions.clone();
+    model_items.push("Custom...".to_string());
+
+    let model_default = model_suggestions
+        .iter()
+        .position(|m| *m == op.model)
+        .unwrap_or(0);
+
+    let model_idx = Select::with_theme(&theme)
+        .with_prompt("Model")
+        .items(&model_items)
+        .default(model_default)
+        .interact()
+        .context("Model selection cancelled")?;
+
+    let selected_model = if model_idx == model_suggestions.len() {
+        // "Custom..." selected
+        let input: String = Input::with_theme(&theme)
+            .with_prompt("Enter custom model name")
+            .interact_text()
+            .context("Model input cancelled")?;
+        input
+    } else {
+        model_items[model_idx].clone()
+    };
+
+    // Step 4: Select effort
+    let effort_default = op
+        .effort_options
+        .iter()
+        .position(|e| *e == op.effort)
+        .unwrap_or(2); // default to "high" index
+
+    let effort_idx = Select::with_theme(&theme)
+        .with_prompt("Effort")
+        .items(&op.effort_options)
+        .default(effort_default)
+        .interact()
+        .context("Effort selection cancelled")?;
+
+    let selected_effort = &op.effort_options[effort_idx];
+
+    Ok(vec![
+        (
+            format!("agents.{}.backend", op.name),
+            selected_backend.clone(),
+        ),
+        (format!("agents.{}.model", op.name), selected_model),
+        (
+            format!("agents.{}.effort", op.name),
+            selected_effort.clone(),
+        ),
+    ])
 }

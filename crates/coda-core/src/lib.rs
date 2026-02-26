@@ -41,7 +41,7 @@ pub mod task;
 pub use async_ops::{AsyncGhOps, AsyncGitOps};
 pub use config::{
     AgentBackend, AgentsConfig, CodaConfig, ConfigKeyDescriptor, ConfigValueType,
-    OperationAgentConfig, ReasoningEffort, ResolvedAgentConfig,
+    OperationAgentConfig, OperationSummary, ReasoningEffort, ResolvedAgentConfig,
 };
 pub use engine::{
     CleanedWorktree, Engine, InitEvent, ResolvedConfigSummary, commit_coda_artifacts,

@@ -922,6 +922,7 @@ impl Engine {
             plan: self.config.resolve_plan(),
             run: self.config.resolve_run(),
             review: self.config.resolve_review(),
+            verify: self.config.resolve_verify(),
         }
     }
 
@@ -952,9 +953,31 @@ impl Engine {
     /// fails validation, or the file cannot be read/written.
     pub fn config_set(&self, key: &str, value: &str) -> Result<(), CoreError> {
         let config_path = self.project_root.join(".coda/config.yml");
-        let content = fs::read_to_string(&config_path).map_err(|e| {
-            CoreError::ConfigError(format!("Cannot read {}: {e}", config_path.display()))
-        })?;
+        let content = match fs::read_to_string(&config_path) {
+            Ok(c) => c,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                // Auto-create .coda/ directory and default config file
+                let coda_dir = self.project_root.join(".coda");
+                fs::create_dir_all(&coda_dir).map_err(|e| {
+                    CoreError::ConfigError(format!("Cannot create {}: {e}", coda_dir.display()))
+                })?;
+                let default_yaml = serde_yaml_ng::to_string(&crate::config::CodaConfig::default())
+                    .map_err(|e| {
+                        CoreError::ConfigError(format!("Cannot serialize default config: {e}"))
+                    })?;
+                fs::write(&config_path, &default_yaml).map_err(|e| {
+                    CoreError::ConfigError(format!("Cannot write {}: {e}", config_path.display()))
+                })?;
+                info!("Created default config at {}", config_path.display());
+                default_yaml
+            }
+            Err(e) => {
+                return Err(CoreError::ConfigError(format!(
+                    "Cannot read {}: {e}",
+                    config_path.display()
+                )));
+            }
+        };
 
         let mut yaml: serde_yaml_ng::Value = serde_yaml_ng::from_str(&content)
             .map_err(|e| CoreError::ConfigError(format!("Invalid YAML: {e}")))?;
@@ -987,6 +1010,8 @@ pub struct ResolvedConfigSummary {
     pub run: crate::config::ResolvedAgentConfig,
     /// Resolved config for `review`.
     pub review: crate::config::ResolvedAgentConfig,
+    /// Resolved config for `verify`.
+    pub verify: crate::config::ResolvedAgentConfig,
 }
 
 /// Resolves a dot-path (e.g., `"agents.run.model"`) against a YAML value tree.

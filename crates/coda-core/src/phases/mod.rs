@@ -158,6 +158,15 @@ pub struct PhaseContext {
     pub pre_squash_commits: Vec<CommitInfo>,
     /// Cancellation token for graceful shutdown.
     pub cancel_token: CancellationToken,
+    /// System prompt used to create the main session.
+    ///
+    /// Stored so that isolated sessions (e.g., verify with a different
+    /// backend/model) can be created with the same prompt context.
+    pub system_prompt: String,
+    /// Remaining budget in USD at session creation time.
+    ///
+    /// Used when creating isolated sessions for quality phases.
+    pub remaining_budget: f64,
 }
 
 impl PhaseContext {
@@ -262,6 +271,44 @@ impl PhaseContext {
             self.state().feature.slug,
         );
         async move { commit_coda_artifacts_async(&git, &cwd, &[".coda/"], &msg).await }
+    }
+
+    /// Creates a new [`AgentSession`] with a different resolved config.
+    ///
+    /// Used when a quality phase (e.g., verify) is configured with a
+    /// different backend/model than the main run session and requires
+    /// an isolated subprocess.
+    ///
+    /// # Errors
+    ///
+    /// Returns `CoreError` if the session cannot be created.
+    pub fn create_isolated_session(
+        &self,
+        resolved: &crate::config::ResolvedAgentConfig,
+    ) -> Result<AgentSession, CoreError> {
+        use crate::profile::AgentProfile;
+        use crate::session::SessionConfig;
+
+        let options = AgentProfile::Coder.to_options(
+            &self.system_prompt,
+            self.worktree_path.clone(),
+            self.config.agent.max_turns,
+            self.remaining_budget,
+            resolved,
+        );
+
+        let client = coda_agent_sdk::AgentSdkClient::new(Some(options), None);
+        let session_config = SessionConfig {
+            idle_timeout_secs: self.config.agent.idle_timeout_secs,
+            tool_execution_timeout_secs: self.config.agent.tool_execution_timeout_secs,
+            idle_retries: self.config.agent.idle_retries,
+            max_budget_usd: self.remaining_budget,
+        };
+
+        let mut session = AgentSession::new(client, session_config);
+        session.set_cancellation_token(self.cancel_token.clone());
+
+        Ok(session)
     }
 
     /// Sends a prompt and collects the full response via [`AgentSession`].

@@ -413,6 +413,8 @@ impl Runner {
             gh: async_gh,
             pre_squash_commits: Vec::new(),
             cancel_token,
+            system_prompt,
+            remaining_budget,
         };
 
         Ok(Self { ctx })

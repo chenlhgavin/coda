@@ -286,6 +286,7 @@ impl App {
                     ("plan", &summary.plan),
                     ("run", &summary.run),
                     ("review", &summary.review),
+                    ("verify", &summary.verify),
                 ] {
                     println!(
                         "  {:<12} {:<10} {:<26} {:<8}",
@@ -340,18 +341,42 @@ impl App {
                     }
                 }
                 (None, _) => {
-                    let schema = self.engine.config_schema();
-                    let (key, value) = crate::interactive_config::prompt_key_and_value(&schema)?;
-                    match self.engine.config_set(&key, &value) {
-                        Ok(()) => {
-                            println!("Updated {key} = {value}");
-                            Ok(())
-                        }
-                        Err(e) => {
-                            println!("Error: {e}");
-                            std::process::exit(1);
+                    let summaries = self.engine.config().operation_summaries();
+                    let pairs = crate::interactive_config::prompt_operation_config(&summaries)?;
+
+                    // pairs is exactly 3: backend, model, effort
+                    let op_name = pairs[0]
+                        .0
+                        .strip_prefix("agents.")
+                        .and_then(|s| s.split('.').next())
+                        .unwrap_or("?");
+                    let mut backend_val = String::new();
+                    let mut model_val = String::new();
+                    let mut effort_val = String::new();
+
+                    for (key, value) in &pairs {
+                        match self.engine.config_set(key, value) {
+                            Ok(()) => {
+                                if key.ends_with(".backend") {
+                                    backend_val.clone_from(value);
+                                } else if key.ends_with(".model") {
+                                    model_val.clone_from(value);
+                                } else if key.ends_with(".effort") {
+                                    effort_val.clone_from(value);
+                                }
+                            }
+                            Err(e) => {
+                                println!("Error setting {key}: {e}");
+                                std::process::exit(1);
+                            }
                         }
                     }
+
+                    println!(
+                        "\n  Updated {op_name}: backend={backend_val}, \
+                         model={model_val}, effort={effort_val}",
+                    );
+                    Ok(())
                 }
             },
         }
