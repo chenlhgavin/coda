@@ -99,7 +99,7 @@ impl AgentProfile {
                     Self::Coder => "danger-full-access",
                 };
                 options.codex = Some(CodexOptions {
-                    approval_policy: Some("full-auto".to_string()),
+                    approval_policy: Some("never".to_string()),
                     sandbox_mode: Some(sandbox_mode.to_string()),
                 });
             }
@@ -358,7 +358,7 @@ mod tests {
             Some(&Some("model_reasoning_effort=\"high\"".to_string()))
         );
         let codex = options.codex.as_ref().expect("codex options should be set");
-        assert_eq!(codex.approval_policy.as_deref(), Some("full-auto"));
+        assert_eq!(codex.approval_policy.as_deref(), Some("never"));
         assert_eq!(codex.sandbox_mode.as_deref(), Some("danger-full-access"));
     }
 

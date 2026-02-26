@@ -125,7 +125,7 @@ pub async fn run_codex_review(
         model: Some(model.to_string()),
         cwd: Some(worktree.to_path_buf()),
         codex: Some(CodexOptions {
-            approval_policy: Some("full-auto".to_string()),
+            approval_policy: Some("never".to_string()),
             sandbox_mode: Some("read-only".to_string()),
         }),
         extra_args: HashMap::from([(

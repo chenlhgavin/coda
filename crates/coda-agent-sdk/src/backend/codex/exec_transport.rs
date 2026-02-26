@@ -274,7 +274,7 @@ mod tests {
     fn test_should_build_exec_command_with_codex_options() {
         let options = AgentOptions {
             codex: Some(crate::options::CodexOptions {
-                approval_policy: Some("full-auto".to_string()),
+                approval_policy: Some("never".to_string()),
                 sandbox_mode: Some("danger-full-access".to_string()),
             }),
             ..Default::default()

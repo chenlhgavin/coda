@@ -312,7 +312,7 @@ impl From<String> for AssistantMessageError {
 /// Codex-specific options.
 #[derive(Debug, Clone, Default)]
 pub struct CodexOptions {
-    /// Approval policy: `"auto-edit"`, `"full-auto"`, or `"suggest"`.
+    /// Approval policy: `"untrusted"`, `"on-failure"`, `"on-request"`, or `"never"`.
     pub approval_policy: Option<String>,
     /// Sandbox mode: `"read-only"`, `"workspace-write"`, or `"danger-full-access"`.
     pub sandbox_mode: Option<String>,
