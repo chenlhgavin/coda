@@ -696,17 +696,17 @@ impl CodaConfig {
 
     /// Resolves agent configuration for the `verify` operation.
     ///
-    /// Falls back to `agent.model` for model, `Claude` for backend,
-    /// and `agent.default_effort` for effort.
+    /// Defaults to `Codex` backend with `gpt-5.3-codex` model and
+    /// `agent.default_effort` for effort.
     pub fn resolve_verify(&self) -> ResolvedAgentConfig {
         ResolvedAgentConfig {
-            backend: self.agents.verify.backend.unwrap_or_default(),
+            backend: self.agents.verify.backend.unwrap_or(AgentBackend::Codex),
             model: self
                 .agents
                 .verify
                 .model
                 .clone()
-                .unwrap_or_else(|| self.agent.model.clone()),
+                .unwrap_or_else(|| "gpt-5.3-codex".to_string()),
             effort: self
                 .agents
                 .verify
@@ -1514,8 +1514,8 @@ agents:
     fn test_should_resolve_verify_with_defaults() {
         let config = CodaConfig::default();
         let resolved = config.resolve_verify();
-        assert_eq!(resolved.backend, AgentBackend::Claude);
-        assert_eq!(resolved.model, "claude-opus-4-6");
+        assert_eq!(resolved.backend, AgentBackend::Codex);
+        assert_eq!(resolved.model, "gpt-5.3-codex");
         assert_eq!(resolved.effort, ReasoningEffort::High);
     }
 
@@ -1532,11 +1532,11 @@ agents:
     }
 
     #[test]
-    fn test_should_resolve_verify_falls_back_to_agent_model() {
+    fn test_should_resolve_verify_defaults_to_codex_model() {
         let mut config = CodaConfig::default();
         config.agent.model = "claude-sonnet-4-6".to_string();
         let resolved = config.resolve_verify();
-        assert_eq!(resolved.model, "claude-sonnet-4-6");
+        assert_eq!(resolved.model, "gpt-5.3-codex");
     }
 
     #[test]
