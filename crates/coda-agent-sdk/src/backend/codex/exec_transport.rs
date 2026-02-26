@@ -58,7 +58,7 @@ fn build_exec_command(cli_path: &str, prompt: &str, options: &AgentOptions) -> V
 
     if let Some(ref codex_opts) = options.codex {
         if let Some(ref policy) = codex_opts.approval_policy {
-            cmd.push("-c".to_string());
+            cmd.push("--config".to_string());
             cmd.push(format!("approval_policy=\"{}\"", policy));
         }
         if let Some(ref sandbox) = codex_opts.sandbox_mode {
@@ -80,7 +80,7 @@ fn build_exec_command(cli_path: &str, prompt: &str, options: &AgentOptions) -> V
                     .map(|p| format!("\"{}\"", p))
                     .collect::<Vec<_>>()
                     .join(", ");
-                cmd.push("-c".to_string());
+                cmd.push("--config".to_string());
                 cmd.push(format!("sandbox_permissions=[{}]", perm_str));
             }
         }
@@ -280,7 +280,7 @@ mod tests {
             ..Default::default()
         };
         let cmd = build_exec_command("/usr/bin/codex", "test", &options);
-        assert!(cmd.contains(&"-c".to_string()));
+        assert!(cmd.contains(&"--config".to_string()));
         assert!(cmd.iter().any(|s| s.contains("approval_policy")));
         assert!(cmd.iter().any(|s| s.contains("sandbox_permissions")));
     }

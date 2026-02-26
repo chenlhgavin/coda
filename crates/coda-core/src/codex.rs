@@ -129,7 +129,7 @@ pub async fn run_codex_review(
             sandbox_mode: Some("read-only".to_string()),
         }),
         extra_args: HashMap::from([(
-            "c".to_string(),
+            "config".to_string(),
             Some(format!("model_reasoning_effort=\"{effort_str}\"")),
         )]),
         ..AgentOptions::default()

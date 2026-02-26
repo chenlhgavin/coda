@@ -91,8 +91,8 @@ impl AgentProfile {
             }
             AgentBackend::Codex => {
                 options.extra_args.insert(
-                    "model_reasoning_effort".to_string(),
-                    Some(resolved.effort.to_string()),
+                    "config".to_string(),
+                    Some(format!("model_reasoning_effort=\"{}\"", resolved.effort)),
                 );
                 let sandbox_mode = match self {
                     Self::Planner => "read-only",
@@ -354,8 +354,8 @@ mod tests {
         );
         assert_eq!(options.model, Some("gpt-5.3-codex".to_string()));
         assert_eq!(
-            options.extra_args.get("model_reasoning_effort"),
-            Some(&Some("high".to_string()))
+            options.extra_args.get("config"),
+            Some(&Some("model_reasoning_effort=\"high\"".to_string()))
         );
         let codex = options.codex.as_ref().expect("codex options should be set");
         assert_eq!(codex.approval_policy.as_deref(), Some("full-auto"));
