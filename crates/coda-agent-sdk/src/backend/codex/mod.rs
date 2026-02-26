@@ -63,12 +63,9 @@ impl Backend for CodexBackend {
     fn validate_options(&self, options: &AgentOptions) -> Result<()> {
         let mut unsupported = Vec::new();
 
-        if options.system_prompt.is_some() {
-            unsupported.push("system_prompt".to_string());
-        }
-        if options.hooks.is_some() {
-            unsupported.push("hooks".to_string());
-        }
+        // system_prompt: translated to `developer_instructions` by command builders.
+        // hooks: silently ignored — Codex uses its own sandbox system.
+
         if options.fork_session {
             unsupported.push("fork_session".to_string());
         }

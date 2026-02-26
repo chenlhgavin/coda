@@ -5,10 +5,10 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-User=chenlh
-Group=chenlh
-WorkingDirectory=/home/chenlh/workspace/coda
-ExecStart=/home/chenlh/workspace/coda/target/release/coda-server
+User=ubuntu
+Group=ubuntu
+WorkingDirectory=/home/ubuntu/workspace/coda
+ExecStart=/usr/local/bin/coda-server
 Restart=on-failure
 RestartSec=5
 
@@ -21,14 +21,14 @@ StandardError=journal
 SyslogIdentifier=coda-server
 
 # Environment (GH_TOKEN for GitHub CLI authentication)
-EnvironmentFile=/home/chenlh/.coda-server/env
+EnvironmentFile=/home/ubuntu/.coda-server/env
 
 # Security hardening
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=no
 PrivateTmp=true
-ReadWritePaths=/home/chenlh/workspace /home/chenlh/.coda-server
+ReadWritePaths=/home/ubuntu/workspace /home/ubuntu/.coda-server
 
 [Install]
 WantedBy=multi-user.target

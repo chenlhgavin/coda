@@ -363,6 +363,26 @@ mod tests {
     }
 
     #[test]
+    fn test_should_pass_codex_validation_with_system_prompt() {
+        use crate::config::ReasoningEffort;
+        use coda_agent_sdk::backend::Backend;
+        use coda_agent_sdk::backend::codex::CodexBackend;
+
+        let profile = AgentProfile::Coder;
+        let resolved = ResolvedAgentConfig {
+            backend: AgentBackend::Codex,
+            model: "gpt-5.3-codex".to_string(),
+            effort: ReasoningEffort::High,
+        };
+        let options = profile.to_options("Test", PathBuf::from("/tmp"), 10, 5.0, &resolved);
+
+        // system_prompt is set by to_options — Codex backend must accept it
+        assert!(options.system_prompt.is_some());
+        let backend = CodexBackend::new();
+        assert!(backend.validate_options(&options).is_ok());
+    }
+
+    #[test]
     fn test_should_set_codex_planner_read_only_sandbox() {
         use crate::config::ReasoningEffort;
 

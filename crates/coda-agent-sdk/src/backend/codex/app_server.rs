@@ -27,7 +27,7 @@ use tokio::process::Child;
 use tokio::sync::{broadcast, mpsc};
 use tokio::task::JoinHandle;
 
-use super::exec_transport::find_codex_cli;
+use super::exec_transport::{extract_instructions, find_codex_cli, toml_escape};
 use super::jsonrpc;
 use super::message_parser;
 
@@ -84,6 +84,18 @@ impl CodexSession {
         {
             cmd_args.push("-c".to_string());
             cmd_args.push(format!("approval_policy=\"{}\"", policy));
+        }
+
+        // Translate system_prompt → developer_instructions
+        if let Some(ref sp) = options.system_prompt
+            && let Some(instructions) = extract_instructions(sp)
+            && !instructions.is_empty()
+        {
+            cmd_args.push("-c".to_string());
+            cmd_args.push(format!(
+                "developer_instructions={}",
+                toml_escape(instructions)
+            ));
         }
 
         let mut child_cmd = tokio::process::Command::new(&cli_path);

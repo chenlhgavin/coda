@@ -9,6 +9,8 @@ build-release:
 	cargo build --release --bin coda-server
 
 deploy: build-release install-service
+	@echo "Installing coda-server binary to /usr/local/bin..."
+	sudo cp target/release/coda-server /usr/local/bin/coda-server
 	@echo "Restarting coda-server..."
 	sudo systemctl restart coda-server
 	@echo "Deploy complete."
