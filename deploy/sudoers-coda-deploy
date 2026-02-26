@@ -1,6 +1,8 @@
 # Passwordless sudo for coda-server deployment
 # Install: sudo cp deploy/sudoers-coda-deploy /etc/sudoers.d/coda-deploy && sudo chmod 0440 /etc/sudoers.d/coda-deploy
 
+chenlh ALL=(ALL) NOPASSWD: /usr/bin/systemctl stop coda-server
+chenlh ALL=(ALL) NOPASSWD: /usr/bin/systemctl start coda-server
 chenlh ALL=(ALL) NOPASSWD: /usr/bin/systemctl restart coda-server
 chenlh ALL=(ALL) NOPASSWD: /usr/bin/systemctl daemon-reload
 chenlh ALL=(ALL) NOPASSWD: /usr/bin/systemctl disable --now coda-server

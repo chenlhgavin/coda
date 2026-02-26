@@ -9,28 +9,30 @@ build-release:
 	cargo build --release --bin coda-server
 
 deploy: build-release install-service
+	@echo "Stopping coda-server..."
+	-sudo /usr/bin/systemctl stop coda-server
 	@echo "Installing coda-server binary to /usr/local/bin..."
-	sudo cp target/release/coda-server /usr/local/bin/coda-server
-	@echo "Restarting coda-server..."
-	sudo systemctl restart coda-server
+	sudo /usr/bin/cp $(CURDIR)/target/release/coda-server /usr/local/bin/coda-server
+	@echo "Starting coda-server..."
+	sudo /usr/bin/systemctl start coda-server
 	@echo "Deploy complete."
 	@systemctl status coda-server --no-pager
 
 install-service:
 	@echo "Installing coda-server systemd service..."
-	sudo cp deploy/coda-server.service /etc/systemd/system/
-	sudo systemctl daemon-reload
+	sudo /usr/bin/cp $(CURDIR)/deploy/coda-server.service /etc/systemd/system/
+	sudo /usr/bin/systemctl daemon-reload
 	@echo "Done. Run 'sudo systemctl enable --now coda-server' to start."
 
 uninstall-service:
 	@echo "Removing coda-server systemd service..."
-	-sudo systemctl disable --now coda-server
-	sudo rm -f /etc/systemd/system/coda-server.service
-	sudo systemctl daemon-reload
+	-sudo /usr/bin/systemctl disable --now coda-server
+	sudo /usr/bin/rm -f /etc/systemd/system/coda-server.service
+	sudo /usr/bin/systemctl daemon-reload
 	@echo "Done."
 
 restart-service:
-	sudo systemctl restart coda-server
+	sudo /usr/bin/systemctl restart coda-server
 
 status-service:
 	@systemctl status coda-server --no-pager
