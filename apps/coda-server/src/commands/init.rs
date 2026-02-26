@@ -111,8 +111,10 @@ pub(crate) async fn start_init(
 
     info!(channel, "Starting init command");
 
+    let config_info = engine.config().resolve_init().to_string();
+
     // Update the existing message with initial progress
-    let initial_blocks = formatter::init_progress(&[]);
+    let initial_blocks = formatter::init_progress(&[], Some(&config_info));
     state
         .slack()
         .update_message(channel, message_ts, initial_blocks)
@@ -161,6 +163,7 @@ async fn run_init_task(
     let _guard =
         TaskCleanupGuard::new(Arc::clone(&state), task_key).with_repo_unlock(repo_path.clone());
 
+    let config_info = engine.config().resolve_init().to_string();
     let (tx, rx) = mpsc::unbounded_channel();
     let slack = state.slack().clone();
 
@@ -170,6 +173,7 @@ async fn run_init_task(
         channel.clone(),
         message_ts.clone(),
         rx,
+        config_info,
     ));
 
     debug!("Starting engine.init()");
@@ -235,6 +239,7 @@ async fn consume_init_events(
     channel: String,
     message_ts: String,
     mut rx: mpsc::UnboundedReceiver<InitEvent>,
+    config_info: String,
 ) -> Vec<InitPhaseDisplay> {
     let mut display_phases: Vec<InitPhaseDisplay> = Vec::new();
     let mut last_update = Instant::now() - UPDATE_DEBOUNCE;
@@ -242,7 +247,7 @@ async fn consume_init_events(
 
     while let Some(event) = rx.recv().await {
         let immediate = match event {
-            InitEvent::InitStarting { ref phases } => {
+            InitEvent::InitStarting { ref phases, .. } => {
                 display_phases = phases
                     .iter()
                     .map(|name| InitPhaseDisplay {
@@ -304,13 +309,13 @@ async fn consume_init_events(
         };
 
         if immediate {
-            send_update(&slack, &channel, &message_ts, &display_phases).await;
+            send_update(&slack, &channel, &message_ts, &display_phases, &config_info).await;
             last_update = Instant::now();
             pending_update = false;
         } else {
             pending_update = true;
             if last_update.elapsed() >= UPDATE_DEBOUNCE {
-                send_update(&slack, &channel, &message_ts, &display_phases).await;
+                send_update(&slack, &channel, &message_ts, &display_phases, &config_info).await;
                 last_update = Instant::now();
                 pending_update = false;
             }
@@ -319,7 +324,7 @@ async fn consume_init_events(
 
     // Flush any remaining pending update
     if pending_update {
-        send_update(&slack, &channel, &message_ts, &display_phases).await;
+        send_update(&slack, &channel, &message_ts, &display_phases, &config_info).await;
     }
 
     display_phases
@@ -331,8 +336,9 @@ async fn send_update(
     channel: &str,
     ts: &str,
     phases: &[InitPhaseDisplay],
+    config_info: &str,
 ) {
-    let blocks = formatter::init_progress(phases);
+    let blocks = formatter::init_progress(phases, Some(config_info));
     if let Err(e) = slack.update_message(channel, ts, blocks).await {
         warn!(error = %e, channel, "Failed to update init progress message");
     }

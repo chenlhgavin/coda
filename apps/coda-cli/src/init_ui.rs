@@ -96,6 +96,8 @@ pub struct InitUi {
     finished: bool,
     success: bool,
     spinner_tick: usize,
+    /// Resolved config display string (e.g., "claude / claude-sonnet-4-6 / high").
+    config_info: Option<String>,
 }
 
 impl InitUi {
@@ -128,6 +130,7 @@ impl InitUi {
                 finished: false,
                 success: false,
                 spinner_tick: 0,
+                config_info: None,
             })
         };
 
@@ -242,7 +245,8 @@ impl InitUi {
     /// Processes a single [`InitEvent`] and updates internal state.
     fn handle_event(&mut self, event: InitEvent) {
         match event {
-            InitEvent::InitStarting { phases } => {
+            InitEvent::InitStarting { phases, config } => {
+                self.config_info = Some(config.to_string());
                 self.phases = phases
                     .into_iter()
                     .map(|name| PhaseDisplay {
@@ -349,6 +353,7 @@ impl InitUi {
 
         // Move content_lines out temporarily via O(1) pointer swap
         let content_lines = std::mem::take(&mut self.content_lines);
+        let config_info = self.config_info.clone();
 
         let mut visible_height: u16 = 0;
         let mut visible_width: u16 = 0;
@@ -367,7 +372,15 @@ impl InitUi {
                 ])
                 .split(area);
 
-            tui_widgets::render_header(frame, chunks[0], "Init", &project_root, finished, success);
+            tui_widgets::render_header(
+                frame,
+                chunks[0],
+                "Init",
+                &project_root,
+                finished,
+                success,
+                config_info.as_deref(),
+            );
             tui_widgets::render_pipeline(frame, chunks[1], &phases, &pr_status, spinner_tick);
 
             (visible_height, visible_width) = tui_widgets::render_middle(

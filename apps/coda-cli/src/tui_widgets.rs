@@ -98,7 +98,8 @@ pub enum PrDisplayStatus {
 ///
 /// The header occupies a single row with a dark-gray background.
 /// `title_prefix` is typically "Init" or "Run", and `label` is the
-/// project root or feature slug.
+/// project root or feature slug. When `config_info` is provided, it is
+/// displayed after the status indicator (e.g., `"claude / claude-sonnet-4-6 / high"`).
 pub fn render_header(
     frame: &mut Frame,
     area: Rect,
@@ -106,6 +107,7 @@ pub fn render_header(
     label: &str,
     finished: bool,
     success: bool,
+    config_info: Option<&str>,
 ) {
     let status = if finished {
         if success {
@@ -117,13 +119,22 @@ pub fn render_header(
         Span::styled(" [Running] ", Style::default().fg(Color::Yellow).bold())
     };
 
-    let header = Line::from(vec![
+    let mut spans = vec![
         Span::styled(
             format!(" CODA {title_prefix}: {label} "),
             Style::default().fg(Color::White).bold(),
         ),
         status,
-    ]);
+    ];
+
+    if let Some(info) = config_info {
+        spans.push(Span::styled(
+            format!(" {info}"),
+            Style::default().fg(Color::DarkGray),
+        ));
+    }
+
+    let header = Line::from(spans);
     let paragraph = Paragraph::new(header).style(Style::default().bg(Color::DarkGray));
     frame.render_widget(paragraph, area);
 }

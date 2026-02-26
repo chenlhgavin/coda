@@ -62,6 +62,8 @@ pub enum RunEvent {
     RunStarting {
         /// Ordered list of phase names for the entire pipeline.
         phases: Vec<String>,
+        /// Resolved agent configuration for this run operation.
+        config: crate::config::ResolvedAgentConfig,
     },
     /// A phase is about to start executing.
     PhaseStarting {
@@ -560,6 +562,7 @@ impl Runner {
             .collect();
         self.ctx.emit_event(RunEvent::RunStarting {
             phases: phase_names.clone(),
+            config: self.ctx.config.resolve_run(),
         });
         let feature_slug_for_log = self.ctx.state().feature.slug.clone();
         if let Some(logger) = &mut self.ctx.run_logger {

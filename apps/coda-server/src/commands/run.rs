@@ -70,8 +70,10 @@ pub async fn handle_run(
 
     info!(channel, feature_slug = slug, "Starting run command");
 
+    let config_info = engine.config().resolve_run().to_string();
+
     // Post initial progress message
-    let initial_blocks = formatter::run_progress(&slug, &[]);
+    let initial_blocks = formatter::run_progress(&slug, &[], Some(&config_info));
     let resp = state.slack().post_message(&channel, initial_blocks).await?;
     let message_ts = resp.ts;
 
@@ -117,17 +119,20 @@ async fn run_feature_task(
     let task_key = format!("run:{}:{slug}", repo_path.display());
     let _guard = TaskCleanupGuard::new(Arc::clone(&state), task_key);
 
+    let config_info = engine.config().resolve_run().to_string();
     let (tx, rx) = mpsc::unbounded_channel();
     let slack = state.slack().clone();
 
     // Drive event consumption in parallel with engine execution
     let slug_for_events = slug.clone();
+    let config_info_for_events = config_info.clone();
     let event_handle = tokio::spawn(consume_run_events(
         slack,
         channel.clone(),
         message_ts.clone(),
         slug_for_events,
         rx,
+        config_info_for_events,
     ));
 
     debug!(slug, "Starting engine.run()");
@@ -164,7 +169,7 @@ async fn run_feature_task(
         Ok(ref results) => {
             info!(channel, slug, "Run completed successfully");
             let phases = results_to_phases(results);
-            let progress = formatter::run_progress(&slug, &phases);
+            let progress = formatter::run_progress(&slug, &phases, Some(&config_info));
             let notification = formatter::run_completion_notification(
                 &slug,
                 true,
@@ -249,7 +254,7 @@ fn results_to_phases(results: &[coda_core::TaskResult]) -> Vec<RunPhaseDisplay> 
 #[cfg(test)]
 fn build_run_summary(slug: &str, results: &[coda_core::TaskResult]) -> Vec<serde_json::Value> {
     let phases = results_to_phases(results);
-    formatter::run_progress(slug, &phases)
+    formatter::run_progress(slug, &phases, None)
 }
 
 /// Mutable tracking state for the run event consumer.
@@ -260,19 +265,22 @@ struct RunTracker {
     slug: String,
     /// PR URL if created.
     pr_url: Option<String>,
+    /// Resolved config display string.
+    config_info: String,
 }
 
 impl RunTracker {
-    fn new(slug: String) -> Self {
+    fn new(slug: String, config_info: String) -> Self {
         Self {
             phases: Vec::new(),
             slug,
             pr_url: None,
+            config_info,
         }
     }
 
     fn to_blocks(&self) -> Vec<serde_json::Value> {
-        let mut blocks = formatter::run_progress(&self.slug, &self.phases);
+        let mut blocks = formatter::run_progress(&self.slug, &self.phases, Some(&self.config_info));
         if let Some(ref url) = self.pr_url {
             blocks.push(serde_json::json!({
                 "type": "section",
@@ -581,8 +589,9 @@ async fn consume_run_events(
     message_ts: String,
     slug: String,
     mut rx: mpsc::UnboundedReceiver<RunEvent>,
+    config_info: String,
 ) -> Option<String> {
-    let mut tracker = RunTracker::new(slug);
+    let mut tracker = RunTracker::new(slug, config_info);
     let mut streamer = PhaseThreadStreamer::new(slack.clone(), channel.clone(), message_ts.clone());
     let mut last_update = Instant::now() - STREAM_UPDATE_DEBOUNCE;
     let mut pending_update = false;
@@ -592,7 +601,7 @@ async fn consume_run_events(
             event = rx.recv() => {
                 let Some(event) = event else { break; };
                 let immediate = match event {
-                    RunEvent::RunStarting { ref phases } => {
+                    RunEvent::RunStarting { ref phases, .. } => {
                         tracker.phases = phases
                             .iter()
                             .map(|name| RunPhaseDisplay {
@@ -744,14 +753,14 @@ mod tests {
 
     #[test]
     fn test_should_create_run_tracker() {
-        let tracker = RunTracker::new("add-auth".to_string());
+        let tracker = RunTracker::new("add-auth".to_string(), String::new());
         assert!(tracker.phases.is_empty());
         assert!(tracker.pr_url.is_none());
     }
 
     #[test]
     fn test_should_render_tracker_blocks_without_pr() {
-        let tracker = RunTracker::new("add-auth".to_string());
+        let tracker = RunTracker::new("add-auth".to_string(), String::new());
         let blocks = tracker.to_blocks();
         // Should produce at least a header + section
         assert!(blocks.len() >= 2);
@@ -761,7 +770,7 @@ mod tests {
 
     #[test]
     fn test_should_render_tracker_blocks_with_pr() {
-        let mut tracker = RunTracker::new("add-auth".to_string());
+        let mut tracker = RunTracker::new("add-auth".to_string(), String::new());
         tracker.pr_url = Some("https://github.com/org/repo/pull/42".to_string());
         let blocks = tracker.to_blocks();
         let last = blocks.last().unwrap_or(&serde_json::Value::Null);

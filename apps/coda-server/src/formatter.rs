@@ -300,11 +300,17 @@ pub enum PhaseDisplayStatus {
 ///         started_at: None,
 ///     },
 /// ];
-/// let blocks = formatter::init_progress(&phases);
+/// let blocks = formatter::init_progress(&phases, None);
 /// assert!(!blocks.is_empty());
 /// ```
-pub fn init_progress(phases: &[InitPhaseDisplay]) -> Vec<serde_json::Value> {
+pub fn init_progress(
+    phases: &[InitPhaseDisplay],
+    config_info: Option<&str>,
+) -> Vec<serde_json::Value> {
     let mut blocks = vec![header("CODA Init")];
+    if let Some(info) = config_info {
+        blocks.push(context(info));
+    }
     blocks.push(section(&format_init_phase_lines(phases)));
     blocks
 }
@@ -426,11 +432,18 @@ fn format_init_phase_lines(phases: &[InitPhaseDisplay]) -> String {
 ///         cost_usd: None,
 ///     },
 /// ];
-/// let blocks = formatter::run_progress("add-auth", &phases);
+/// let blocks = formatter::run_progress("add-auth", &phases, None);
 /// assert!(!blocks.is_empty());
 /// ```
-pub fn run_progress(feature_slug: &str, phases: &[RunPhaseDisplay]) -> Vec<serde_json::Value> {
+pub fn run_progress(
+    feature_slug: &str,
+    phases: &[RunPhaseDisplay],
+    config_info: Option<&str>,
+) -> Vec<serde_json::Value> {
     let mut blocks = vec![header(&format!("Run: `{feature_slug}`"))];
+    if let Some(info) = config_info {
+        blocks.push(context(info));
+    }
 
     let mut lines = Vec::with_capacity(phases.len());
     for phase in phases {
@@ -768,12 +781,16 @@ pub fn no_cleanable_worktrees() -> Vec<serde_json::Value> {
 /// ```
 /// use coda_server::formatter;
 ///
-/// let blocks = formatter::plan_thread_header("add-auth", "Discussing");
+/// let blocks = formatter::plan_thread_header("add-auth", "Discussing", None);
 /// assert_eq!(blocks.len(), 2);
 /// let header_text = blocks[0]["text"]["text"].as_str().unwrap_or("");
 /// assert!(header_text.contains("add-auth"));
 /// ```
-pub fn plan_thread_header(feature_slug: &str, phase: &str) -> Vec<serde_json::Value> {
+pub fn plan_thread_header(
+    feature_slug: &str,
+    phase: &str,
+    config_info: Option<&str>,
+) -> Vec<serde_json::Value> {
     let phase_icon = match phase {
         "Discussing" => ":speech_balloon:",
         "Approved" => ":white_check_mark:",
@@ -782,10 +799,14 @@ pub fn plan_thread_header(feature_slug: &str, phase: &str) -> Vec<serde_json::Va
         _ => ":clipboard:",
     };
 
-    vec![
+    let mut blocks = vec![
         header(&format!("Plan: `{feature_slug}`")),
         section(&format!("{phase_icon} *Status:* {phase}")),
-    ]
+    ];
+    if let Some(info) = config_info {
+        blocks.push(context(info));
+    }
+    blocks
 }
 
 /// Builds a Block Kit notification message posted after a run finishes.
@@ -1821,7 +1842,7 @@ mod tests {
                 started_at: None,
             },
         ];
-        let blocks = init_progress(&phases);
+        let blocks = init_progress(&phases, None);
 
         assert_eq!(blocks.len(), 2); // header + section
         assert_eq!(blocks[0]["type"], "header");
@@ -1849,7 +1870,7 @@ mod tests {
                 started_at: Some(Instant::now()),
             },
         ];
-        let blocks = init_progress(&phases);
+        let blocks = init_progress(&phases, None);
 
         let text = blocks[1]["text"]["text"].as_str().unwrap_or("");
         assert!(text.contains(":white_check_mark:"));
@@ -1867,7 +1888,7 @@ mod tests {
             cost_usd: None,
             started_at: None,
         }];
-        let blocks = init_progress(&phases);
+        let blocks = init_progress(&phases, None);
         let text = blocks[1]["text"]["text"].as_str().unwrap_or("");
         assert!(text.contains(":x:"));
         assert!(text.contains("failed after 10s"));
@@ -1930,7 +1951,7 @@ mod tests {
             turns: None,
             cost_usd: None,
         }];
-        let blocks = run_progress("add-auth", &phases);
+        let blocks = run_progress("add-auth", &phases, None);
 
         assert_eq!(blocks[0]["type"], "header");
         let header_text = blocks[0]["text"]["text"].as_str().unwrap_or("");
@@ -1955,7 +1976,7 @@ mod tests {
                 cost_usd: None,
             },
         ];
-        let blocks = run_progress("add-auth", &phases);
+        let blocks = run_progress("add-auth", &phases, None);
         let text = blocks[1]["text"]["text"].as_str().unwrap_or("");
         assert!(text.contains("3 turns"));
         assert!(text.contains("$0.25"));
@@ -1972,7 +1993,7 @@ mod tests {
             turns: Some(5),
             cost_usd: None,
         }];
-        let blocks = run_progress("add-auth", &phases);
+        let blocks = run_progress("add-auth", &phases, None);
         let text = blocks[1]["text"]["text"].as_str().unwrap_or("");
         assert!(text.contains(":x:"));
         assert!(text.contains("failed after 2m"));
@@ -1997,7 +2018,7 @@ mod tests {
 
     #[test]
     fn test_should_build_plan_thread_header_discussing() {
-        let blocks = plan_thread_header("add-auth", "Discussing");
+        let blocks = plan_thread_header("add-auth", "Discussing", None);
         assert_eq!(blocks.len(), 2);
 
         assert_eq!(blocks[0]["type"], "header");
@@ -2011,7 +2032,7 @@ mod tests {
 
     #[test]
     fn test_should_build_plan_thread_header_approved() {
-        let blocks = plan_thread_header("fix-login", "Approved");
+        let blocks = plan_thread_header("fix-login", "Approved", None);
         let status_text = blocks[1]["text"]["text"].as_str().unwrap_or("");
         assert!(status_text.contains(":white_check_mark:"));
         assert!(status_text.contains("Approved"));
@@ -2019,7 +2040,7 @@ mod tests {
 
     #[test]
     fn test_should_build_plan_thread_header_finalized() {
-        let blocks = plan_thread_header("add-api", "Finalized");
+        let blocks = plan_thread_header("add-api", "Finalized", None);
         let status_text = blocks[1]["text"]["text"].as_str().unwrap_or("");
         assert!(status_text.contains(":rocket:"));
         assert!(status_text.contains("Finalized"));
@@ -2027,7 +2048,7 @@ mod tests {
 
     #[test]
     fn test_should_build_plan_thread_header_cancelled() {
-        let blocks = plan_thread_header("add-api", "Cancelled");
+        let blocks = plan_thread_header("add-api", "Cancelled", None);
         let status_text = blocks[1]["text"]["text"].as_str().unwrap_or("");
         assert!(status_text.contains(":no_entry_sign:"));
         assert!(status_text.contains("Cancelled"));
@@ -2035,7 +2056,7 @@ mod tests {
 
     #[test]
     fn test_should_build_plan_thread_header_unknown_phase() {
-        let blocks = plan_thread_header("add-api", "CustomPhase");
+        let blocks = plan_thread_header("add-api", "CustomPhase", None);
         let status_text = blocks[1]["text"]["text"].as_str().unwrap_or("");
         assert!(status_text.contains(":clipboard:"));
         assert!(status_text.contains("CustomPhase"));

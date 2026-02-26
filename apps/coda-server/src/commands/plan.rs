@@ -53,6 +53,8 @@ pub async fn handle_plan(
 
     info!(channel, feature_slug = slug, "Starting plan command");
 
+    let config_info = engine.config().resolve_plan().to_string();
+
     // Create the PlanSession from the engine
     debug!("Creating plan session via engine.plan()");
     let start = Instant::now();
@@ -63,7 +65,7 @@ pub async fn handle_plan(
     );
 
     // Post thread parent message
-    let header_blocks = formatter::plan_thread_header(&slug, "Discussing");
+    let header_blocks = formatter::plan_thread_header(&slug, "Discussing", Some(&config_info));
     let resp = state.slack().post_message(&channel, header_blocks).await?;
     let thread_ts = resp.ts.clone();
 
@@ -402,7 +404,7 @@ async fn handle_approve(state: Arc<AppState>, channel: &str, thread_ts: &str) {
             info!(channel, thread_ts, "Plan approved");
 
             // Update thread parent to show Approved status
-            let header_blocks = formatter::plan_thread_header(&slug, "Approved");
+            let header_blocks = formatter::plan_thread_header(&slug, "Approved", None);
             let _ = state
                 .slack()
                 .update_message(channel, thread_ts, header_blocks)
@@ -543,7 +545,7 @@ async fn handle_done(state: Arc<AppState>, channel: &str, thread_ts: &str) {
                 .file_name()
                 .map(|n| n.to_string_lossy().to_string())
                 .unwrap_or_default();
-            let header_blocks = formatter::plan_thread_header(&slug, "Finalized");
+            let header_blocks = formatter::plan_thread_header(&slug, "Finalized", None);
             let _ = state
                 .slack()
                 .update_message(channel, thread_ts, header_blocks)
@@ -600,7 +602,7 @@ async fn handle_quit(state: Arc<AppState>, channel: &str, thread_ts: &str) {
         info!(channel, thread_ts, slug, "Plan session quit by user");
 
         // Update thread parent
-        let header_blocks = formatter::plan_thread_header(&slug, "Cancelled");
+        let header_blocks = formatter::plan_thread_header(&slug, "Cancelled", None);
         let _ = state
             .slack()
             .update_message(channel, thread_ts, header_blocks)

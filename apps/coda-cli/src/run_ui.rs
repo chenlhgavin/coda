@@ -89,6 +89,8 @@ pub struct RunUi {
     content_visible_height: u16,
     /// Width of the content area in columns (updated each draw for wrap calculations).
     content_visible_width: u16,
+    /// Resolved config display string (e.g., "claude / claude-sonnet-4-6 / high").
+    config_info: Option<String>,
 }
 
 impl RunUi {
@@ -164,6 +166,7 @@ impl RunUi {
                 auto_scroll: true,
                 content_visible_height: 0,
                 content_visible_width: 0,
+                config_info: None,
             })
         };
 
@@ -279,7 +282,8 @@ impl RunUi {
     /// Processes a single [`RunEvent`] and updates internal state.
     fn handle_event(&mut self, event: RunEvent) {
         match event {
-            RunEvent::RunStarting { phases } => {
+            RunEvent::RunStarting { phases, config } => {
+                self.config_info = Some(config.to_string());
                 // If phases were already pre-populated (resume scenario),
                 // keep the existing state so completed phases stay green.
                 if self.phases.is_empty() {
@@ -568,6 +572,7 @@ impl RunUi {
         let scroll_offset = self.scroll_offset;
         let active_phase_name = self.active_phase_name().unwrap_or("").to_string();
         let is_running = self.active_phase.is_some();
+        let config_info = self.config_info.clone();
 
         // Capture visible dimensions from the draw closure
         let mut visible_height: u16 = 0;
@@ -587,7 +592,15 @@ impl RunUi {
                 ])
                 .split(area);
 
-            tui_widgets::render_header(frame, chunks[0], "Run", &feature_slug, finished, success);
+            tui_widgets::render_header(
+                frame,
+                chunks[0],
+                "Run",
+                &feature_slug,
+                finished,
+                success,
+                config_info.as_deref(),
+            );
             tui_widgets::render_pipeline(frame, chunks[1], &phases, &pr_status, spinner_tick);
 
             (visible_height, visible_width) = tui_widgets::render_middle(

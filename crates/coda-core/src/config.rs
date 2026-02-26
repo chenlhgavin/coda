@@ -10,11 +10,18 @@
 //! model, and effort level to use. Unspecified fields fall back to global
 //! defaults (`agent.model`) or legacy fields (`review.engine`, `review.codex_model`).
 
+use std::fmt;
 use std::str::FromStr;
 
 use coda_agent_sdk::backend::BackendKind;
 use coda_agent_sdk::options::Effort;
 use serde::{Deserialize, Serialize};
+
+/// Default model for `init` when no per-operation override is set.
+const INIT_DEFAULT_MODEL: &str = "claude-sonnet-4-6";
+
+/// Default model for `run` when no per-operation override is set.
+const RUN_DEFAULT_MODEL: &str = "claude-sonnet-4-6";
 
 /// Top-level CODA project configuration loaded from `.coda/config.yml`.
 ///
@@ -657,10 +664,16 @@ pub struct ResolvedAgentConfig {
     pub effort: ReasoningEffort,
 }
 
+impl fmt::Display for ResolvedAgentConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{} / {} / {}", self.backend, self.model, self.effort)
+    }
+}
+
 impl CodaConfig {
     /// Resolves agent configuration for the `init` operation.
     ///
-    /// Falls back to `agent.model` for model, `Claude` for backend,
+    /// Falls back to [`INIT_DEFAULT_MODEL`] for model, `Claude` for backend,
     /// and `agent.default_effort` for effort.
     pub fn resolve_init(&self) -> ResolvedAgentConfig {
         ResolvedAgentConfig {
@@ -670,7 +683,7 @@ impl CodaConfig {
                 .init
                 .model
                 .clone()
-                .unwrap_or_else(|| self.agent.model.clone()),
+                .unwrap_or_else(|| INIT_DEFAULT_MODEL.to_string()),
             effort: self.agents.init.effort.unwrap_or(self.agent.default_effort),
         }
     }
@@ -694,7 +707,7 @@ impl CodaConfig {
 
     /// Resolves agent configuration for the `run` operation.
     ///
-    /// Falls back to `agent.model` for model, `Claude` for backend,
+    /// Falls back to [`RUN_DEFAULT_MODEL`] for model, `Claude` for backend,
     /// and `agent.default_effort` for effort.
     pub fn resolve_run(&self) -> ResolvedAgentConfig {
         ResolvedAgentConfig {
@@ -704,7 +717,7 @@ impl CodaConfig {
                 .run
                 .model
                 .clone()
-                .unwrap_or_else(|| self.agent.model.clone()),
+                .unwrap_or_else(|| RUN_DEFAULT_MODEL.to_string()),
             effort: self.agents.run.effort.unwrap_or(self.agent.default_effort),
         }
     }
@@ -1458,6 +1471,18 @@ agents:
         assert_eq!(reloaded.agents.review.effort, Some(ReasoningEffort::Max));
     }
 
+    // ── ResolvedAgentConfig Display ─────────────────────────────────
+
+    #[test]
+    fn test_should_display_resolved_agent_config() {
+        let resolved = ResolvedAgentConfig {
+            backend: AgentBackend::Claude,
+            model: "claude-sonnet-4-6".to_string(),
+            effort: ReasoningEffort::High,
+        };
+        assert_eq!(resolved.to_string(), "claude / claude-sonnet-4-6 / high");
+    }
+
     // ── resolve_* methods ─────────────────────────────────────────────
 
     #[test]
@@ -1465,7 +1490,7 @@ agents:
         let config = CodaConfig::default();
         let resolved = config.resolve_init();
         assert_eq!(resolved.backend, AgentBackend::Claude);
-        assert_eq!(resolved.model, "claude-opus-4-6");
+        assert_eq!(resolved.model, "claude-sonnet-4-6");
         assert_eq!(resolved.effort, ReasoningEffort::High);
     }
 
@@ -1486,6 +1511,15 @@ agents:
         let mut config = CodaConfig::default();
         config.agent.model = "claude-sonnet-4-6".to_string();
         let resolved = config.resolve_plan();
+        assert_eq!(resolved.backend, AgentBackend::Claude);
+        assert_eq!(resolved.model, "claude-sonnet-4-6");
+        assert_eq!(resolved.effort, ReasoningEffort::High);
+    }
+
+    #[test]
+    fn test_should_resolve_run_with_defaults() {
+        let config = CodaConfig::default();
+        let resolved = config.resolve_run();
         assert_eq!(resolved.backend, AgentBackend::Claude);
         assert_eq!(resolved.model, "claude-sonnet-4-6");
         assert_eq!(resolved.effort, ReasoningEffort::High);

@@ -89,6 +89,8 @@ pub struct PlanUi {
     scroll_offset: u16,
     feature_slug: String,
     phase: PlanPhase,
+    /// Resolved config display string (e.g., "claude / claude-opus-4-6 / high").
+    config_info: Option<String>,
 }
 
 impl PlanUi {
@@ -114,6 +116,7 @@ impl PlanUi {
                 scroll_offset: 0,
                 feature_slug: String::new(),
                 phase: PlanPhase::Discussing,
+                config_info: None,
             })
         };
 
@@ -121,6 +124,11 @@ impl PlanUi {
             let _ = execute!(io::stdout(), LeaveAlternateScreen);
             let _ = disable_raw_mode();
         })
+    }
+
+    /// Sets the config info string displayed in the header.
+    pub fn set_config_info(&mut self, info: String) {
+        self.config_info = Some(info);
     }
 
     /// Runs the interactive planning session.
@@ -388,6 +396,7 @@ impl PlanUi {
         let scroll_offset = self.scroll_offset;
         let feature_slug = &self.feature_slug;
         let phase = self.phase;
+        let config_info = self.config_info.as_deref();
 
         self.terminal.draw(|frame| {
             let area = frame.area();
@@ -422,7 +431,7 @@ impl PlanUi {
                 .split(area);
 
             // Render header
-            render_header(frame, chunks[0], feature_slug, phase);
+            render_header(frame, chunks[0], feature_slug, phase, config_info);
 
             // Render chat history
             render_chat(frame, chunks[1], messages, scroll_offset);
@@ -466,9 +475,15 @@ impl PlanUi {
 /// Uses the same dark-gray background as init/run headers for consistency.
 /// Phase label is color-coded: white for Discussing, yellow for Thinking/
 /// Approving/Finalizing, green for Approved.
-fn render_header(frame: &mut Frame, area: Rect, feature_slug: &str, phase: PlanPhase) {
+fn render_header(
+    frame: &mut Frame,
+    area: Rect,
+    feature_slug: &str,
+    phase: PlanPhase,
+    config_info: Option<&str>,
+) {
     let phase_color = phase.color();
-    let header = Line::from(vec![
+    let mut spans = vec![
         Span::styled(
             format!(" CODA Plan: {feature_slug} "),
             Style::default().fg(Color::White).bold(),
@@ -477,7 +492,16 @@ fn render_header(frame: &mut Frame, area: Rect, feature_slug: &str, phase: PlanP
             format!("[{}]", phase.label()),
             Style::default().fg(phase_color).bold(),
         ),
-    ]);
+    ];
+
+    if let Some(info) = config_info {
+        spans.push(Span::styled(
+            format!(" {info}"),
+            Style::default().fg(Color::DarkGray),
+        ));
+    }
+
+    let header = Line::from(spans);
     let paragraph = Paragraph::new(header).style(Style::default().bg(Color::DarkGray));
     frame.render_widget(paragraph, area);
 }

@@ -258,6 +258,7 @@ impl App {
             }
         };
         let mut ui = PlanUi::new()?;
+        ui.set_config_info(self.engine.config().resolve_plan().to_string());
 
         match ui.run_plan(&mut session).await {
             Ok(Some(output)) => {
@@ -821,7 +822,8 @@ impl App {
         let display_handle = tokio::spawn(async move {
             while let Some(event) = rx.recv().await {
                 match event {
-                    RunEvent::RunStarting { phases } => {
+                    RunEvent::RunStarting { phases, config } => {
+                        println!("  Config: {config}");
                         let pipeline = phases
                             .iter()
                             .map(String::as_str)

@@ -116,6 +116,8 @@ pub enum InitEvent {
     InitStarting {
         /// Ordered list of phase names for the init pipeline.
         phases: Vec<String>,
+        /// Resolved agent configuration for this init operation.
+        config: crate::config::ResolvedAgentConfig,
     },
 
     /// A phase is about to start executing.
@@ -363,6 +365,7 @@ impl Engine {
             &progress_tx,
             InitEvent::InitStarting {
                 phases: phases.clone(),
+                config: self.config.resolve_init(),
             },
         );
 
@@ -1650,6 +1653,11 @@ mod tests {
             &sender,
             InitEvent::InitStarting {
                 phases: vec!["analyze-repo".to_string(), "setup-project".to_string()],
+                config: crate::config::ResolvedAgentConfig {
+                    backend: crate::config::AgentBackend::Claude,
+                    model: "claude-sonnet-4-6".to_string(),
+                    effort: crate::config::ReasoningEffort::High,
+                },
             },
         );
         emit(
