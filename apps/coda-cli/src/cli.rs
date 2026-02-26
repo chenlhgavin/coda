@@ -111,7 +111,7 @@ pub enum ConfigAction {
 impl Cli {
     /// Executes the parsed CLI command.
     pub async fn run(self) -> Result<()> {
-        let app = App::new().await?;
+        let mut app = App::new().await?;
 
         match self.command {
             Commands::Init { no_commit, force } => app.init(no_commit, force).await,

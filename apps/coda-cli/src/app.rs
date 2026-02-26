@@ -7,7 +7,7 @@
 use std::io::Write;
 use std::time::{Duration, Instant};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use coda_core::{Engine, InitEvent, RunEvent};
 use tokio_util::sync::CancellationToken;
 use tracing::info;
@@ -64,17 +64,42 @@ impl App {
     ///
     /// Returns an error if initialization fails (e.g., already initialized,
     /// agent SDK errors) or the user cancels with Ctrl+C.
-    pub async fn init(&self, no_commit: bool, force: bool) -> Result<()> {
-        // Pre-flight: fail fast before launching TUI
-        let project_root = self.engine.project_root();
-        if project_root.join(".coda").exists() && !force {
-            println!("Project already initialized. .coda/ directory exists.");
+    pub async fn init(&mut self, no_commit: bool, force: bool) -> Result<()> {
+        // Pre-flight: fail fast before launching TUI.
+        // Use .coda.md marker to distinguish fully initialized projects from
+        // those where .coda/ was auto-created by `config set`.
+        if self.engine.is_project_initialized() && !force {
+            println!("Project already initialized.");
             println!("Run `coda init --force` to reinitialize.");
             println!("Run `coda plan <feature-slug>` to start planning a feature.");
             return Ok(());
         }
 
-        let project_root_display = project_root.display().to_string();
+        // Interactive config prompt: show defaults, let user modify before init
+        loop {
+            let summary = self.engine.config_show();
+            print_config_table(&summary);
+
+            let choice = dialoguer::Select::with_theme(&dialoguer::theme::ColorfulTheme::default())
+                .with_prompt("Proceed with these settings?")
+                .items(&["Yes, start init", "Modify operation settings"])
+                .default(0)
+                .interact()
+                .context("Selection cancelled")?;
+
+            if choice == 0 {
+                break;
+            }
+
+            let summaries = self.engine.config().operation_summaries();
+            let pairs = crate::interactive_config::prompt_operation_config(&summaries)?;
+            for (key, value) in &pairs {
+                self.engine.config_set(key, value)?;
+            }
+            self.engine.reload_config()?;
+        }
+
+        let project_root_display = self.engine.project_root().display().to_string();
 
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<InitEvent>();
 
@@ -275,25 +300,7 @@ impl App {
         match action {
             crate::cli::ConfigAction::Show => {
                 let summary = self.engine.config_show();
-                println!();
-                println!(
-                    "  {:<12} {:<10} {:<26} {:<8}",
-                    "Operation", "Backend", "Model", "Effort"
-                );
-                println!("  {}", "─".repeat(58));
-                for (name, resolved) in [
-                    ("init", &summary.init),
-                    ("plan", &summary.plan),
-                    ("run", &summary.run),
-                    ("review", &summary.review),
-                    ("verify", &summary.verify),
-                ] {
-                    println!(
-                        "  {:<12} {:<10} {:<26} {:<8}",
-                        name, resolved.backend, resolved.model, resolved.effort,
-                    );
-                }
-                println!();
+                print_config_table(&summary);
                 Ok(())
             }
             crate::cli::ConfigAction::Get { key } => match self.engine.config_get(&key) {
@@ -1013,4 +1020,27 @@ fn phase_status_icon(s: coda_core::state::PhaseStatus) -> &'static str {
         coda_core::state::PhaseStatus::Failed => "✗",
         _ => "?",
     }
+}
+
+/// Prints the resolved operation config as a formatted table.
+fn print_config_table(summary: &coda_core::ResolvedConfigSummary) {
+    println!();
+    println!(
+        "  {:<12} {:<10} {:<26} {:<8}",
+        "Operation", "Backend", "Model", "Effort",
+    );
+    println!("  {}", "─".repeat(58));
+    for (name, resolved) in [
+        ("init", &summary.init),
+        ("plan", &summary.plan),
+        ("run", &summary.run),
+        ("review", &summary.review),
+        ("verify", &summary.verify),
+    ] {
+        println!(
+            "  {:<12} {:<10} {:<26} {:<8}",
+            name, resolved.backend, resolved.model, resolved.effort,
+        );
+    }
+    println!();
 }

@@ -78,6 +78,12 @@ const SAMPLE_MAX_LINES: usize = 40;
 /// Maximum tree depth when gathering the repository tree.
 const TREE_MAX_DEPTH: usize = 4;
 
+/// Marker file created exclusively by `coda init`'s setup phase.
+///
+/// Used together with `.coda/` directory to distinguish a fully initialized
+/// project from one where only `.coda/` was auto-created (e.g., by `config set`).
+const INIT_MARKER_FILE: &str = ".coda.md";
+
 /// Phase names used during the init pipeline.
 const INIT_PHASE_ANALYZE: &str = "analyze-repo";
 
@@ -268,6 +274,41 @@ impl Engine {
         &self.config
     }
 
+    /// Returns `true` if the project has been fully initialized by `coda init`.
+    ///
+    /// A project is considered initialized when both the `.coda/` directory
+    /// and the `.coda.md` marker file exist. This distinguishes a fully
+    /// initialized project from one where `.coda/` was auto-created by
+    /// `config set` without running init.
+    pub fn is_project_initialized(&self) -> bool {
+        self.project_root.join(".coda").is_dir()
+            && self.project_root.join(INIT_MARKER_FILE).is_file()
+    }
+
+    /// Reloads configuration from `.coda/config.yml` on disk.
+    ///
+    /// Call after `config_set()` when the in-memory config must reflect
+    /// the latest disk state (e.g., before starting init).
+    ///
+    /// # Errors
+    ///
+    /// Returns `CoreError::ConfigError` if the config file exists but
+    /// cannot be read or contains invalid YAML.
+    pub fn reload_config(&mut self) -> Result<(), CoreError> {
+        let config_path = self.project_root.join(".coda/config.yml");
+        self.config = if config_path.exists() {
+            let content = fs::read_to_string(&config_path).map_err(|e| {
+                CoreError::ConfigError(format!("Cannot read {}: {e}", config_path.display()))
+            })?;
+            serde_yaml_ng::from_str(&content).map_err(|e| {
+                CoreError::ConfigError(format!("Invalid YAML in {}: {e}", config_path.display()))
+            })?
+        } else {
+            CodaConfig::default()
+        };
+        Ok(())
+    }
+
     /// Returns a reference to the git operations implementation.
     pub fn git(&self) -> &dyn GitOps {
         self.git.as_ref()
@@ -310,10 +351,10 @@ impl Engine {
         progress_tx: Option<UnboundedSender<InitEvent>>,
         cancel_token: CancellationToken,
     ) -> Result<(), CoreError> {
-        // 1. Check if .coda/ already exists (skip when force=true)
-        if self.project_root.join(".coda").exists() && !force {
+        // 1. Check if project is already fully initialized (skip when force=true)
+        if self.is_project_initialized() && !force {
             return Err(CoreError::ConfigError(
-                "Project already initialized. .coda/ directory exists.".into(),
+                "Project already initialized. Run `coda init --force` to reinitialize.".into(),
             ));
         }
 
@@ -635,8 +676,8 @@ impl Engine {
     pub fn plan(&self, feature_slug: &str) -> Result<PlanSession, CoreError> {
         validate_feature_slug(feature_slug)?;
 
-        // Ensure project has been initialized (coda init creates .coda/)
-        if !self.project_root.join(".coda").is_dir() {
+        // Ensure project has been fully initialized (both .coda/ and .coda.md)
+        if !self.is_project_initialized() {
             return Err(CoreError::PlanError(
                 "Project not initialized. Run `coda init` first.".into(),
             ));
@@ -1928,8 +1969,9 @@ mod tests {
     #[tokio::test]
     async fn test_should_auto_create_trees_dir_when_missing() {
         let tmp = tempfile::tempdir().expect("tempdir");
-        // Create .coda/ but no .trees/ — .trees/ should be auto-created
+        // Create .coda/ + .coda.md but no .trees/ — .trees/ should be auto-created
         fs::create_dir_all(tmp.path().join(".coda")).expect("mkdir");
+        fs::write(tmp.path().join(".coda.md"), "# Overview").expect("write .coda.md");
 
         let engine = make_engine(tmp.path()).await;
         // plan() will fail later (no git repo), but .trees/ should be created first
@@ -1952,5 +1994,97 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(err.contains("not initialized"), "error was: {err}");
+    }
+
+    #[tokio::test]
+    async fn test_is_project_initialized_false_when_only_coda_dir() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        fs::create_dir_all(tmp.path().join(".coda")).expect("mkdir");
+        // .coda/ exists but .coda.md does not — not fully initialized
+
+        let engine = make_engine(tmp.path()).await;
+        assert!(
+            !engine.is_project_initialized(),
+            "should be false when only .coda/ exists"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_is_project_initialized_true_when_both_exist() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        fs::create_dir_all(tmp.path().join(".coda")).expect("mkdir");
+        fs::write(tmp.path().join(".coda.md"), "# Overview").expect("write .coda.md");
+
+        let engine = make_engine(tmp.path()).await;
+        assert!(
+            engine.is_project_initialized(),
+            "should be true when .coda/ and .coda.md both exist"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_is_project_initialized_false_when_only_coda_md() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        // .coda.md exists but .coda/ directory does not
+        fs::write(tmp.path().join(".coda.md"), "# Overview").expect("write .coda.md");
+
+        let engine = make_engine(tmp.path()).await;
+        assert!(
+            !engine.is_project_initialized(),
+            "should be false when only .coda.md exists"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_reload_config_picks_up_disk_changes() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        fs::create_dir_all(tmp.path().join(".coda")).expect("mkdir");
+
+        let mut engine = make_engine(tmp.path()).await;
+        let original_model = engine.config().resolve_run().model.clone();
+
+        // Write a config with a different model to disk
+        let config_path = tmp.path().join(".coda/config.yml");
+        fs::write(
+            &config_path,
+            "version: 1\nagents:\n  run:\n    model: custom-test-model\n",
+        )
+        .expect("write config");
+
+        engine.reload_config().expect("reload_config");
+        let reloaded_model = engine.config().resolve_run().model.clone();
+
+        assert_ne!(original_model, reloaded_model);
+        assert_eq!(reloaded_model, "custom-test-model");
+    }
+
+    #[tokio::test]
+    async fn test_reload_config_uses_default_when_file_missing() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        // No .coda/ directory at all
+
+        let mut engine = make_engine(tmp.path()).await;
+        engine.reload_config().expect("reload_config");
+
+        // Should fall back to defaults without error
+        let resolved = engine.config().resolve_run();
+        assert!(!resolved.model.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_should_reject_plan_when_only_coda_dir_exists() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        // .coda/ exists (as if created by `config set`) but no .coda.md
+        fs::create_dir_all(tmp.path().join(".coda")).expect("mkdir");
+
+        let engine = make_engine(tmp.path()).await;
+        let result = engine.plan("add-auth");
+
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("not initialized"),
+            "plan should reject when .coda.md is missing: {err}"
+        );
     }
 }
