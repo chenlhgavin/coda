@@ -19,7 +19,7 @@ use tracing::{debug, info, instrument, warn};
 use crate::error::ServerError;
 use crate::formatter::{self, InitPhaseDisplay, PhaseDisplayStatus};
 use crate::handlers::commands::SlashCommandPayload;
-use crate::state::AppState;
+use crate::state::{AppState, TaskCleanupGuard};
 
 use super::resolve_engine;
 
@@ -110,6 +110,11 @@ async fn run_init_task(
     force: bool,
     cancel_token: CancellationToken,
 ) {
+    // Guard guarantees running-task + repo-lock cleanup even on panic/abort.
+    let task_key = format!("init:{}", repo_path.display());
+    let _guard =
+        TaskCleanupGuard::new(Arc::clone(&state), task_key).with_repo_unlock(repo_path.clone());
+
     let (tx, rx) = mpsc::unbounded_channel();
     let slack = state.slack().clone();
 
@@ -164,10 +169,7 @@ async fn run_init_task(
         warn!(error = %e, channel, "Failed to post init final update");
     }
 
-    // Clean up running task entry and release repo lock
-    let task_key = format!("init:{}", repo_path.display());
-    state.running_tasks().remove(&task_key);
-    state.repo_locks().unlock(&repo_path);
+    // Cleanup is handled by `_guard` (TaskCleanupGuard) on drop.
 }
 
 /// Consumes [`InitEvent`]s from the channel and debounces Slack updates.

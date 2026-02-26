@@ -27,7 +27,7 @@ use crate::error::ServerError;
 use crate::formatter::{self, PhaseDisplayStatus, RunPhaseDisplay};
 use crate::handlers::commands::SlashCommandPayload;
 use crate::slack_client::SlackClient;
-use crate::state::AppState;
+use crate::state::{AppState, TaskCleanupGuard};
 
 use super::resolve_engine;
 use super::streaming::{
@@ -113,6 +113,10 @@ async fn run_feature_task(
     repo_path: std::path::PathBuf,
     cancel_token: CancellationToken,
 ) {
+    // Guard guarantees running-task cleanup even on panic/abort.
+    let task_key = format!("run:{}:{slug}", repo_path.display());
+    let _guard = TaskCleanupGuard::new(Arc::clone(&state), task_key);
+
     let (tx, rx) = mpsc::unbounded_channel();
     let slack = state.slack().clone();
 
@@ -195,9 +199,7 @@ async fn run_feature_task(
         warn!(error = %e, channel, "Failed to post run completion notification");
     }
 
-    // Clean up running task entry
-    let task_key = format!("run:{}:{slug}", repo_path.display());
-    state.running_tasks().remove(&task_key);
+    // Cleanup is handled by `_guard` (TaskCleanupGuard) on drop.
 }
 
 /// Extracts a display name from a [`Task`](coda_core::Task) variant.

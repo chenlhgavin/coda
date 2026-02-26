@@ -10,6 +10,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use dashmap::DashMap;
 use tokio_util::sync::CancellationToken;
@@ -232,6 +233,78 @@ impl std::fmt::Debug for BindingStore {
 struct TaskEntry {
     handle: tokio::task::JoinHandle<()>,
     cancel_token: CancellationToken,
+}
+
+/// RAII guard that removes a task from [`RunningTasks`] when dropped.
+///
+/// Ensures the `RunningTasks` entry is removed even if the spawned async
+/// task panics or is aborted (e.g., during server shutdown). Optionally
+/// also releases a [`RepoLocks`] entry (used by init tasks).
+///
+/// # Examples
+///
+/// ```
+/// use std::sync::Arc;
+/// use coda_server::state::{
+///     AppState, BindingStore, RepoLocks, RunningTasks, TaskCleanupGuard,
+/// };
+/// use coda_server::session::SessionManager;
+/// use coda_server::slack_client::SlackClient;
+/// use std::path::PathBuf;
+///
+/// let slack = SlackClient::new("xoxb-test".into()).unwrap();
+/// let bindings = BindingStore::new(PathBuf::from("/tmp/config.yml"), Default::default());
+/// let running = RunningTasks::new();
+/// let sessions = SessionManager::new();
+/// let repo_locks = RepoLocks::new();
+/// let state = Arc::new(AppState::new(slack, bindings, running, sessions, None, repo_locks));
+/// let guard = TaskCleanupGuard::new(Arc::clone(&state), "run:/repo:slug".to_string());
+/// // ... task work ...
+/// drop(guard); // entry removed
+/// ```
+pub struct TaskCleanupGuard {
+    state: Arc<AppState>,
+    task_key: String,
+    repo_to_unlock: Option<PathBuf>,
+}
+
+impl TaskCleanupGuard {
+    /// Creates a guard that removes the running task entry when dropped.
+    pub fn new(state: Arc<AppState>, task_key: String) -> Self {
+        Self {
+            state,
+            task_key,
+            repo_to_unlock: None,
+        }
+    }
+
+    /// Also release a repository lock when this guard drops.
+    ///
+    /// Used by init tasks that hold a [`RepoLocks`] entry alongside the
+    /// `RunningTasks` entry.
+    pub fn with_repo_unlock(mut self, repo_path: PathBuf) -> Self {
+        self.repo_to_unlock = Some(repo_path);
+        self
+    }
+}
+
+impl Drop for TaskCleanupGuard {
+    fn drop(&mut self) {
+        self.state.running_tasks().remove(&self.task_key);
+        if let Some(ref repo_path) = self.repo_to_unlock {
+            self.state.repo_locks().unlock(repo_path);
+        }
+        debug!(key = %self.task_key, "Task cleanup guard fired");
+    }
+}
+
+impl std::fmt::Debug for TaskCleanupGuard {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TaskCleanupGuard")
+            .field("task_key", &self.task_key)
+            .field("repo_to_unlock", &self.repo_to_unlock)
+            .finish()
+    }
 }
 
 /// Tracks in-flight init/run tasks to prevent duplicate executions and
@@ -683,5 +756,63 @@ mod tests {
     fn test_should_default_repo_locks() {
         let locks = RepoLocks::default();
         assert!(locks.try_lock(&PathBuf::from("/repo"), "test").is_ok());
+    }
+
+    fn test_app_state() -> Arc<AppState> {
+        let slack = SlackClient::new("xoxb-test".into()).unwrap();
+        let bindings = BindingStore::new(PathBuf::from("/tmp/config.yml"), HashMap::new());
+        let running = RunningTasks::new();
+        let sessions = SessionManager::new();
+        let repo_locks = RepoLocks::new();
+        Arc::new(AppState::new(
+            slack, bindings, running, sessions, None, repo_locks,
+        ))
+    }
+
+    #[test]
+    fn test_should_cleanup_running_task_on_guard_drop() {
+        let state = test_app_state();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let handle = rt.spawn(async {
+            tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+        });
+        let token = CancellationToken::new();
+        state
+            .running_tasks()
+            .insert("run:/repo:slug".to_string(), handle, token);
+        assert!(state.running_tasks().is_running("run:/repo:slug"));
+
+        let guard = TaskCleanupGuard::new(Arc::clone(&state), "run:/repo:slug".to_string());
+        drop(guard);
+        assert!(!state.running_tasks().is_running("run:/repo:slug"));
+    }
+
+    #[test]
+    fn test_should_cleanup_running_task_and_repo_lock_on_guard_drop() {
+        let state = test_app_state();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let handle = rt.spawn(async {
+            tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+        });
+        let token = CancellationToken::new();
+        let repo = PathBuf::from("/repos/myproject");
+        state
+            .running_tasks()
+            .insert("init:/repos/myproject".to_string(), handle, token);
+        state.repo_locks().try_lock(&repo, "init").expect("lock");
+        assert!(state.running_tasks().is_running("init:/repos/myproject"));
+
+        let guard = TaskCleanupGuard::new(Arc::clone(&state), "init:/repos/myproject".to_string())
+            .with_repo_unlock(repo.clone());
+        drop(guard);
+        assert!(!state.running_tasks().is_running("init:/repos/myproject"));
+        // Repo lock should also be released
+        assert!(state.repo_locks().try_lock(&repo, "test").is_ok());
     }
 }
