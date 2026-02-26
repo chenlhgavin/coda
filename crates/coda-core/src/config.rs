@@ -6,7 +6,7 @@
 //! ## Per-Operation Agent Configuration
 //!
 //! The `agents` section allows each operation (`init`, `plan`, `run`, `review`,
-//! `verify`) to independently configure which backend (claude/codex/cursor),
+//! `verify`) to independently configure which backend (claude/codex),
 //! model, and effort level to use. Unspecified fields fall back to global
 //! defaults (`agent.model`) or legacy fields (`review.engine`, `review.codex_model`).
 
@@ -204,9 +204,8 @@ impl std::fmt::Display for ReviewEngine {
 
 /// Which agent CLI backend to use for an operation.
 ///
-/// Controls which subprocess is spawned: Claude Code CLI, OpenAI Codex CLI,
-/// or Cursor Agent CLI. Serializes as lowercase (`"claude"`, `"codex"`,
-/// `"cursor"`) and parses case-insensitively.
+/// Controls which subprocess is spawned: Claude Code CLI or OpenAI Codex CLI.
+/// Serializes as lowercase (`"claude"`, `"codex"`) and parses case-insensitively.
 ///
 /// # Examples
 ///
@@ -228,8 +227,6 @@ pub enum AgentBackend {
     Claude,
     /// OpenAI Codex CLI.
     Codex,
-    /// Cursor Agent CLI.
-    Cursor,
 }
 
 impl AgentBackend {
@@ -238,7 +235,6 @@ impl AgentBackend {
         match self {
             Self::Claude => BackendKind::Claude,
             Self::Codex => BackendKind::Codex,
-            Self::Cursor => BackendKind::Cursor,
         }
     }
 }
@@ -248,7 +244,6 @@ impl std::fmt::Display for AgentBackend {
         match self {
             Self::Claude => write!(f, "claude"),
             Self::Codex => write!(f, "codex"),
-            Self::Cursor => write!(f, "cursor"),
         }
     }
 }
@@ -260,7 +255,6 @@ impl FromStr for AgentBackend {
         match s.to_lowercase().as_str() {
             "claude" => Ok(Self::Claude),
             "codex" => Ok(Self::Codex),
-            "cursor" => Ok(Self::Cursor),
             other => Err(format!("unknown agent backend: {other}")),
         }
     }
@@ -388,9 +382,6 @@ const CLAUDE_MODELS: &[&str] = &["claude-opus-4-6", "claude-sonnet-4-6", "claude
 /// Well-known models for the Codex backend.
 const CODEX_MODELS: &[&str] = &["gpt-5.3-codex", "o4-mini"];
 
-/// Well-known models for the Cursor backend.
-const CURSOR_MODELS: &[&str] = &["claude-sonnet-4-6"];
-
 /// Returns suggested model names for the given backend.
 ///
 /// Falls back to Claude suggestions when the backend is `None`.
@@ -398,7 +389,6 @@ fn model_suggestions_for(backend: Option<AgentBackend>) -> Vec<String> {
     let models = match backend.unwrap_or_default() {
         AgentBackend::Claude => CLAUDE_MODELS,
         AgentBackend::Codex => CODEX_MODELS,
-        AgentBackend::Cursor => CURSOR_MODELS,
     };
     models.iter().map(|s| (*s).to_string()).collect()
 }
@@ -418,7 +408,7 @@ pub fn model_suggestions_for_backend(backend_name: &str) -> Vec<String> {
 /// (dropdown, text input, boolean toggle, etc.).
 #[derive(Debug, Clone, PartialEq)]
 pub enum ConfigValueType {
-    /// Fixed set of string options (e.g., backend: claude|codex|cursor).
+    /// Fixed set of string options (e.g., backend: claude|codex).
     Enum(Vec<String>),
     /// Suggested options + free-form input (e.g., model names per backend).
     Suggest(Vec<String>),
@@ -750,9 +740,9 @@ impl CodaConfig {
     ///
     /// - **backend**: `agents.review.backend` → legacy `review.engine` mapping
     /// - **model**: `agents.review.model` → legacy `review.codex_model` (for codex)
-    ///   or `agent.model` (for claude/cursor)
+    ///   or `agent.model` (for claude)
     /// - **effort**: `agents.review.effort` → legacy `review.codex_reasoning_effort`
-    ///   (for codex) or `agent.default_effort` (for claude/cursor)
+    ///   (for codex) or `agent.default_effort` (for claude)
     pub fn resolve_review(&self) -> ResolvedAgentConfig {
         let backend = self
             .agents
@@ -817,11 +807,7 @@ impl CodaConfig {
     /// operation's current backend. The current value shows `"(default)"`
     /// when no per-operation override is set.
     pub fn config_keys(&self) -> Vec<ConfigKeyDescriptor> {
-        let backend_options = vec![
-            "claude".to_string(),
-            "codex".to_string(),
-            "cursor".to_string(),
-        ];
+        let backend_options = vec!["claude".to_string(), "codex".to_string()];
         let effort_options = vec![
             "low".to_string(),
             "medium".to_string(),
@@ -988,11 +974,7 @@ impl CodaConfig {
     /// Used by the CLI grouped interactive prompt to show current
     /// configuration alongside each operation name.
     pub fn operation_summaries(&self) -> Vec<OperationSummary> {
-        let backend_options: Vec<String> = vec![
-            "claude".to_string(),
-            "codex".to_string(),
-            "cursor".to_string(),
-        ];
+        let backend_options: Vec<String> = vec!["claude".to_string(), "codex".to_string()];
         let effort_options: Vec<String> = vec![
             "low".to_string(),
             "medium".to_string(),
@@ -1392,11 +1374,7 @@ verify:
 
     #[test]
     fn test_should_round_trip_agent_backend_serde() {
-        for backend in [
-            AgentBackend::Claude,
-            AgentBackend::Codex,
-            AgentBackend::Cursor,
-        ] {
+        for backend in [AgentBackend::Claude, AgentBackend::Codex] {
             let json = serde_json::to_string(&backend).unwrap();
             let parsed: AgentBackend = serde_json::from_str(&json).unwrap();
             assert_eq!(parsed, backend);
@@ -1413,10 +1391,6 @@ verify:
             "CODEX".parse::<AgentBackend>().unwrap(),
             AgentBackend::Codex
         );
-        assert_eq!(
-            "cursor".parse::<AgentBackend>().unwrap(),
-            AgentBackend::Cursor
-        );
     }
 
     #[test]
@@ -1428,7 +1402,6 @@ verify:
     fn test_should_display_agent_backend_lowercase() {
         assert_eq!(AgentBackend::Claude.to_string(), "claude");
         assert_eq!(AgentBackend::Codex.to_string(), "codex");
-        assert_eq!(AgentBackend::Cursor.to_string(), "cursor");
     }
 
     #[test]
@@ -1623,18 +1596,6 @@ agents:
     }
 
     #[test]
-    fn test_should_resolve_review_cursor_fallback() {
-        let mut config = CodaConfig::default();
-        config.agents.review.backend = Some(AgentBackend::Cursor);
-        let resolved = config.resolve_review();
-        assert_eq!(resolved.backend, AgentBackend::Cursor);
-        // Cursor falls back to agent.model
-        assert_eq!(resolved.model, "claude-opus-4-6");
-        // Cursor falls back to agent.default_effort
-        assert_eq!(resolved.effort, ReasoningEffort::High);
-    }
-
-    #[test]
     fn test_should_resolve_verify_with_defaults() {
         let config = CodaConfig::default();
         let resolved = config.resolve_verify();
@@ -1714,7 +1675,7 @@ agents:
             .iter()
             .find(|k| k.key == "agents.run.backend")
             .expect("agents.run.backend key should exist");
-        assert!(matches!(&backend_key.value_type, ConfigValueType::Enum(opts) if opts.len() == 3));
+        assert!(matches!(&backend_key.value_type, ConfigValueType::Enum(opts) if opts.len() == 2));
         assert_eq!(backend_key.current_value, "(default)");
     }
 
@@ -1774,9 +1735,6 @@ agents:
 
         let codex = model_suggestions_for(Some(AgentBackend::Codex));
         assert!(codex.contains(&"gpt-5.3-codex".to_string()));
-
-        let cursor = model_suggestions_for(Some(AgentBackend::Cursor));
-        assert!(cursor.contains(&"claude-sonnet-4-6".to_string()));
 
         // None defaults to Claude
         let default = model_suggestions_for(None);

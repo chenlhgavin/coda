@@ -103,9 +103,6 @@ impl AgentProfile {
                     sandbox_mode: Some(sandbox_mode.to_string()),
                 });
             }
-            AgentBackend::Cursor => {
-                options.effort = Some(resolved.effort.to_sdk_effort());
-            }
         }
 
         options

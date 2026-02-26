@@ -10,7 +10,7 @@ use std::pin::Pin;
 
 /// Client for bidirectional, interactive conversations with code agents.
 ///
-/// Supports Claude Code, Codex, and Cursor Agent backends. Methods that
+/// Supports Claude Code and Codex backends. Methods that
 /// require backend-specific features perform capability checks and return
 /// [`Error::UnsupportedFeature`] when unsupported.
 pub struct AgentSdkClient {

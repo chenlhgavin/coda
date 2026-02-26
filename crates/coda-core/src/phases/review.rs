@@ -77,10 +77,6 @@ impl PhaseExecutor for ReviewPhaseExecutor {
                     run_review_claude(ctx, phase_idx).await
                 }
             }
-            AgentBackend::Cursor => {
-                warn!("Cursor review not yet supported, falling back to Claude review");
-                run_review_claude(ctx, phase_idx).await
-            }
         }
     }
 }

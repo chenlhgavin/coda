@@ -1,13 +1,12 @@
 //! Backend abstraction layer for multi-CLI support.
 //!
 //! This module defines the [`Backend`] and [`Session`] traits that abstract
-//! over different CLI backends (Claude, Codex, Cursor Agent). Each backend
-//! provides one-shot query and multi-turn session capabilities with varying
-//! feature sets described by [`Capabilities`].
+//! over different CLI backends (Claude, Codex). Each backend provides
+//! one-shot query and multi-turn session capabilities with varying feature
+//! sets described by [`Capabilities`].
 
 pub mod claude;
 pub mod codex;
-pub mod cursor;
 
 use crate::error::Result;
 use crate::options::AgentOptions;
@@ -26,8 +25,6 @@ pub enum BackendKind {
     Claude,
     /// OpenAI Codex CLI (`codex`).
     Codex,
-    /// Cursor Agent CLI (`agent`).
-    Cursor,
 }
 
 impl fmt::Display for BackendKind {
@@ -35,7 +32,6 @@ impl fmt::Display for BackendKind {
         match self {
             Self::Claude => write!(f, "Claude"),
             Self::Codex => write!(f, "Codex"),
-            Self::Cursor => write!(f, "Cursor"),
         }
     }
 }
@@ -112,7 +108,6 @@ pub trait Backend: Send + Sync + fmt::Debug {
 /// mechanism vary by backend:
 /// - Claude: single long-lived subprocess with stdin/stdout streaming
 /// - Codex: `codex app-server` with JSON-RPC 2.0 protocol
-/// - Cursor: spawn-per-turn with `--resume <chatId>`
 #[async_trait]
 pub trait Session: Send {
     /// Send a user message in the session.
@@ -145,6 +140,5 @@ pub fn create_backend(kind: BackendKind) -> Box<dyn Backend> {
     match kind {
         BackendKind::Claude => Box::new(claude::ClaudeBackend::new()),
         BackendKind::Codex => Box::new(codex::CodexBackend::new()),
-        BackendKind::Cursor => Box::new(cursor::CursorBackend::new()),
     }
 }

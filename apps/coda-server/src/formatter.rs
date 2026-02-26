@@ -2398,7 +2398,6 @@ mod tests {
             value_type: coda_core::ConfigValueType::Enum(vec![
                 "claude".to_string(),
                 "codex".to_string(),
-                "cursor".to_string(),
             ]),
             current_value: "claude".to_string(),
         };
@@ -2409,7 +2408,7 @@ mod tests {
         let select = &blocks[1]["elements"][0];
         assert_eq!(select["action_id"], CONFIG_VALUE_SELECT_ACTION);
         let options = select["options"].as_array().expect("options array");
-        assert_eq!(options.len(), 3);
+        assert_eq!(options.len(), 2);
         // Encoded as "key=value"
         assert_eq!(options[0]["value"], "agents.run.backend=claude");
     }
@@ -2502,11 +2501,7 @@ mod tests {
     }
 
     fn make_operation_summaries() -> Vec<coda_core::OperationSummary> {
-        let backend_opts = vec![
-            "claude".to_string(),
-            "codex".to_string(),
-            "cursor".to_string(),
-        ];
+        let backend_opts = vec!["claude".to_string(), "codex".to_string()];
         let effort_opts = vec![
             "low".to_string(),
             "medium".to_string(),
@@ -2604,11 +2599,7 @@ mod tests {
 
     #[test]
     fn test_should_build_init_config_backend_select() {
-        let options = vec![
-            "claude".to_string(),
-            "codex".to_string(),
-            "cursor".to_string(),
-        ];
+        let options = vec!["claude".to_string(), "codex".to_string()];
         let blocks = init_config_backend_select("run", &options, "codex", true);
 
         assert_eq!(blocks.len(), 3);
@@ -2616,12 +2607,11 @@ mod tests {
         assert_eq!(select["action_id"], INIT_BACKEND_SELECT_ACTION);
 
         let select_opts = select["options"].as_array().unwrap();
-        assert_eq!(select_opts.len(), 3);
+        assert_eq!(select_opts.len(), 2);
 
         // Verify pipe-delimited encoding: "{op}|{backend}|{force}"
         assert_eq!(select_opts[0]["value"], "run|claude|true");
         assert_eq!(select_opts[1]["value"], "run|codex|true");
-        assert_eq!(select_opts[2]["value"], "run|cursor|true");
 
         // Verify initial_option is set to current value
         let initial = &select["initial_option"];

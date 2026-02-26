@@ -3,7 +3,7 @@
 //! Agent options and builder for all backends.
 //!
 //! [`AgentOptions`] configures all backends. Backend-specific options are in
-//! [`CodexOptions`] and [`CursorOptions`].
+//! [`CodexOptions`].
 
 use std::collections::HashMap;
 use std::fmt;
@@ -318,17 +318,6 @@ pub struct CodexOptions {
     pub sandbox_mode: Option<String>,
 }
 
-/// Cursor Agent-specific options.
-#[derive(Debug, Clone, Default)]
-pub struct CursorOptions {
-    /// Force-approve all tool calls (`--force` / `--yolo`).
-    pub force_approve: bool,
-    /// Execution mode: `"plan"` or `"ask"`.
-    pub mode: Option<String>,
-    /// Trust the current workspace without prompting (`--trust`).
-    pub trust_workspace: bool,
-}
-
 /// Agent options for all backends.
 ///
 /// This is the primary configuration struct. Use [`BackendKind`] to select
@@ -376,8 +365,6 @@ pub struct AgentOptions {
     pub stderr: Option<StderrCallback>,
     /// Codex-specific options.
     pub codex: Option<CodexOptions>,
-    /// Cursor Agent-specific options.
-    pub cursor: Option<CursorOptions>,
 }
 
 impl std::fmt::Debug for AgentOptions {
@@ -909,12 +896,6 @@ impl AgentOptionsBuilder {
     /// Set Codex-specific options.
     pub fn codex(mut self, codex_opts: CodexOptions) -> Self {
         self.options.codex = Some(codex_opts);
-        self
-    }
-
-    /// Set Cursor Agent-specific options.
-    pub fn cursor(mut self, cursor_opts: CursorOptions) -> Self {
-        self.options.cursor = Some(cursor_opts);
         self
     }
 

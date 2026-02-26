@@ -1,6 +1,6 @@
 //! Code Agent SDK for Rust
 //!
-//! Multi-backend SDK supporting Claude Code, Codex, and Cursor Agent CLIs.
+//! Multi-backend SDK supporting Claude Code and Codex CLIs.
 //! See [arch-rust.md](../docs/arch-rust.md) for architecture design.
 
 pub mod backend;
@@ -18,10 +18,10 @@ pub use error::{Error, Result};
 pub use internal::message_parser::parse_message;
 pub use options::{
     AgentDefinition, AgentModel, AgentOptions, AgentOptionsBuilder, AssistantMessageError,
-    CodexOptions, CursorOptions, Effort, HookEvent, HookMatcher, McpHttpConfig, McpSdkConfig,
-    McpServerConfig, McpServersConfig, McpSseConfig, McpStdioConfig, PermissionMode,
-    PermissionResult, PermissionResultAllow, PermissionResultDeny, SandboxSettings, SdkBeta,
-    SdkMcpTool, SdkMcpToolHandler, SdkPluginConfig, SettingSource, ToolPermissionContext,
+    CodexOptions, Effort, HookEvent, HookMatcher, McpHttpConfig, McpSdkConfig, McpServerConfig,
+    McpServersConfig, McpSseConfig, McpStdioConfig, PermissionMode, PermissionResult,
+    PermissionResultAllow, PermissionResultDeny, SandboxSettings, SdkBeta, SdkMcpTool,
+    SdkMcpToolHandler, SdkPluginConfig, SettingSource, ToolPermissionContext,
 };
 pub use types::*;
 
