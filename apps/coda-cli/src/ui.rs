@@ -233,7 +233,7 @@ impl PlanUi {
                             .run_with_spinner(
                                 session.approve(),
                                 PlanPhase::Approving,
-                                "Approving design & generating verification plan...",
+                                "Approving design...",
                             )
                             .await;
 
@@ -243,12 +243,14 @@ impl PlanUi {
                                     role: AGENT_ROLE.to_string(),
                                     content: design,
                                 });
-                                self.messages.push(ChatMessage {
-                                    role: AGENT_ROLE.to_string(),
-                                    content: format!(
-                                        "---\n\n**Verification Plan:**\n\n{verification}"
-                                    ),
-                                });
+                                if let Some(verification) = verification {
+                                    self.messages.push(ChatMessage {
+                                        role: AGENT_ROLE.to_string(),
+                                        content: format!(
+                                            "---\n\n**Verification Plan:**\n\n{verification}"
+                                        ),
+                                    });
+                                }
                                 self.scroll_to_bottom();
                                 self.phase = PlanPhase::Approved;
                             }

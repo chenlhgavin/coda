@@ -2497,6 +2497,9 @@ mod tests {
                 model: "gpt-5.3-codex".to_string(),
                 effort: ReasoningEffort::High,
             },
+            review_enabled: false,
+            verify_enabled: false,
+            docs_enabled: false,
         }
     }
 

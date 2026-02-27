@@ -53,7 +53,9 @@ pub struct PlanOutput {
     pub design_spec: PathBuf,
 
     /// Path to the generated verification plan (`<worktree>/.coda/<slug>/specs/verification.md`).
-    pub verification: PathBuf,
+    ///
+    /// `None` when `verify.enabled` is `false` in the config.
+    pub verification: Option<PathBuf>,
 
     /// Path to the feature state file (`<worktree>/.coda/<slug>/state.yml`).
     pub state: PathBuf,
@@ -110,9 +112,6 @@ pub struct PlanSessionState {
     /// When this state was last saved.
     pub saved_at: DateTime<Utc>,
 }
-
-/// Fixed quality-assurance phase names appended after dynamic dev phases.
-const QUALITY_PHASES: &[&str] = &["review", "verify", "update-docs"];
 
 /// Directory within `.coda/` where plan session state is stored.
 const PLAN_SESSION_FILE: &str = "plan-session.json";
@@ -339,16 +338,17 @@ impl PlanSession {
     /// Formalizes the approved design and generates a verification plan.
     ///
     /// First asks the agent to produce a structured design specification
-    /// document, then generates a verification plan based on the design.
-    /// Both are stored so [`finalize`](Self::finalize) can write them
+    /// document, then optionally generates a verification plan based on
+    /// the design (only when `verify.enabled` is `true` in the config).
+    /// Results are stored so [`finalize`](Self::finalize) can write them
     /// directly without re-generating.
     ///
-    /// Returns `(design, verification)` so the UI can display both.
+    /// Returns `(design, Option<verification>)` so the UI can display both.
     ///
     /// # Errors
     ///
     /// Returns `CoreError` if template rendering or agent communication fails.
-    pub async fn approve(&mut self) -> Result<(String, String), CoreError> {
+    pub async fn approve(&mut self) -> Result<(String, Option<String>), CoreError> {
         // Step 1: Generate formal design spec
         let approve_prompt = self.pm.render(
             "plan/approve",
@@ -360,36 +360,43 @@ impl PlanSession {
         let design = self.send(&approve_prompt).await?;
         info!("Design approved and formalized");
 
-        // Step 2: Generate verification plan
-        let verification_prompt = self.pm.render(
-            "plan/verification",
-            minijinja::context!(
-                design_spec => &design,
-                checks => &self.config.checks,
-                feature_slug => &self.feature_slug,
-            ),
-        )?;
+        // Step 2: Generate verification plan (only when verify is enabled)
+        let verification = if self.config.verify.enabled {
+            let verification_prompt = self.pm.render(
+                "plan/verification",
+                minijinja::context!(
+                    design_spec => &design,
+                    checks => &self.config.checks,
+                    feature_slug => &self.feature_slug,
+                ),
+            )?;
 
-        let verification = match self.send(&verification_prompt).await {
-            Ok(v) => v,
-            Err(e) => {
-                // Both must succeed atomically; don't leave partial state
-                return Err(e);
-            }
+            let v = match self.send(&verification_prompt).await {
+                Ok(v) => v,
+                Err(e) => {
+                    // Both must succeed atomically; don't leave partial state
+                    return Err(e);
+                }
+            };
+            info!("Verification plan generated");
+            Some(v)
+        } else {
+            info!("Verify disabled, skipping verification plan generation");
+            None
         };
-        info!("Verification plan generated");
 
-        // Store both only after both succeed
+        // Store results only after everything succeeds
         self.approved_design = Some(design.clone());
-        self.approved_verification = Some(verification.clone());
+        self.approved_verification = verification.clone();
 
         Ok((design, verification))
     }
 
-    /// Returns `true` if both design and verification have been approved
-    /// via [`approve`](Self::approve).
+    /// Returns `true` if the design has been approved (and verification
+    /// too, when verify is enabled) via [`approve`](Self::approve).
     pub fn is_approved(&self) -> bool {
-        self.approved_design.is_some() && self.approved_verification.is_some()
+        self.approved_design.is_some()
+            && (self.approved_verification.is_some() || !self.config.verify.enabled)
     }
 
     /// Finalizes the planning session by creating a worktree and writing specs.
@@ -415,16 +422,14 @@ impl PlanSession {
         let worktree_abs = self.project_root.join(".trees").join(&slug);
         let worktree_rel = PathBuf::from(".trees").join(&slug);
 
-        // Guard: design and verification must be approved before finalizing.
+        // Guard: design must be approved before finalizing.
         // Clone instead of take so a retry is possible if a later step fails.
         let design_content = self.approved_design.clone().ok_or_else(|| {
             CoreError::PlanError(
                 "Cannot finalize: design has not been approved. Use /approve first.".to_string(),
             )
         })?;
-        let verification_content = self.approved_verification.clone().ok_or_else(|| {
-            CoreError::PlanError("Cannot finalize: verification plan is missing.".to_string())
-        })?;
+        let verification_content = self.approved_verification.clone();
 
         // 1. Create git worktree
         let base_branch = if self.config.git.base_branch == "auto" {
@@ -495,23 +500,29 @@ impl PlanSession {
             .map_err(CoreError::IoError)?;
         debug!(path = %design_spec_path.display(), "Wrote design spec");
 
-        let verification_path = specs_dir.join("verification.md");
-        tokio::fs::write(&verification_path, &verification_content)
-            .await
-            .map_err(CoreError::IoError)?;
-        debug!(path = %verification_path.display(), "Wrote verification plan");
+        let verification_path = if let Some(ref content) = verification_content {
+            let path = specs_dir.join("verification.md");
+            tokio::fs::write(&path, content)
+                .await
+                .map_err(CoreError::IoError)?;
+            debug!(path = %path.display(), "Wrote verification plan");
+            Some(path)
+        } else {
+            None
+        };
 
         // 3. Write initial state.yml (store relative worktree path for portability)
         let dev_phases = extract_dev_phases(&design_content);
-        let state = build_initial_state(
-            &self.feature_slug,
-            &worktree_rel,
-            &branch_name,
-            &base_branch,
-            &dev_phases,
-            self.planning_turns,
-            self.planning_cost_usd,
-        );
+        let state = build_initial_state(&InitialStateParams {
+            feature_slug: &self.feature_slug,
+            worktree_path: &worktree_rel,
+            branch: &branch_name,
+            base_branch: &base_branch,
+            dev_phase_names: &dev_phases,
+            planning_turns: self.planning_turns,
+            planning_cost_usd: self.planning_cost_usd,
+            config: &self.config,
+        });
         let state_path = coda_feature_dir.join("state.yml");
         let state_yaml = serde_yaml_ng::to_string(&state)?;
         tokio::fs::write(&state_path, state_yaml)
@@ -871,21 +882,26 @@ fn slugify_phase_name(name: &str) -> String {
     result
 }
 
+/// Parameters for building an initial feature state.
+pub(crate) struct InitialStateParams<'a> {
+    pub feature_slug: &'a str,
+    pub worktree_path: &'a Path,
+    pub branch: &'a str,
+    pub base_branch: &'a str,
+    pub dev_phase_names: &'a [String],
+    pub planning_turns: u32,
+    pub planning_cost_usd: f64,
+    pub config: &'a CodaConfig,
+}
+
 /// Builds an initial `FeatureState` for a newly planned feature.
 ///
-/// Creates dev phases from `dev_phase_names`, appends the fixed
-/// review + verify + update-docs quality phases, and initialises everything
-/// to `Pending` with zeroed cost/duration statistics. Planning session costs
-/// are recorded in `total` so they appear in status reports.
-pub(crate) fn build_initial_state(
-    feature_slug: &str,
-    worktree_path: &Path,
-    branch: &str,
-    base_branch: &str,
-    dev_phase_names: &[String],
-    planning_turns: u32,
-    planning_cost_usd: f64,
-) -> FeatureState {
+/// Creates dev phases from `dev_phase_names`, then conditionally appends
+/// quality phases (review, verify, update-docs) based on the config's
+/// enabled flags. All phases are initialised to `Pending` with zeroed
+/// cost/duration statistics. Planning session costs are recorded in
+/// `total` so they appear in status reports.
+pub(crate) fn build_initial_state(params: &InitialStateParams<'_>) -> FeatureState {
     let now = chrono::Utc::now();
 
     let make_record = |name: &str, kind: PhaseKind| PhaseRecord {
@@ -901,33 +917,40 @@ pub(crate) fn build_initial_state(
         details: serde_json::json!({}),
     };
 
-    let mut phases: Vec<PhaseRecord> = dev_phase_names
+    let mut phases: Vec<PhaseRecord> = params
+        .dev_phase_names
         .iter()
         .map(|name| make_record(name, PhaseKind::Dev))
         .collect();
 
-    for &qp in QUALITY_PHASES {
-        phases.push(make_record(qp, PhaseKind::Quality));
+    if params.config.review.enabled {
+        phases.push(make_record("review", PhaseKind::Quality));
+    }
+    if params.config.verify.enabled {
+        phases.push(make_record("verify", PhaseKind::Quality));
+    }
+    if params.config.docs.enabled {
+        phases.push(make_record("update-docs", PhaseKind::Quality));
     }
 
     FeatureState {
         feature: FeatureInfo {
-            slug: feature_slug.to_string(),
+            slug: params.feature_slug.to_string(),
             created_at: now,
             updated_at: now,
         },
         status: FeatureStatus::Planned,
         current_phase: 0,
         git: GitInfo {
-            worktree_path: worktree_path.to_path_buf(),
-            branch: branch.to_string(),
-            base_branch: base_branch.to_string(),
+            worktree_path: params.worktree_path.to_path_buf(),
+            branch: params.branch.to_string(),
+            base_branch: params.base_branch.to_string(),
         },
         phases,
         pr: None,
         total: TotalStats {
-            turns: planning_turns,
-            cost_usd: planning_cost_usd,
+            turns: params.planning_turns,
+            cost_usd: params.planning_cost_usd,
             ..TotalStats::default()
         },
     }
@@ -938,22 +961,28 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_should_build_initial_state_with_dynamic_dev_phases() {
+    fn test_should_build_initial_state_with_all_phases_enabled() {
         let worktree = PathBuf::from(".trees/add-auth");
         let dev_phases = vec![
             "type-definitions".to_string(),
             "transport-layer".to_string(),
             "client-methods".to_string(),
         ];
-        let state = build_initial_state(
-            "add-auth",
-            &worktree,
-            "feature/add-auth",
-            "main",
-            &dev_phases,
-            5,
-            0.42,
-        );
+        let mut config = CodaConfig::default();
+        config.review.enabled = true;
+        config.verify.enabled = true;
+        config.docs.enabled = true;
+
+        let state = build_initial_state(&InitialStateParams {
+            feature_slug: "add-auth",
+            worktree_path: &worktree,
+            branch: "feature/add-auth",
+            base_branch: "main",
+            dev_phase_names: &dev_phases,
+            planning_turns: 5,
+            planning_cost_usd: 0.42,
+            config: &config,
+        });
 
         assert_eq!(state.feature.slug, "add-auth");
         assert!(state.feature.created_at <= chrono::Utc::now());
@@ -999,18 +1028,47 @@ mod tests {
     }
 
     #[test]
+    fn test_should_build_initial_state_with_no_quality_phases_when_disabled() {
+        let worktree = PathBuf::from(".trees/add-auth");
+        let dev_phases = vec!["implementation".to_string()];
+        let config = CodaConfig::default(); // all quality phases disabled by default
+
+        let state = build_initial_state(&InitialStateParams {
+            feature_slug: "add-auth",
+            worktree_path: &worktree,
+            branch: "feature/add-auth",
+            base_branch: "main",
+            dev_phase_names: &dev_phases,
+            planning_turns: 0,
+            planning_cost_usd: 0.0,
+            config: &config,
+        });
+
+        // Only dev phases, no quality phases
+        assert_eq!(state.phases.len(), 1);
+        assert_eq!(state.phases[0].name, "implementation");
+        assert_eq!(state.phases[0].kind, PhaseKind::Dev);
+    }
+
+    #[test]
     fn test_should_build_initial_state_serializable_to_yaml() {
         let worktree = PathBuf::from(".trees/new-feature");
         let dev_phases = vec!["phase-one".to_string(), "phase-two".to_string()];
-        let state = build_initial_state(
-            "new-feature",
-            &worktree,
-            "feature/new-feature",
-            "main",
-            &dev_phases,
-            0,
-            0.0,
-        );
+        let mut config = CodaConfig::default();
+        config.review.enabled = true;
+        config.verify.enabled = true;
+        config.docs.enabled = true;
+
+        let state = build_initial_state(&InitialStateParams {
+            feature_slug: "new-feature",
+            worktree_path: &worktree,
+            branch: "feature/new-feature",
+            base_branch: "main",
+            dev_phase_names: &dev_phases,
+            planning_turns: 0,
+            planning_cost_usd: 0.0,
+            config: &config,
+        });
 
         let yaml = serde_yaml_ng::to_string(&state).unwrap();
         assert!(yaml.contains("planned"));

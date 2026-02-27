@@ -39,6 +39,30 @@ impl PhaseExecutor for DocsPhaseExecutor {
     ) -> Result<TaskResult, CoreError> {
         ctx.state_manager.mark_phase_running(phase_idx)?;
 
+        if !ctx.config.docs.enabled {
+            info!("Update-docs phase disabled, skipping");
+            let outcome = crate::state::PhaseOutcome {
+                turns: 0,
+                cost_usd: 0.0,
+                input_tokens: 0,
+                output_tokens: 0,
+                duration: std::time::Duration::ZERO,
+                details: serde_json::json!({}),
+            };
+            let task_result = TaskResult {
+                task: Task::UpdateDocs {
+                    feature_slug: ctx.state().feature.slug.clone(),
+                },
+                status: TaskStatus::Completed,
+                turns: 0,
+                cost_usd: 0.0,
+                duration: std::time::Duration::ZERO,
+                artifacts: vec![],
+            };
+            ctx.state_manager.complete_phase(phase_idx, &outcome)?;
+            return Ok(task_result);
+        }
+
         let design_spec = ctx.load_spec("design.md")?;
         let max_retries = ctx.config.agent.max_retries;
         let session_id = if ctx.config.agent.isolate_quality_phases {

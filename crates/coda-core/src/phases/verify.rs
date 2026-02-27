@@ -63,6 +63,30 @@ impl PhaseExecutor for VerifyPhaseExecutor {
     ) -> Result<TaskResult, CoreError> {
         ctx.state_manager.mark_phase_running(phase_idx)?;
 
+        if !ctx.config.verify.enabled {
+            info!("Verify phase disabled, skipping");
+            let outcome = crate::state::PhaseOutcome {
+                turns: 0,
+                cost_usd: 0.0,
+                input_tokens: 0,
+                output_tokens: 0,
+                duration: std::time::Duration::ZERO,
+                details: serde_json::json!({}),
+            };
+            let task_result = TaskResult {
+                task: Task::Verify {
+                    feature_slug: ctx.state().feature.slug.clone(),
+                },
+                status: TaskStatus::Completed,
+                turns: 0,
+                cost_usd: 0.0,
+                duration: std::time::Duration::ZERO,
+                artifacts: vec![],
+            };
+            ctx.state_manager.complete_phase(phase_idx, &outcome)?;
+            return Ok(task_result);
+        }
+
         let verification_spec = ctx.load_spec("verification.md")?;
         let checks = ctx.config.checks.clone();
         let max_retries = ctx.config.verify.max_verify_retries;

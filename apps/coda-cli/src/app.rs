@@ -292,7 +292,9 @@ impl App {
                 drop(ui);
                 println!("Planning complete!");
                 println!("  Design spec: {}", output.design_spec.display());
-                println!("  Verification: {}", output.verification.display());
+                if let Some(ref verification) = output.verification {
+                    println!("  Verification: {}", verification.display());
+                }
                 println!("  State: {}", output.state.display());
                 println!("  Worktree: {}", output.worktree.display());
                 println!("\nNext step: run `coda run {feature_slug}` to execute the plan.");
@@ -1052,24 +1054,53 @@ fn phase_status_icon(s: coda_core::state::PhaseStatus) -> &'static str {
 }
 
 /// Prints the resolved operation config as a formatted table.
+///
+/// Quality phases (review, verify, docs) show "(off)" when disabled.
 fn print_config_table(summary: &coda_core::ResolvedConfigSummary) {
     println!();
     println!(
-        "  {:<12} {:<10} {:<26} {:<8}",
+        "  {:<16} {:<10} {:<26} {:<8}",
         "Operation", "Backend", "Model", "Effort",
     );
-    println!("  {}", "─".repeat(58));
+    println!("  {}", "─".repeat(62));
     for (name, resolved) in [
         ("init", &summary.init),
         ("plan", &summary.plan),
         ("run", &summary.run),
-        ("review", &summary.review),
-        ("verify", &summary.verify),
     ] {
         println!(
-            "  {:<12} {:<10} {:<26} {:<8}",
+            "  {:<16} {:<10} {:<26} {:<8}",
             name, resolved.backend, resolved.model, resolved.effort,
         );
     }
+
+    let off_label = |name: &str, enabled: bool| -> String {
+        if enabled {
+            name.to_string()
+        } else {
+            format!("{name} (off)")
+        }
+    };
+
+    for (name, resolved, enabled) in [
+        ("review", &summary.review, summary.review_enabled),
+        ("verify", &summary.verify, summary.verify_enabled),
+    ] {
+        println!(
+            "  {:<16} {:<10} {:<26} {:<8}",
+            off_label(name, enabled),
+            resolved.backend,
+            resolved.model,
+            resolved.effort,
+        );
+    }
+
+    // Docs has no dedicated agent config, just show enabled status
+    if summary.docs_enabled {
+        println!("  {:<16}", "docs");
+    } else {
+        println!("  {:<16}", "docs (off)");
+    }
+
     println!();
 }

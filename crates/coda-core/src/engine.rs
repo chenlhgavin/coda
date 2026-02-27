@@ -1015,6 +1015,9 @@ impl Engine {
             run: self.config.resolve_run(),
             review: self.config.resolve_review(),
             verify: self.config.resolve_verify(),
+            review_enabled: self.config.review.enabled,
+            verify_enabled: self.config.verify.enabled,
+            docs_enabled: self.config.docs.enabled,
         }
     }
 
@@ -1104,6 +1107,12 @@ pub struct ResolvedConfigSummary {
     pub review: crate::config::ResolvedAgentConfig,
     /// Resolved config for `verify`.
     pub verify: crate::config::ResolvedAgentConfig,
+    /// Whether the review phase is enabled.
+    pub review_enabled: bool,
+    /// Whether the verify phase is enabled.
+    pub verify_enabled: bool,
+    /// Whether the update-docs phase is enabled.
+    pub docs_enabled: bool,
 }
 
 /// Resolves a dot-path (e.g., `"agents.run.model"`) against a YAML value tree.

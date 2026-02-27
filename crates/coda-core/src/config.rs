@@ -64,6 +64,9 @@ pub struct CodaConfig {
     /// Verification phase configuration.
     pub verify: VerifyConfig,
 
+    /// Documentation update phase configuration.
+    pub docs: DocsConfig,
+
     /// Per-operation agent backend overrides.
     ///
     /// Each operation (`init`, `plan`, `run`, `review`, `verify`) can
@@ -454,6 +457,7 @@ pub struct ConfigKeyDescriptor {
 /// use coda_core::config::VerifyConfig;
 ///
 /// let config = VerifyConfig::default();
+/// assert!(!config.enabled);
 /// assert_eq!(config.max_verify_retries, 3);
 /// assert!(!config.fail_on_max_attempts);
 /// assert!(config.ai_verification);
@@ -462,6 +466,12 @@ pub struct ConfigKeyDescriptor {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct VerifyConfig {
+    /// Whether the verify phase is enabled.
+    ///
+    /// When `false` (default), the verify phase is skipped entirely and
+    /// `verification.md` is not generated during planning.
+    pub enabled: bool,
+
     /// When `true`, the verify phase returns an error if any check still
     /// fails after all retry attempts, causing the run to abort. When
     /// `false` (default), a warning is logged and the run continues with
@@ -506,6 +516,7 @@ const fn default_check_timeout() -> u64 {
 impl Default for VerifyConfig {
     fn default() -> Self {
         Self {
+            enabled: false,
             fail_on_max_attempts: false,
             max_verify_retries: 3,
             ai_verification: true,
@@ -532,6 +543,25 @@ pub struct ReviewConfig {
 
     /// Reasoning effort level for Codex CLI reviews.
     pub codex_reasoning_effort: ReasoningEffort,
+}
+
+/// Documentation update phase configuration.
+///
+/// # Examples
+///
+/// ```
+/// use coda_core::config::DocsConfig;
+///
+/// let config = DocsConfig::default();
+/// assert!(!config.enabled);
+/// ```
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DocsConfig {
+    /// Whether the update-docs phase is enabled.
+    ///
+    /// When `false` (default), the update-docs phase is skipped entirely.
+    pub enabled: bool,
 }
 
 impl Default for AgentConfig {
@@ -575,7 +605,7 @@ impl Default for GitConfig {
 impl Default for ReviewConfig {
     fn default() -> Self {
         Self {
-            enabled: true,
+            enabled: false,
             max_review_rounds: 5,
             engine: ReviewEngine::default(),
             codex_model: "gpt-5.3-codex".to_string(),
@@ -962,6 +992,12 @@ impl CodaConfig {
 
         // Verify keys
         keys.push(ConfigKeyDescriptor {
+            key: "verify.enabled".to_string(),
+            label: "Verify enabled".to_string(),
+            value_type: ConfigValueType::Bool,
+            current_value: self.verify.enabled.to_string(),
+        });
+        keys.push(ConfigKeyDescriptor {
             key: "verify.fail_on_max_attempts".to_string(),
             label: "Fail on max attempts".to_string(),
             value_type: ConfigValueType::Bool,
@@ -972,6 +1008,14 @@ impl CodaConfig {
             label: "Max verify retries".to_string(),
             value_type: ConfigValueType::U32,
             current_value: self.verify.max_verify_retries.to_string(),
+        });
+
+        // Docs keys
+        keys.push(ConfigKeyDescriptor {
+            key: "docs.enabled".to_string(),
+            label: "Docs enabled".to_string(),
+            value_type: ConfigValueType::Bool,
+            current_value: self.docs.enabled.to_string(),
         });
 
         keys
@@ -1062,6 +1106,7 @@ impl Default for CodaConfig {
             git: GitConfig::default(),
             review: ReviewConfig::default(),
             verify: VerifyConfig::default(),
+            docs: DocsConfig::default(),
             agents: AgentsConfig::default(),
         }
     }
@@ -1080,8 +1125,10 @@ mod tests {
         assert_eq!(config.checks.len(), 3);
         assert!(config.git.auto_commit);
         assert!(config.git.squash_before_push);
-        assert!(config.review.enabled);
+        assert!(!config.review.enabled);
+        assert!(!config.verify.enabled);
         assert_eq!(config.verify.max_verify_retries, 3);
+        assert!(!config.docs.enabled);
     }
 
     #[test]
@@ -1168,6 +1215,7 @@ review:
         assert!((config.agent.max_budget_usd - 100.0).abs() < f64::EPSILON);
         assert_eq!(config.agent.max_retries, 3);
         assert!(!config.checks.is_empty());
+        // Explicit `enabled: true` in YAML overrides the default `false`
         assert!(config.review.enabled);
     }
 
@@ -1671,8 +1719,8 @@ agents:
     fn test_should_return_config_keys_for_default_config() {
         let config = CodaConfig::default();
         let keys = config.config_keys();
-        // 5 ops * 3 keys + 8 agent + 4 git + 3 review + 2 verify = 32
-        assert_eq!(keys.len(), 32);
+        // 5 ops * 3 keys + 8 agent + 4 git + 3 review + 3 verify + 1 docs = 34
+        assert_eq!(keys.len(), 34);
     }
 
     #[test]

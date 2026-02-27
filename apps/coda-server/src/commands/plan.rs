@@ -422,17 +422,19 @@ async fn handle_approve(state: Arc<AppState>, channel: &str, thread_ts: &str) {
             )
             .await;
 
-            // Post verification plan (inline or as file)
-            post_content_or_file(
-                &state,
-                channel,
-                thread_ts,
-                &verification,
-                "Verification Plan",
-                "verification-plan.md",
-                "markdown",
-            )
-            .await;
+            // Post verification plan (inline or as file) — only when verify is enabled
+            if let Some(ref verification) = verification {
+                post_content_or_file(
+                    &state,
+                    channel,
+                    thread_ts,
+                    verification,
+                    "Verification Plan",
+                    "verification-plan.md",
+                    "markdown",
+                )
+                .await;
+            }
 
             let _ = state
                 .slack()
@@ -551,16 +553,19 @@ async fn handle_done(state: Arc<AppState>, channel: &str, thread_ts: &str) {
                 .update_message(channel, thread_ts, header_blocks)
                 .await;
 
+            let verification_line = output
+                .verification
+                .as_ref()
+                .map(|v| format!("\n\u{2022} Verification: `{}`", v.display()))
+                .unwrap_or_default();
             let summary = format!(
                 ":white_check_mark: *Planning finalized!*\n\n\
                  \u{2022} Worktree: `{}`\n\
-                 \u{2022} Design: `{}`\n\
-                 \u{2022} Verification: `{}`\n\
+                 \u{2022} Design: `{}`{verification_line}\n\
                  \u{2022} State: `{}`\n\n\
                  Use `/coda run {}` to start development.",
                 output.worktree.display(),
                 output.design_spec.display(),
-                output.verification.display(),
                 output.state.display(),
                 slug,
             );
