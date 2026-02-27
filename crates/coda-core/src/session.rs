@@ -549,7 +549,8 @@ impl AgentSession {
 
                                     // Reset accumulator — partial data is unreliable
                                     resp = AgentResponse::default();
-                                    turn_count = 0;
+                                    // turn_count intentionally NOT reset — keep cumulative
+                                    // so Slack/TUI show continuous turn numbers across reconnects
                                     in_tool_execution = false;
                                     alive_idle_total_secs = 0;
 

@@ -32,7 +32,7 @@ use crate::state::{AppState, TaskCleanupGuard};
 use super::resolve_engine;
 use super::streaming::{
     HEARTBEAT_INTERVAL, SLACK_SECTION_CHAR_LIMIT, STREAM_UPDATE_DEBOUNCE, format_tool_activity,
-    markdown_to_slack, split_into_chunks, truncated_preview,
+    markdown_to_slack, split_into_chunks,
 };
 
 /// Handles `/coda run <feature_slug>`.
@@ -312,8 +312,6 @@ struct PhaseThreadStreamer {
     current_phase: Option<String>,
     /// Accumulated text for the current phase.
     text: String,
-    /// Whether accumulated text has exceeded the inline limit.
-    exceeded_limit: bool,
     /// Last time a Slack update was sent for the phase reply.
     last_update: Instant,
     /// Whether there are pending text changes to flush.
@@ -331,7 +329,6 @@ impl PhaseThreadStreamer {
             current_reply_ts: None,
             current_phase: None,
             text: String::new(),
-            exceeded_limit: false,
             last_update: Instant::now(),
             pending: false,
             started: Instant::now(),
@@ -345,7 +342,6 @@ impl PhaseThreadStreamer {
 
         self.current_phase = Some(name.to_string());
         self.text.clear();
-        self.exceeded_limit = false;
         self.pending = false;
         self.started = Instant::now();
 
@@ -367,6 +363,8 @@ impl PhaseThreadStreamer {
     }
 
     /// Appends a text delta to the buffer and debounces the Slack update.
+    /// When text exceeds `SLACK_SECTION_CHAR_LIMIT`, a sliding window shows
+    /// the latest content so the user always sees fresh output.
     async fn on_text_delta(&mut self, delta: &str) {
         self.text.push_str(delta);
 
@@ -374,39 +372,33 @@ impl PhaseThreadStreamer {
             return;
         };
 
-        // Once text exceeds the inline limit, post a truncated preview
-        // once and stop further text updates until finalize.
-        if !self.exceeded_limit && self.text.len() > SLACK_SECTION_CHAR_LIMIT {
-            self.exceeded_limit = true;
-            let preview = truncated_preview(&self.text);
-            let slack_preview = markdown_to_slack(preview);
-            let phase_header = self.phase_header();
-            let msg = format!("{phase_header}\n{slack_preview}\n\n_:hourglass: generating..._");
-            let _ = self
-                .slack
-                .update_message_text(&self.channel, ts, &msg)
-                .await;
-            self.last_update = Instant::now();
-            self.pending = false;
-            return;
-        }
-
-        if self.exceeded_limit {
-            return;
-        }
-
         self.pending = true;
-        if self.last_update.elapsed() >= STREAM_UPDATE_DEBOUNCE {
-            let phase_header = self.phase_header();
-            let slack_text = markdown_to_slack(&self.text);
-            let msg = format!("{phase_header}\n{slack_text}");
-            let _ = self
-                .slack
-                .update_message_text(&self.channel, ts, &msg)
-                .await;
-            self.last_update = Instant::now();
-            self.pending = false;
+        if self.last_update.elapsed() < STREAM_UPDATE_DEBOUNCE {
+            return;
         }
+
+        let phase_header = self.phase_header();
+        let total_chars = self.text.len();
+
+        let msg = if total_chars <= SLACK_SECTION_CHAR_LIMIT {
+            let slack_text = markdown_to_slack(&self.text);
+            format!("{phase_header}\n{slack_text}")
+        } else {
+            let tail_start = tail_char_boundary(&self.text, SLACK_SECTION_CHAR_LIMIT);
+            let tail = &self.text[tail_start..];
+            let slack_text = markdown_to_slack(tail);
+            format!(
+                "{phase_header}\n_...({total_chars} chars total, showing last {})..._\n{slack_text}",
+                total_chars - tail_start,
+            )
+        };
+
+        let _ = self
+            .slack
+            .update_message_text(&self.channel, ts, &msg)
+            .await;
+        self.last_update = Instant::now();
+        self.pending = false;
     }
 
     /// Appends a tool activity line and updates the reply immediately.
@@ -417,13 +409,18 @@ impl PhaseThreadStreamer {
 
         let activity = format_tool_activity(tool_name, summary);
         let phase_header = self.phase_header();
-        let display = if self.exceeded_limit {
-            let preview = truncated_preview(&self.text);
-            let slack_preview = markdown_to_slack(preview);
-            format!("{phase_header}\n{slack_preview}\n\n{activity}")
-        } else {
+        let total_chars = self.text.len();
+        let display = if total_chars <= SLACK_SECTION_CHAR_LIMIT {
             let slack_text = markdown_to_slack(&self.text);
             format!("{phase_header}\n{slack_text}\n\n{activity}")
+        } else {
+            let tail_start = tail_char_boundary(&self.text, SLACK_SECTION_CHAR_LIMIT);
+            let tail = &self.text[tail_start..];
+            let slack_text = markdown_to_slack(tail);
+            format!(
+                "{phase_header}\n_...({total_chars} chars total, showing last {})..._\n{slack_text}\n\n{activity}",
+                total_chars - tail_start,
+            )
         };
         let _ = self
             .slack
@@ -456,15 +453,20 @@ impl PhaseThreadStreamer {
 
         let elapsed = self.started.elapsed().as_secs();
         let phase_header = self.phase_header();
-        let msg = if self.exceeded_limit {
-            let preview = truncated_preview(&self.text);
-            let slack_preview = markdown_to_slack(preview);
-            format!("{phase_header}\n{slack_preview}\n\n_:hourglass: working... ({elapsed}s)_")
-        } else if self.text.is_empty() {
+        let total_chars = self.text.len();
+        let msg = if self.text.is_empty() {
             format!("{phase_header}\n_:hourglass: working... ({elapsed}s)_")
-        } else {
+        } else if total_chars <= SLACK_SECTION_CHAR_LIMIT {
             let slack_text = markdown_to_slack(&self.text);
-            format!("{phase_header}\n{slack_text}\n\n_:hourglass: working... ({elapsed}s)_",)
+            format!("{phase_header}\n{slack_text}\n\n_:hourglass: working... ({elapsed}s)_")
+        } else {
+            let tail_start = tail_char_boundary(&self.text, SLACK_SECTION_CHAR_LIMIT);
+            let tail = &self.text[tail_start..];
+            let slack_text = markdown_to_slack(tail);
+            format!(
+                "{phase_header}\n_...({total_chars} chars total, showing last {})..._\n{slack_text}\n\n_:hourglass: working... ({elapsed}s)_",
+                total_chars - tail_start,
+            )
         };
         let _ = self
             .slack
@@ -576,6 +578,19 @@ impl PhaseThreadStreamer {
             None => "*Phase*".to_string(),
         }
     }
+}
+
+/// Returns the byte index for the last `max_bytes` of `text`,
+/// aligned to a UTF-8 char boundary.
+fn tail_char_boundary(text: &str, max_bytes: usize) -> usize {
+    if text.len() <= max_bytes {
+        return 0;
+    }
+    let mut start = text.len() - max_bytes;
+    while start < text.len() && !text.is_char_boundary(start) {
+        start += 1;
+    }
+    start
 }
 
 /// Consumes [`RunEvent`]s from the channel, debounces Slack progress
@@ -856,7 +871,6 @@ mod tests {
         assert!(streamer.current_reply_ts.is_none());
         assert!(streamer.current_phase.is_none());
         assert!(streamer.text.is_empty());
-        assert!(!streamer.exceeded_limit);
         assert!(!streamer.pending);
     }
 
@@ -909,5 +923,29 @@ mod tests {
         assert_eq!(phases[0].status, PhaseDisplayStatus::Completed);
         assert_eq!(phases[1].name, "review");
         assert_eq!(phases[1].status, PhaseDisplayStatus::Failed);
+    }
+
+    #[test]
+    fn test_tail_char_boundary_short_text() {
+        assert_eq!(tail_char_boundary("hello", 10), 0);
+        assert_eq!(tail_char_boundary("hello", 5), 0);
+    }
+
+    #[test]
+    fn test_tail_char_boundary_truncates() {
+        let text = "abcdefghij"; // 10 bytes
+        assert_eq!(tail_char_boundary(text, 5), 5);
+        assert_eq!(&text[5..], "fghij");
+    }
+
+    #[test]
+    fn test_tail_char_boundary_utf8_alignment() {
+        // "héllo" — 'é' is 2 bytes (0xC3 0xA9), total = 6 bytes
+        let text = "héllo";
+        // Requesting last 4 bytes: would start at byte 2, which is inside 'é'
+        // Should align forward to byte 3 ('l')
+        let start = tail_char_boundary(text, 4);
+        assert!(text.is_char_boundary(start));
+        assert_eq!(&text[start..], "llo");
     }
 }
