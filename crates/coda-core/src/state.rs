@@ -613,9 +613,7 @@ impl StateManager {
         }
         self.state.phases[phase_idx].status = PhaseStatus::Running;
         self.state.phases[phase_idx].started_at = Some(chrono::Utc::now());
-        if let Err(e) = self.save() {
-            tracing::warn!(error = %e, "Failed to save state when marking phase as running");
-        }
+        self.save()?;
         Ok(())
     }
 
@@ -650,10 +648,7 @@ impl StateManager {
         phase.duration_secs = outcome.duration.as_secs();
         phase.details = outcome.details.clone();
         self.state.feature.updated_at = chrono::Utc::now();
-
-        if let Err(e) = self.save() {
-            tracing::warn!(error = %e, "Failed to save state after completing phase");
-        }
+        self.save()?;
         Ok(())
     }
 
@@ -664,12 +659,14 @@ impl StateManager {
     /// any current status because failures can occur from any state
     /// (including retroactive failure via the circuit breaker after a
     /// spurious zero-cost completion).
-    pub fn fail_phase(&mut self, phase_idx: usize) {
+    ///
+    /// # Errors
+    ///
+    /// Returns `CoreError::StateError` if state cannot be persisted.
+    pub fn fail_phase(&mut self, phase_idx: usize) -> Result<(), CoreError> {
         self.state.phases[phase_idx].status = PhaseStatus::Failed;
         self.state.feature.updated_at = chrono::Utc::now();
-        if let Err(e) = self.save() {
-            tracing::warn!(error = %e, "Failed to save state after marking phase as failed");
-        }
+        self.save()
     }
 
     /// Sets the overall feature status with transition validation.
@@ -1268,7 +1265,7 @@ mod tests {
             make_phase("update-docs", PhaseKind::Quality),
         ]);
         // Simulate a previous failure
-        mgr.fail_phase(0);
+        mgr.fail_phase(0).expect("fail_phase");
         assert_eq!(mgr.state().phases[0].status, PhaseStatus::Failed);
         // Retry: mark failed phase as running
         let result = mgr.mark_phase_running(0);
@@ -1349,7 +1346,7 @@ mod tests {
             make_phase("verify", PhaseKind::Quality),
             make_phase("update-docs", PhaseKind::Quality),
         ]);
-        mgr.fail_phase(0);
+        mgr.fail_phase(0).expect("fail_phase");
         assert_eq!(mgr.state().phases[0].status, PhaseStatus::Failed);
     }
 
@@ -1362,7 +1359,7 @@ mod tests {
             make_phase("update-docs", PhaseKind::Quality),
         ]);
         // Circuit breaker: retroactively fail a completed phase
-        mgr.fail_phase(0);
+        mgr.fail_phase(0).expect("fail_phase");
         assert_eq!(mgr.state().phases[0].status, PhaseStatus::Failed);
     }
 

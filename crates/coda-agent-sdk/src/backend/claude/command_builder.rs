@@ -157,6 +157,15 @@ pub fn build_command(cli_path: &str, options: &AgentOptions) -> Vec<String> {
     cmd
 }
 
+/// Converts a `HashMap<String, String>` to a `serde_json::Value::Object`.
+fn string_map_to_json(map: &std::collections::HashMap<String, String>) -> serde_json::Value {
+    let obj: serde_json::Map<_, _> = map
+        .iter()
+        .map(|(k, v)| (k.clone(), serde_json::Value::String(v.clone())))
+        .collect();
+    serde_json::Value::Object(obj)
+}
+
 fn build_mcp_args(cmd: &mut Vec<String>, mcp_servers: Option<&McpServersConfig>) {
     match mcp_servers {
         Some(McpServersConfig::Dict(servers)) => {
@@ -190,11 +199,7 @@ fn build_mcp_args(cmd: &mut Vec<String>, mcp_servers: Option<&McpServersConfig>)
                             );
                         }
                         if let Some(ref env) = c.env {
-                            let env_obj: serde_json::Map<_, _> = env
-                                .iter()
-                                .map(|(k, v)| (k.clone(), serde_json::Value::String(v.clone())))
-                                .collect();
-                            m.insert("env".to_string(), serde_json::Value::Object(env_obj));
+                            m.insert("env".to_string(), string_map_to_json(env));
                         }
                         serde_json::Value::Object(m)
                     }
@@ -203,14 +208,7 @@ fn build_mcp_args(cmd: &mut Vec<String>, mcp_servers: Option<&McpServersConfig>)
                         m.insert("type".to_string(), serde_json::json!("sse"));
                         m.insert("url".to_string(), serde_json::json!(c.url));
                         if let Some(ref headers) = c.headers {
-                            let headers_obj: serde_json::Map<_, _> = headers
-                                .iter()
-                                .map(|(k, v)| (k.clone(), serde_json::Value::String(v.clone())))
-                                .collect();
-                            m.insert(
-                                "headers".to_string(),
-                                serde_json::Value::Object(headers_obj),
-                            );
+                            m.insert("headers".to_string(), string_map_to_json(headers));
                         }
                         serde_json::Value::Object(m)
                     }
@@ -219,14 +217,7 @@ fn build_mcp_args(cmd: &mut Vec<String>, mcp_servers: Option<&McpServersConfig>)
                         m.insert("type".to_string(), serde_json::json!("http"));
                         m.insert("url".to_string(), serde_json::json!(c.url));
                         if let Some(ref headers) = c.headers {
-                            let headers_obj: serde_json::Map<_, _> = headers
-                                .iter()
-                                .map(|(k, v)| (k.clone(), serde_json::Value::String(v.clone())))
-                                .collect();
-                            m.insert(
-                                "headers".to_string(),
-                                serde_json::Value::Object(headers_obj),
-                            );
+                            m.insert("headers".to_string(), string_map_to_json(headers));
                         }
                         serde_json::Value::Object(m)
                     }

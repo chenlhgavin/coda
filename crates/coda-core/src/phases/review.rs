@@ -4,8 +4,6 @@
 //! Claude (self-review) and Codex (independent review).
 //! Each engine mode follows the same pattern: review → find issues → fix → repeat.
 
-use std::time::Duration;
-
 use tracing::{info, warn};
 
 use crate::CoreError;
@@ -15,7 +13,7 @@ use crate::parser::parse_review_issues;
 use crate::runner::RunEvent;
 use crate::task::{Task, TaskResult, TaskStatus};
 
-use super::{PhaseContext, PhaseExecutor, PhaseMetricsAccumulator, PhaseOutcome};
+use super::{PhaseContext, PhaseExecutor, PhaseMetricsAccumulator, skip_disabled_phase};
 
 /// Executes the review phase with the configured review engine.
 ///
@@ -42,26 +40,12 @@ impl PhaseExecutor for ReviewPhaseExecutor {
 
         if !ctx.config.review.enabled {
             info!("Code review disabled, skipping");
-            let outcome = PhaseOutcome {
-                turns: 0,
-                cost_usd: 0.0,
-                input_tokens: 0,
-                output_tokens: 0,
-                duration: Duration::ZERO,
-                details: serde_json::json!({}),
-            };
-            let task_result = TaskResult {
-                task: Task::Review {
-                    feature_slug: ctx.state().feature.slug.clone(),
-                },
-                status: TaskStatus::Completed,
-                turns: 0,
-                cost_usd: 0.0,
-                duration: Duration::ZERO,
-                artifacts: vec![],
-            };
-            ctx.state_manager.complete_phase(phase_idx, &outcome)?;
-            return Ok(task_result);
+            let feature_slug = ctx.state().feature.slug.clone();
+            return skip_disabled_phase(
+                &mut ctx.state_manager,
+                phase_idx,
+                Task::Review { feature_slug },
+            );
         }
 
         let resolved = ctx.config.resolve_review();

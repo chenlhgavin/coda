@@ -776,8 +776,13 @@ impl Runner {
                         cost_usd: task_result.cost_usd,
                     });
 
-                    // Circuit breaker: track consecutive zero-cost phases.
-                    if task_result.cost_usd == 0.0 && task_result.turns <= 1 {
+                    // Circuit breaker: track consecutive zero-cost Dev phases.
+                    // Quality phases are skipped when they're disabled — their
+                    // zero cost is expected and must not trigger the breaker.
+                    if matches!(phase_kind, PhaseKind::Dev)
+                        && task_result.cost_usd < f64::EPSILON
+                        && task_result.turns <= 1
+                    {
                         consecutive_zero_cost_phases += 1;
                         if consecutive_zero_cost_phases >= MAX_CONSECUTIVE_ZERO_COST {
                             error!(
@@ -786,7 +791,7 @@ impl Runner {
                                  completed with zero cost and minimal turns",
                                 consecutive_zero_cost_phases,
                             );
-                            self.ctx.state_manager.fail_phase(phase_idx);
+                            self.ctx.state_manager.fail_phase(phase_idx)?;
                             self.ctx
                                 .state_manager
                                 .set_feature_status(FeatureStatus::Failed)?;
@@ -832,7 +837,7 @@ impl Runner {
                         index: phase_idx,
                         error: e.to_string(),
                     });
-                    self.ctx.state_manager.fail_phase(phase_idx);
+                    self.ctx.state_manager.fail_phase(phase_idx)?;
                     self.ctx
                         .state_manager
                         .set_feature_status(FeatureStatus::Failed)?;

@@ -34,7 +34,7 @@ use crate::parser::parse_ai_verification;
 use crate::runner::RunEvent;
 use crate::task::{Task, TaskResult, TaskStatus};
 
-use super::{PhaseContext, PhaseExecutor, PhaseMetricsAccumulator};
+use super::{PhaseContext, PhaseExecutor, PhaseMetricsAccumulator, skip_disabled_phase};
 
 /// Executes the verify phase with a two-tier architecture.
 ///
@@ -65,26 +65,12 @@ impl PhaseExecutor for VerifyPhaseExecutor {
 
         if !ctx.config.verify.enabled {
             info!("Verify phase disabled, skipping");
-            let outcome = crate::state::PhaseOutcome {
-                turns: 0,
-                cost_usd: 0.0,
-                input_tokens: 0,
-                output_tokens: 0,
-                duration: std::time::Duration::ZERO,
-                details: serde_json::json!({}),
-            };
-            let task_result = TaskResult {
-                task: Task::Verify {
-                    feature_slug: ctx.state().feature.slug.clone(),
-                },
-                status: TaskStatus::Completed,
-                turns: 0,
-                cost_usd: 0.0,
-                duration: std::time::Duration::ZERO,
-                artifacts: vec![],
-            };
-            ctx.state_manager.complete_phase(phase_idx, &outcome)?;
-            return Ok(task_result);
+            let feature_slug = ctx.state().feature.slug.clone();
+            return skip_disabled_phase(
+                &mut ctx.state_manager,
+                phase_idx,
+                Task::Verify { feature_slug },
+            );
         }
 
         let verification_spec = ctx.load_spec("verification.md")?;

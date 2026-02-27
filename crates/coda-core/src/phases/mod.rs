@@ -46,7 +46,7 @@ use crate::config::CodaConfig;
 use crate::runner::RunEvent;
 use crate::session::{AgentResponse, AgentSession};
 use crate::state::{FeatureState, PhaseStatus, StateManager};
-use crate::task::TaskResult;
+use crate::task::{Task, TaskResult, TaskStatus};
 
 // Re-export PhaseOutcome so executor files can continue to use `super::PhaseOutcome`.
 pub use crate::state::PhaseOutcome;
@@ -96,6 +96,40 @@ pub trait PhaseExecutor: Send {
         ctx: &mut PhaseContext,
         phase_idx: usize,
     ) -> impl Future<Output = Result<TaskResult, CoreError>> + Send;
+}
+
+/// Completes a phase as skipped (disabled) with a zero-cost outcome.
+///
+/// Used by quality phases (review, verify, docs) when the corresponding
+/// config flag is `false`. Marks the phase completed in `StateManager`
+/// and returns a no-op `TaskResult`.
+///
+/// # Errors
+///
+/// Returns `CoreError::StateError` if the phase transition is invalid.
+pub fn skip_disabled_phase(
+    state_manager: &mut StateManager,
+    phase_idx: usize,
+    task: Task,
+) -> Result<TaskResult, CoreError> {
+    let outcome = PhaseOutcome {
+        turns: 0,
+        cost_usd: 0.0,
+        input_tokens: 0,
+        output_tokens: 0,
+        duration: std::time::Duration::ZERO,
+        details: serde_json::json!({}),
+    };
+    let task_result = TaskResult {
+        task,
+        status: TaskStatus::Completed,
+        turns: 0,
+        cost_usd: 0.0,
+        duration: std::time::Duration::ZERO,
+        artifacts: vec![],
+    };
+    state_manager.complete_phase(phase_idx, &outcome)?;
+    Ok(task_result)
 }
 
 /// Shared mutable context passed to each [`PhaseExecutor`].

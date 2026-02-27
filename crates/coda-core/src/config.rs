@@ -17,11 +17,11 @@ use coda_agent_sdk::backend::BackendKind;
 use coda_agent_sdk::options::Effort;
 use serde::{Deserialize, Serialize};
 
-/// Default model for `init` when no per-operation override is set.
-const INIT_DEFAULT_MODEL: &str = "claude-sonnet-4-6";
+/// Default Claude model for operations that use Claude backend.
+const DEFAULT_CLAUDE_MODEL: &str = "claude-sonnet-4-6";
 
-/// Default model for `run` when no per-operation override is set.
-const RUN_DEFAULT_MODEL: &str = "claude-sonnet-4-6";
+/// Default Codex model for operations that use Codex backend.
+const DEFAULT_CODEX_MODEL: &str = "gpt-5.3-codex";
 
 /// Top-level CODA project configuration loaded from `.coda/config.yml`.
 ///
@@ -608,7 +608,7 @@ impl Default for ReviewConfig {
             enabled: false,
             max_review_rounds: 5,
             engine: ReviewEngine::default(),
-            codex_model: "gpt-5.3-codex".to_string(),
+            codex_model: DEFAULT_CODEX_MODEL.to_string(),
             codex_reasoning_effort: ReasoningEffort::High,
         }
     }
@@ -722,7 +722,7 @@ impl fmt::Display for ResolvedAgentConfig {
 impl CodaConfig {
     /// Resolves agent configuration for the `init` operation.
     ///
-    /// Falls back to [`INIT_DEFAULT_MODEL`] for model, `Claude` for backend,
+    /// Falls back to [`DEFAULT_CLAUDE_MODEL`] for model, `Claude` for backend,
     /// and `agent.default_effort` for effort.
     pub fn resolve_init(&self) -> ResolvedAgentConfig {
         ResolvedAgentConfig {
@@ -732,7 +732,7 @@ impl CodaConfig {
                 .init
                 .model
                 .clone()
-                .unwrap_or_else(|| INIT_DEFAULT_MODEL.to_string()),
+                .unwrap_or_else(|| DEFAULT_CLAUDE_MODEL.to_string()),
             effort: self.agents.init.effort.unwrap_or(self.agent.default_effort),
         }
     }
@@ -756,7 +756,7 @@ impl CodaConfig {
 
     /// Resolves agent configuration for the `run` operation.
     ///
-    /// Falls back to [`RUN_DEFAULT_MODEL`] for model, `Claude` for backend,
+    /// Falls back to [`DEFAULT_CLAUDE_MODEL`] for model, `Claude` for backend,
     /// and `agent.default_effort` for effort.
     pub fn resolve_run(&self) -> ResolvedAgentConfig {
         ResolvedAgentConfig {
@@ -766,7 +766,7 @@ impl CodaConfig {
                 .run
                 .model
                 .clone()
-                .unwrap_or_else(|| RUN_DEFAULT_MODEL.to_string()),
+                .unwrap_or_else(|| DEFAULT_CLAUDE_MODEL.to_string()),
             effort: self.agents.run.effort.unwrap_or(self.agent.default_effort),
         }
     }
@@ -825,7 +825,7 @@ impl CodaConfig {
                 .verify
                 .model
                 .clone()
-                .unwrap_or_else(|| "gpt-5.3-codex".to_string()),
+                .unwrap_or_else(|| DEFAULT_CODEX_MODEL.to_string()),
             effort: self
                 .agents
                 .verify

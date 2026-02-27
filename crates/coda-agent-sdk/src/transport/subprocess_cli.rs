@@ -1,6 +1,6 @@
 //! Subprocess transport using Claude Code CLI.
 
-use crate::backend::claude::command_builder;
+use crate::backend::claude::{cli_finder, command_builder};
 use crate::error::{Error, Result};
 use crate::options::AgentOptions;
 use crate::transport::Transport;
@@ -11,8 +11,6 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 
 const DEFAULT_MAX_BUFFER_SIZE: usize = 1024 * 1024; // 1MB
-#[allow(dead_code)]
-const MINIMUM_CLAUDE_CODE_VERSION: &str = "2.0.0";
 
 pub struct SubprocessCliTransport {
     options: AgentOptions,
@@ -28,7 +26,7 @@ pub struct SubprocessCliTransport {
 
 impl SubprocessCliTransport {
     pub fn new(_prompt: &str, options: AgentOptions) -> Result<Self> {
-        let cli_path = Self::find_cli(&options)?;
+        let cli_path = cli_finder::find_cli(&options)?;
         let cwd = options
             .cwd
             .as_ref()
@@ -49,60 +47,6 @@ impl SubprocessCliTransport {
         })
     }
 
-    fn find_cli(options: &AgentOptions) -> Result<String> {
-        if let Some(ref p) = options.cli_path {
-            return Ok(p.to_string_lossy().to_string());
-        }
-
-        if let Some(bundled) = Self::find_bundled_cli() {
-            return Ok(bundled);
-        }
-
-        if let Some(path) = which_cli() {
-            return Ok(path);
-        }
-
-        let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-        let locations = [
-            format!("{}/.npm-global/bin/claude", home),
-            "/usr/local/bin/claude".to_string(),
-            format!("{}/.local/bin/claude", home),
-            format!("{}/node_modules/.bin/claude", home),
-            format!("{}/.yarn/bin/claude", home),
-            format!("{}/.claude/local/claude", home),
-        ];
-
-        for path in &locations {
-            if Path::new(path).exists() {
-                return Ok(path.clone());
-            }
-        }
-
-        Err(Error::CliNotFound(
-            "Claude Code not found. Install with:\n  npm install -g @anthropic-ai/claude-code\n\n\
-             Or provide the path via AgentOptions::cli_path()"
-                .to_string(),
-        ))
-    }
-
-    fn find_bundled_cli() -> Option<String> {
-        let cli_name = if cfg!(target_os = "windows") {
-            "claude.exe"
-        } else {
-            "claude"
-        };
-
-        let exe = std::env::current_exe().ok()?;
-        let dir = exe.parent()?;
-        let bundled = dir.join("_bundled").join(cli_name);
-
-        if bundled.exists() {
-            Some(bundled.to_string_lossy().to_string())
-        } else {
-            None
-        }
-    }
-
     fn build_command(&self) -> Vec<String> {
         command_builder::build_command(&self.cli_path, &self.options)
     }
@@ -116,7 +60,7 @@ impl Transport for SubprocessCliTransport {
         }
 
         if std::env::var("CLAUDE_AGENT_SDK_SKIP_VERSION_CHECK").is_err() {
-            check_claude_version(&self.cli_path).await;
+            cli_finder::check_claude_version(&self.cli_path).await;
         }
 
         let cmd = self.build_command();
@@ -301,65 +245,4 @@ impl Transport for SubprocessCliTransport {
         }
         Ok(())
     }
-}
-
-fn which_cli() -> Option<String> {
-    std::env::var_os("PATH").and_then(|paths| {
-        for path in std::env::split_paths(&paths) {
-            let full = path.join(if cfg!(target_os = "windows") {
-                "claude.exe"
-            } else {
-                "claude"
-            });
-            if full.is_file() {
-                return Some(full.to_string_lossy().to_string());
-            }
-        }
-        None
-    })
-}
-
-async fn check_claude_version(cli_path: &str) {
-    let result: std::result::Result<(), ()> = async {
-        let child = Command::new(cli_path)
-            .arg("-v")
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()
-            .map_err(|_| ())?;
-
-        let output = child.wait_with_output().await.map_err(|_| ())?;
-        let version_output = String::from_utf8_lossy(&output.stdout).trim().to_string();
-
-        // Parse version (e.g., "2.1.0" from "2.1.0" or "2.1.0-beta.1")
-        let version_re_match: Option<&str> = version_output
-            .split(|c: char| !c.is_ascii_digit() && c != '.')
-            .next()
-            .filter(|s| s.contains('.'));
-
-        if let Some(version_str) = version_re_match {
-            let version_parts: Vec<u32> = version_str
-                .split('.')
-                .filter_map(|s| s.parse().ok())
-                .collect();
-            let min_parts: Vec<u32> = MINIMUM_CLAUDE_CODE_VERSION
-                .split('.')
-                .filter_map(|s| s.parse().ok())
-                .collect();
-
-            if version_parts < min_parts {
-                let warning = format!(
-                    "Warning: Claude Code version {} is unsupported in the Agent SDK. \
-                     Minimum required version is {}. Some features may not work correctly.",
-                    version_str, MINIMUM_CLAUDE_CODE_VERSION
-                );
-                tracing::warn!("{}", warning);
-                eprintln!("{}", warning);
-            }
-        }
-        Ok(())
-    }
-    .await;
-
-    let _ = result;
 }

@@ -13,7 +13,7 @@ use crate::CoreError;
 use crate::async_ops::commit_coda_artifacts_async;
 use crate::task::{Task, TaskResult, TaskStatus};
 
-use super::{PhaseContext, PhaseExecutor, PhaseMetricsAccumulator};
+use super::{PhaseContext, PhaseExecutor, PhaseMetricsAccumulator, skip_disabled_phase};
 
 /// Executes the update-docs phase.
 ///
@@ -41,26 +41,12 @@ impl PhaseExecutor for DocsPhaseExecutor {
 
         if !ctx.config.docs.enabled {
             info!("Update-docs phase disabled, skipping");
-            let outcome = crate::state::PhaseOutcome {
-                turns: 0,
-                cost_usd: 0.0,
-                input_tokens: 0,
-                output_tokens: 0,
-                duration: std::time::Duration::ZERO,
-                details: serde_json::json!({}),
-            };
-            let task_result = TaskResult {
-                task: Task::UpdateDocs {
-                    feature_slug: ctx.state().feature.slug.clone(),
-                },
-                status: TaskStatus::Completed,
-                turns: 0,
-                cost_usd: 0.0,
-                duration: std::time::Duration::ZERO,
-                artifacts: vec![],
-            };
-            ctx.state_manager.complete_phase(phase_idx, &outcome)?;
-            return Ok(task_result);
+            let feature_slug = ctx.state().feature.slug.clone();
+            return skip_disabled_phase(
+                &mut ctx.state_manager,
+                phase_idx,
+                Task::UpdateDocs { feature_slug },
+            );
         }
 
         let design_spec = ctx.load_spec("design.md")?;
