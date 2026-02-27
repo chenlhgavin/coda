@@ -39,51 +39,21 @@ The `.coda/{{ feature_slug }}/` directory contains the design spec, verification
 
 ## Task
 
-Implement all code changes described in this phase using **Test-Driven Development (TDD)**.
-Tests MUST be written BEFORE the production code they verify.
+Implement all code changes described in this phase.
 
-### Assess Scope
+### Implementation
 
-Before starting, read the phase requirements and assess the code volume:
-- **Large scope** (multiple sub-components, new modules, or significant logic): Use the per-component TDD cycle below
-- **Small scope** (single component, minor additions): Write all tests upfront, then implement
-
-### TDD Workflow — Per-Component Cycle (Large Scope)
-
-For each sub-component or logical unit in this phase:
-
-1. **Red** — Write failing unit tests in `#[cfg(test)] mod tests`
-   - Use descriptive names: `test_should_<expected_behavior>_when_<condition>`
-   - Cover happy path, error cases, and edge cases
-   - Confirm the tests fail (implementation does not exist yet)
-2. **Green** — Write the minimum production code to make the tests pass
+1. **Implement production code** — Write the code described in this phase
    - Follow the interface design from the spec exactly
    - Handle all error cases properly — no `unwrap()` or `expect()` in production code
    - Add appropriate logging with `tracing` macros
-3. **Refactor** — Clean up while keeping tests green
    - Add doc comments (`///`) for all public items with at least one example
-   - Remove duplication, improve naming, simplify logic
-
-Repeat this cycle for each sub-component before moving to the next.
-
-### TDD Workflow — Tests First (Small Scope)
-
-1. **Write all tests first** — Create unit tests in `#[cfg(test)] mod tests` for every public function and type in this phase
+2. **Write tests** — Create unit tests in `#[cfg(test)] mod tests` for all new functionality
    - Use descriptive names: `test_should_<expected_behavior>_when_<condition>`
    - Cover happy path, error cases, and edge cases
-   - Confirm the tests fail
-2. **Implement** all production code to make tests pass
-   - Follow the interface design from the spec exactly
-   - Handle all error cases properly — no `unwrap()` or `expect()` in production code
-   - Add appropriate logging with `tracing` macros
-3. **Refactor** — Add doc comments, clean up code
+3. **Verify** — Run tests and ensure all pass
 
-### Key TDD Rules
-
-- **Never write production code without a failing test that demands it**
-- If you discover missing test coverage during implementation, write the test first, confirm it fails, then fix
-- Tests drive the design — they are not an afterthought
-
+{% if not dev_phase_checks %}
 ## After Implementation
 
 Run the following checks and fix any issues:
@@ -96,6 +66,7 @@ If any check fails:
 2. Fix the issue
 3. Re-run the checks
 4. Repeat until all checks pass
+{% endif %}
 
 ## Commit
 

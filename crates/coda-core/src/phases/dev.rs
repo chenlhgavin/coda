@@ -179,6 +179,7 @@ impl PhaseExecutor for DevPhaseExecutor {
                 total_dev_phases => total_dev_phases,
                 is_first => is_first,
                 checks => checks,
+                dev_phase_checks => ctx.config.agent.dev_phase_checks,
                 feature_slug => feature_slug,
                 resume_context => resume_context,
                 phase_goal => section.goal,

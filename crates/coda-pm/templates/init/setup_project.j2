@@ -57,7 +57,7 @@ This file provides coding standards and development guidelines for AI agents and
    - **Design Principles** — Type safety (make illegal states unrepresentable), error handling strategy (specific to detected tech stack), API design conventions, prefer composition over inheritance
    - **Code Quality** — Linting rules, function size limits, import ordering, dead code policy
    - **Security** — Input validation, sensitive data handling, secrets management, TLS/crypto choices (tailored to tech stack)
-   - **Testing (TDD)** — Test-first development workflow: write failing test → implement → refactor. Test naming conventions, unit/integration test organization, mocking strategy, coverage goals focused on critical paths and edge cases
+   - **Testing** — Test naming conventions, unit/integration test organization, mocking strategy, coverage goals focused on critical paths and edge cases
    - **Code Style** — Naming conventions, formatting tools, import order, trailing commas (tailored to detected language)
    - **Toolchain & Build** — Build commands, lint commands, test commands, CI checks (based on detected tech stack)
 4. Ensure the file ends with the CODA reference section (add if missing):
@@ -157,7 +157,7 @@ This file provides coding standards and development guidelines for AI agents and
    - **Design Principles** — Type safety (make illegal states unrepresentable), error handling strategy (specific to detected tech stack), API design conventions, prefer composition over inheritance
    - **Code Quality** — Linting rules, function size limits, import ordering, dead code policy
    - **Security** — Input validation, sensitive data handling, secrets management, TLS/crypto choices (tailored to tech stack)
-   - **Testing (TDD)** — Test-first development workflow: write failing test → implement → refactor. Test naming conventions, unit/integration test organization, mocking strategy, coverage goals focused on critical paths and edge cases
+   - **Testing** — Test naming conventions, unit/integration test organization, mocking strategy, coverage goals focused on critical paths and edge cases
    - **Code Style** — Naming conventions, formatting tools, import order, trailing commas (tailored to detected language)
    - **Toolchain & Build** — Build commands, lint commands, test commands, CI checks (based on detected tech stack)
 4. Ensure the file ends with the CODA reference section (add if missing):
@@ -186,14 +186,14 @@ After completing all steps, verify:
 {% if force %}- [ ] `.coda/config.yml` is valid YAML with user settings preserved and checks updated
 - [ ] `.coda.md` exists, is well-formatted, and includes Architecture Overview, Interface Design, and Data Flow sections
 - [ ] `.gitignore` contains `.trees/`
-- [ ] `CLAUDE.md` contains coding standards with Core Principles, Design Principles, Testing (TDD), Security, and Code Style sections
+- [ ] `CLAUDE.md` contains coding standards with Core Principles, Design Principles, Testing, Security, and Code Style sections
 - [ ] `CLAUDE.md` ends with the CODA reference section
 {% else %}- [ ] `.coda/` directory exists
 - [ ] `.trees/` directory exists
 - [ ] `.coda/config.yml` is valid YAML with appropriate checks
 - [ ] `.gitignore` contains `.trees/`
 - [ ] `.coda.md` exists, is well-formatted, and includes Architecture Overview, Interface Design, and Data Flow sections
-- [ ] `CLAUDE.md` contains coding standards with Core Principles, Design Principles, Testing (TDD), Security, and Code Style sections
+- [ ] `CLAUDE.md` contains coding standards with Core Principles, Design Principles, Testing, Security, and Code Style sections
 - [ ] `CLAUDE.md` ends with the CODA reference section
 {% endif %}
 Report the result of each verification step.

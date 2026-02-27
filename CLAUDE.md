@@ -88,9 +88,8 @@
 - Validate deserialized data immediately. Use custom deserialize functions with validation logic when needed.
 - Use `serde_json::Value` only when schema is truly dynamic. Prefer strongly-typed structs.
 
-## Testing (TDD)
+## Testing
 
-- **Test-first development**: Write a failing test that captures the expected behavior, implement the minimum code to pass, then refactor. This ensures every change is covered and the design stays testable.
 - Write unit tests in the same file using `#[cfg(test)] mod tests`. Write integration tests in `tests/` directory.
 - Use descriptive test names with `test_should_` prefix describing behavior (e.g., `test_should_return_error_on_invalid_input`).
 - Use `rstest` for parameterized tests. Use `proptest` for property-based testing of invariants.
