@@ -4,16 +4,9 @@ Based on the following design specification, generate a verification plan.
 
 {{ design_spec }}
 
-## Pre-configured Checks
-
-The following checks are executed automatically by the system (do NOT include these in the verification plan — they are run as real subprocesses with real exit codes):
-{% for check in checks %}
-- `{{ check }}`
-{% endfor %}
-
 ## Output Format
 
-Generate a Markdown document with the following structure. Focus on verification that **requires judgment** — the automated checks above are handled separately by the system.
+Generate a Markdown document with the following structure. Focus on verification that **requires judgment** — behavioral correctness, design conformance, and integration soundness.
 
 ```markdown
 # Verification Plan: {{ feature_slug }}
@@ -54,7 +47,6 @@ Generate a Markdown document with the following structure. Focus on verification
 
 ## Guidelines
 
-- Do NOT include automated checks (build, test, lint, format) — these are run by the system
 - Focus on behavioral verification that requires judgment
 - Each check must specify a concrete verification method (test name, code path, command)
 - Do NOT include vague items like "Performance is acceptable" or "Security is adequate" unless the design spec defines specific measurable criteria

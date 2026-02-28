@@ -15,7 +15,7 @@ Perform the following steps in order:
 {% if force %}
 ### 1. Update `.coda/config.yml`
 
-Read the existing config at `{{ project_root }}/.coda/config.yml`. **Preserve all user-customized settings** (such as `agent.max_budget_usd`, `agent.model`, `agents.*`, `review.codex_reasoning_effort`, `git.branch_prefix`, etc.). Update the `checks` list to match the current tech stack detected in the analysis above. Set `review.engine` to `codex` (the current default). If any new config fields are missing from the existing file, add them with sensible defaults. **Important**: `review.codex_model` must be an OpenAI-compatible model (e.g., `gpt-5.3-codex`). If it is currently set to a Claude model (e.g., `claude-opus-4-6`), correct it to `gpt-5.3-codex`. Ensure the `agents` section exists with per-operation overrides for `init`, `plan`, `run`, and `review` (each may specify `backend`, `model`, and `effort`).
+Read the existing config at `{{ project_root }}/.coda/config.yml`. **Preserve all user-customized settings** (such as `agent.max_budget_usd`, `agent.model`, `agents.*`, `review.codex_reasoning_effort`, `git.branch_prefix`, etc.). Set `review.engine` to `codex` (the current default). If any new config fields are missing from the existing file, add them with sensible defaults. **Important**: `review.codex_model` must be an OpenAI-compatible model (e.g., `gpt-5.3-codex`). If it is currently set to a Claude model (e.g., `claude-opus-4-6`), correct it to `gpt-5.3-codex`. Ensure the `agents` section exists with per-operation overrides for `init`, `plan`, `run`, and `review` (each may specify `backend`, `model`, and `effort`).
 
 ### 2. Regenerate `.coda.md`
 
@@ -84,19 +84,11 @@ mkdir -p "{{ project_root }}/.trees"
 
 ### 3. Generate `.coda/config.yml`
 
-Create the file `{{ project_root }}/.coda/config.yml`. Based on the detected tech stack in the analysis results above, determine the appropriate build/lint/format checks for this project and fill them in.
+Create the file `{{ project_root }}/.coda/config.yml`.
 
 ```yaml
 # CODA Project Configuration
 version: 1
-
-checks:
-  # Determine appropriate checks from the detected tech stack.
-  # Examples:
-  #   Rust: cargo build, cargo +nightly fmt -- --check, cargo clippy -- -D warnings
-  #   Node: npm run build, npm run lint, npm test
-  #   Python: ruff check, mypy, pytest
-  - "<fill based on tech stack>"
 
 agents:
   run:
@@ -165,7 +157,7 @@ The file must end with the CODA reference section shown above.
 ## Verification
 
 After completing all steps, verify:
-{% if force %}- [ ] `.coda/config.yml` is valid YAML with user settings preserved and checks updated
+{% if force %}- [ ] `.coda/config.yml` is valid YAML with user settings preserved
 - [ ] `.coda.md` exists, is well-formatted, and includes Architecture Overview, Key Interfaces, and Data Flow sections
 - [ ] `.coda.md` does NOT contain development workflow commands or coding conventions
 - [ ] `.gitignore` contains `.trees/`
@@ -174,7 +166,7 @@ After completing all steps, verify:
 - [ ] `CLAUDE.md` ends with the CODA reference section
 {% else %}- [ ] `.coda/` directory exists
 - [ ] `.trees/` directory exists
-- [ ] `.coda/config.yml` is valid YAML with appropriate checks
+- [ ] `.coda/config.yml` is valid YAML
 - [ ] `.gitignore` contains `.trees/`
 - [ ] `.coda.md` exists, is well-formatted, and includes Architecture Overview, Key Interfaces, and Data Flow sections
 - [ ] `.coda.md` does NOT contain development workflow commands or coding conventions

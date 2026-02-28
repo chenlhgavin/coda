@@ -49,9 +49,6 @@ pub struct CodaConfig {
     /// Agent behavior configuration.
     pub agent: AgentConfig,
 
-    /// Precommit check commands run after each phase.
-    pub checks: Vec<String>,
-
     /// Prompt template configuration.
     pub prompts: PromptsConfig,
 
@@ -140,16 +137,6 @@ pub struct AgentConfig {
     /// Set to `false` (default) to share a single conversation across
     /// all dev phases (legacy behavior).
     pub isolate_dev_phases: bool,
-
-    /// When `true` (default), deterministic checks (`config.checks`)
-    /// are run after each dev phase completes. If checks fail, the agent
-    /// is prompted to fix the issues (up to 2 additional attempts)
-    /// before proceeding to the next phase.
-    ///
-    /// Set to `false` to skip per-phase checks entirely (the verify
-    /// phase still runs checks at the end).
-    #[serde(default = "default_true")]
-    pub dev_phase_checks: bool,
 }
 
 /// Configuration for prompt template directories.
@@ -497,10 +484,7 @@ pub struct ConfigKeyDescriptor {
 ///
 /// let config = VerifyConfig::default();
 /// assert!(!config.enabled);
-/// assert_eq!(config.max_verify_retries, 3);
-/// assert!(!config.fail_on_max_attempts);
 /// assert!(config.ai_verification);
-/// assert_eq!(config.check_timeout_secs, 600);
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -511,35 +495,13 @@ pub struct VerifyConfig {
     /// `verification.md` is not generated during planning.
     pub enabled: bool,
 
-    /// When `true`, the verify phase returns an error if any check still
-    /// fails after all retry attempts, causing the run to abort. When
-    /// `false` (default), a warning is logged and the run continues with
-    /// a draft PR.
-    pub fail_on_max_attempts: bool,
-
-    /// Maximum number of retry attempts after the initial verification
-    /// fails. Total verification attempts = 1 (initial) + `max_verify_retries`.
-    /// Defaults to 3 retries (4 total attempts).
-    ///
-    /// Backward-compatible with the legacy `max_retries` key via serde alias.
-    #[serde(alias = "max_retries")]
-    pub max_verify_retries: u32,
-
-    /// Whether to run AI-assisted verification (Tier 2) after all
-    /// deterministic checks pass.
+    /// Whether to run AI-assisted verification after dev phases complete.
     ///
     /// When `true` (default), a Codex session evaluates functional
-    /// correctness, design conformance, and integration points.
-    /// Set to `false` to rely solely on the configured `checks`.
+    /// correctness, design conformance, and integration points against
+    /// the verification plan generated during `coda plan`.
     #[serde(default = "default_true")]
     pub ai_verification: bool,
-
-    /// Per-command timeout in seconds for deterministic checks.
-    ///
-    /// Defaults to 600 seconds (10 minutes). Commands exceeding this
-    /// timeout are killed and reported as failed.
-    #[serde(default = "default_check_timeout")]
-    pub check_timeout_secs: u64,
 }
 
 /// Default value helper for `ai_verification`.
@@ -547,19 +509,11 @@ const fn default_true() -> bool {
     true
 }
 
-/// Default value helper for `check_timeout_secs`.
-const fn default_check_timeout() -> u64 {
-    600
-}
-
 impl Default for VerifyConfig {
     fn default() -> Self {
         Self {
             enabled: false,
-            fail_on_max_attempts: false,
-            max_verify_retries: 3,
             ai_verification: true,
-            check_timeout_secs: 600,
         }
     }
 }
@@ -598,7 +552,6 @@ impl Default for AgentConfig {
             isolate_quality_phases: true,
             default_effort: ReasoningEffort::High,
             isolate_dev_phases: false,
-            dev_phase_checks: true,
         }
     }
 }
@@ -959,12 +912,6 @@ impl CodaConfig {
             value_type: ConfigValueType::Bool,
             current_value: self.agent.isolate_dev_phases.to_string(),
         });
-        keys.push(ConfigKeyDescriptor {
-            key: "agent.dev_phase_checks".to_string(),
-            label: "Dev phase checks".to_string(),
-            value_type: ConfigValueType::Bool,
-            current_value: self.agent.dev_phase_checks.to_string(),
-        });
 
         // Git keys
         keys.push(ConfigKeyDescriptor {
@@ -1018,18 +965,6 @@ impl CodaConfig {
             label: "Verify enabled".to_string(),
             value_type: ConfigValueType::Bool,
             current_value: self.verify.enabled.to_string(),
-        });
-        keys.push(ConfigKeyDescriptor {
-            key: "verify.fail_on_max_attempts".to_string(),
-            label: "Fail on max attempts".to_string(),
-            value_type: ConfigValueType::Bool,
-            current_value: self.verify.fail_on_max_attempts.to_string(),
-        });
-        keys.push(ConfigKeyDescriptor {
-            key: "verify.max_verify_retries".to_string(),
-            label: "Max verify retries".to_string(),
-            value_type: ConfigValueType::U32,
-            current_value: self.verify.max_verify_retries.to_string(),
         });
 
         keys
@@ -1116,11 +1051,6 @@ impl Default for CodaConfig {
         Self {
             version: 1,
             agent: AgentConfig::default(),
-            checks: vec![
-                "cargo build".to_string(),
-                "cargo +nightly fmt -- --check".to_string(),
-                "cargo clippy -- -D warnings".to_string(),
-            ],
             prompts: PromptsConfig::default(),
             git: GitConfig::default(),
             review: ReviewConfig::default(),
@@ -1140,12 +1070,10 @@ mod tests {
         assert_eq!(config.version, 1);
         assert_eq!(config.agent.max_budget_usd, 100.0);
         assert_eq!(config.agent.max_retries, 3);
-        assert_eq!(config.checks.len(), 3);
         assert!(config.git.auto_commit);
         assert!(config.git.squash_before_push);
         assert!(!config.review.enabled);
         assert!(!config.verify.enabled);
-        assert_eq!(config.verify.max_verify_retries, 3);
     }
 
     #[test]
@@ -1166,9 +1094,6 @@ agent:
   model: "claude-opus-4-20250514"
   max_budget_usd: 100.0
   max_retries: 5
-checks:
-  - "npm run build"
-  - "npm run lint"
 prompts:
   extra_dirs:
     - ".coda/custom-prompts"
@@ -1190,8 +1115,6 @@ review:
         assert_eq!(config.agent.model, "claude-opus-4-20250514");
         assert!((config.agent.max_budget_usd - 100.0).abs() < f64::EPSILON);
         assert_eq!(config.agent.max_retries, 5);
-        assert_eq!(config.checks.len(), 2);
-        assert_eq!(config.checks[0], "npm run build");
         assert_eq!(config.prompts.extra_dirs.len(), 2);
         assert!(!config.git.auto_commit);
         assert!(!config.git.squash_before_push);
@@ -1231,7 +1154,6 @@ review:
         assert_eq!(config.version, 1);
         assert!((config.agent.max_budget_usd - 100.0).abs() < f64::EPSILON);
         assert_eq!(config.agent.max_retries, 3);
-        assert!(!config.checks.is_empty());
         // Explicit `enabled: true` in YAML overrides the default `false`
         assert!(config.review.enabled);
     }
@@ -1260,36 +1182,6 @@ review:
             let config: CodaConfig = serde_yaml_ng::from_str(&yaml).unwrap();
             assert_eq!(config.review.engine, expected);
         }
-    }
-
-    #[test]
-    fn test_should_deserialize_legacy_max_retries_as_max_verify_retries() {
-        let yaml = r#"
-version: 1
-verify:
-  fail_on_max_attempts: true
-  max_retries: 5
-"#;
-        let config: CodaConfig = serde_yaml_ng::from_str(yaml).unwrap();
-        assert_eq!(config.verify.max_verify_retries, 5);
-        assert!(config.verify.fail_on_max_attempts);
-    }
-
-    #[test]
-    fn test_should_deserialize_new_max_verify_retries() {
-        let yaml = r#"
-version: 1
-verify:
-  max_verify_retries: 7
-"#;
-        let config: CodaConfig = serde_yaml_ng::from_str(yaml).unwrap();
-        assert_eq!(config.verify.max_verify_retries, 7);
-    }
-
-    #[test]
-    fn test_should_default_max_verify_retries_to_three() {
-        let config = CodaConfig::default();
-        assert_eq!(config.verify.max_verify_retries, 3);
     }
 
     // ── ReasoningEffort ─────────────────────────────────────────────
@@ -1758,8 +1650,8 @@ agents:
     fn test_should_return_config_keys_for_default_config() {
         let config = CodaConfig::default();
         let keys = config.config_keys();
-        // 5 ops * 3 keys + 8 agent + 4 git + 3 review + 3 verify = 33
-        assert_eq!(keys.len(), 33);
+        // 5 ops * 3 keys + 7 agent + 4 git + 3 review + 1 verify = 30
+        assert_eq!(keys.len(), 30);
     }
 
     #[test]
@@ -1901,37 +1793,27 @@ agents:
     }
 
     #[test]
-    fn test_should_default_dev_phase_checks_to_true() {
-        let config = CodaConfig::default();
-        assert!(config.agent.dev_phase_checks);
-    }
-
-    #[test]
-    fn test_should_round_trip_new_agent_fields_yaml() {
+    fn test_should_round_trip_isolate_dev_phases_yaml() {
         let mut config = CodaConfig::default();
         config.agent.isolate_dev_phases = true;
-        config.agent.dev_phase_checks = false;
         let yaml = serde_yaml_ng::to_string(&config).unwrap();
         let loaded: CodaConfig = serde_yaml_ng::from_str(&yaml).unwrap();
         assert!(loaded.agent.isolate_dev_phases);
-        assert!(!loaded.agent.dev_phase_checks);
     }
 
     #[test]
-    fn test_should_deserialize_new_agent_fields_from_yaml() {
+    fn test_should_deserialize_isolate_dev_phases_from_yaml() {
         let yaml = r#"
 version: 1
 agent:
   isolate_dev_phases: true
-  dev_phase_checks: false
 "#;
         let config: CodaConfig = serde_yaml_ng::from_str(yaml).unwrap();
         assert!(config.agent.isolate_dev_phases);
-        assert!(!config.agent.dev_phase_checks);
     }
 
     #[test]
-    fn test_should_include_new_agent_keys_in_config_schema() {
+    fn test_should_include_isolate_dev_phases_in_config_schema() {
         let config = CodaConfig::default();
         let keys = config.config_keys();
         let isolate_dev = keys
@@ -1940,12 +1822,5 @@ agent:
             .expect("agent.isolate_dev_phases key should exist");
         assert_eq!(isolate_dev.value_type, ConfigValueType::Bool);
         assert_eq!(isolate_dev.current_value, "false");
-
-        let dev_checks = keys
-            .iter()
-            .find(|k| k.key == "agent.dev_phase_checks")
-            .expect("agent.dev_phase_checks key should exist");
-        assert_eq!(dev_checks.value_type, ConfigValueType::Bool);
-        assert_eq!(dev_checks.current_value, "true");
     }
 }

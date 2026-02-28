@@ -211,7 +211,7 @@ async fn ask_claude_to_fix(
          ## Issues\n\n{issues_list}\n\n\
          ## Instructions\n\n\
          1. Fix each issue listed above\n\
-         2. Run the configured checks to ensure nothing is broken\n\
+         2. Ensure nothing is broken\n\
          3. Commit the fixes with a descriptive message\n\n\
          Refer to the design specification provided earlier for the intended behavior.",
     );

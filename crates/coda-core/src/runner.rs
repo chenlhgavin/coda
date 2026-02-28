@@ -114,39 +114,6 @@ pub enum RunEvent {
         /// Number of issues this reviewer found.
         issues_found: u32,
     },
-    /// A verification attempt has completed.
-    VerifyAttempt {
-        /// Current attempt number (1-based).
-        attempt: u32,
-        /// Maximum allowed attempts.
-        max_attempts: u32,
-        /// Whether all checks passed in this attempt.
-        passed: bool,
-    },
-    /// A deterministic check command is about to start.
-    ///
-    /// Emitted by the Tier 1 check runner before executing each
-    /// configured check command (build, test, lint, format).
-    CheckStarting {
-        /// The shell command being executed.
-        command: String,
-        /// Zero-based index of this check.
-        index: u32,
-        /// Total number of checks to run.
-        total: u32,
-    },
-    /// A deterministic check command has completed.
-    ///
-    /// Emitted by the Tier 1 check runner after each check finishes,
-    /// with the real exit code result.
-    CheckCompleted {
-        /// The shell command that was executed.
-        command: String,
-        /// Whether the check passed (exit code 0).
-        passed: bool,
-        /// Wall-clock duration of the check execution.
-        duration: Duration,
-    },
     /// An agent turn completed within the current phase.
     TurnCompleted {
         /// Number of turns completed so far in this phase.
@@ -1068,8 +1035,7 @@ fn restore_summaries_from_state(state: &FeatureState) -> (ReviewSummary, Verific
             }
             "verify" => {
                 verify = VerificationSummary {
-                    checks_passed: phase.details["checks_passed"].as_u64().unwrap_or(0) as u32,
-                    checks_total: phase.details["checks_total"].as_u64().unwrap_or(0) as u32,
+                    verified: phase.details["ai_verified"].as_bool().unwrap_or(false),
                 };
             }
             _ => {}

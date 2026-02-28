@@ -4,18 +4,14 @@
 //! the `run/dev_phase` prompt template and sends it to the agent, then
 //! validates that meaningful work was produced.
 
-use tracing::{error, info, warn};
+use tracing::error;
 
 use crate::CoreError;
 use crate::planner::extract_structured_phases;
-use crate::runner::RunEvent;
 use crate::state::PhaseKind;
 use crate::task::{Task, TaskResult, TaskStatus};
 
 use super::{PhaseContext, PhaseExecutor, PhaseMetricsAccumulator};
-
-/// Maximum number of fix attempts after dev-phase check failures.
-const MAX_FIX_ATTEMPTS: u32 = 2;
 
 /// Per-phase goal and expected file changes extracted from the design spec.
 #[derive(Debug, Default)]
@@ -140,7 +136,6 @@ impl PhaseExecutor for DevPhaseExecutor {
         } else {
             String::new()
         };
-        let checks = &ctx.config.checks;
         let feature_slug = ctx.state().feature.slug.clone();
         let phase_name = ctx.state().phases[phase_idx].name.clone();
 
@@ -178,8 +173,6 @@ impl PhaseExecutor for DevPhaseExecutor {
                 phase_number => dev_phase_number,
                 total_dev_phases => total_dev_phases,
                 is_first => is_first,
-                checks => checks,
-                dev_phase_checks => ctx.config.agent.dev_phase_checks,
                 feature_slug => feature_slug,
                 resume_context => resume_context,
                 phase_goal => section.goal,
@@ -211,65 +204,6 @@ impl PhaseExecutor for DevPhaseExecutor {
                  (zero cost, no tool usage). The agent session may be \
                  non-functional. Response: {preview}",
             )));
-        }
-
-        // Run deterministic checks after dev phase if configured
-        if ctx.config.agent.dev_phase_checks && !ctx.config.checks.is_empty() {
-            for attempt in 0..=MAX_FIX_ATTEMPTS {
-                let total_checks = ctx.config.checks.len() as u32;
-                for (i, cmd) in ctx.config.checks.iter().enumerate() {
-                    ctx.emit_event(RunEvent::CheckStarting {
-                        command: cmd.clone(),
-                        index: i as u32,
-                        total: total_checks,
-                    });
-                }
-
-                let check_result = crate::check_runner::run_checks(
-                    &ctx.worktree_path,
-                    &ctx.config.checks,
-                    ctx.config.verify.check_timeout_secs,
-                )
-                .await?;
-
-                for check in &check_result.checks {
-                    ctx.emit_event(RunEvent::CheckCompleted {
-                        command: check.command.clone(),
-                        passed: check.passed,
-                        duration: check.duration,
-                    });
-                }
-
-                if check_result.all_passed() {
-                    info!(
-                        phase = %phase_name,
-                        attempt = attempt,
-                        "Dev phase checks passed"
-                    );
-                    break;
-                }
-
-                if attempt == MAX_FIX_ATTEMPTS {
-                    warn!(
-                        phase = %phase_name,
-                        "Dev phase checks still failing after {MAX_FIX_ATTEMPTS} fix attempts"
-                    );
-                    break;
-                }
-
-                let failures = check_result.failed_details().join("\n\n");
-                let fix_prompt = format!(
-                    "The automated checks failed after phase completion:\n\n\
-                     {failures}\n\n\
-                     Fix the issues and ensure all checks pass.",
-                );
-                let fix_resp = ctx.send_and_collect(&fix_prompt, None).await?;
-                let fix_incremental = ctx.metrics.record(&fix_resp.result);
-                if let Some(logger) = &mut ctx.run_logger {
-                    logger.log_interaction(&fix_prompt, &fix_resp, &fix_incremental);
-                }
-                acc.record(&fix_resp, fix_incremental);
-            }
         }
 
         let outcome = acc.into_outcome(serde_json::json!({}));

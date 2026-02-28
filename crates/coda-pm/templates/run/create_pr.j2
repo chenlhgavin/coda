@@ -29,9 +29,9 @@ You are creating a pull request for a completed feature using the GitHub CLI (`g
 - Issues resolved: {{ review_summary.issues_fix_attempted }}
 
 ### Verification Summary
-- Checks passed: {{ verification_summary.checks_passed }}/{{ verification_summary.checks_total }}
-{% if not all_checks_passed %}
-- **WARNING: Not all checks passed. PR will be created as draft.**
+- Verified: {{ verified }}
+{% if not verified %}
+- **WARNING: Verification did not pass. PR will be created as draft.**
 {% endif %}
 
 ## Task
@@ -104,18 +104,10 @@ See [\`.coda/{{ state.feature.slug }}/specs/design.md\`](.coda/{{ state.feature.
 
 ## Verification
 
-{% if all_checks_passed %}
-- [x] All automated checks pass
-{% for check in checks %}
-  - [x] \`{{ check }}\`
-{% endfor %}
-- [x] Functional verification completed ({{ verification_summary.checks_passed }}/{{ verification_summary.checks_total }} checks passed)
+{% if verified %}
+- [x] AI verification passed
 {% else %}
-- [ ] All automated checks pass ({{ verification_summary.checks_passed }}/{{ verification_summary.checks_total }} passed)
-{% for check in checks %}
-  - [ ] \`{{ check }}\`
-{% endfor %}
-- [ ] Functional verification incomplete — manual review required
+- [ ] AI verification incomplete — manual review required
 {% endif %}
 - [x] Code review completed ({{ review_summary.rounds }} round(s), {{ review_summary.issues_found }} issue(s) found, {{ review_summary.issues_fix_attempted }} fix(es) attempted)
 
@@ -142,7 +134,7 @@ See [\`.coda/{{ state.feature.slug }}/specs/design.md\`](.coda/{{ state.feature.
 | Duration | {{ state.total.duration_secs }}s |
 | Review rounds | {{ review_summary.rounds }} |
 | Issues found/fix attempted | {{ review_summary.issues_found }}/{{ review_summary.issues_fix_attempted }} |
-| Checks passed | {{ verification_summary.checks_passed }}/{{ verification_summary.checks_total }} |
+| Verified | {{ verified }} |
 
 ---
 

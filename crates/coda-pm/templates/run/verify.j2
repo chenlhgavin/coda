@@ -1,18 +1,12 @@
 You are performing an independent verification review of a newly implemented feature.
 
-## Important Context
-
-All automated checks (build, test, lint, format) have already been executed by the system and passed. You do NOT need to re-run or re-verify them. The results are:
-
-{{ check_results }}
-
 ## Verification Plan
 
 {{ verification_spec }}
 
 ## Your Task
 
-Evaluate the implementation for **functional correctness, design conformance, and integration soundness**. Focus only on aspects that require human judgment — automated checks are already verified.
+Evaluate the implementation for **functional correctness, design conformance, and integration soundness**.
 
 ### What to Verify
 
@@ -20,13 +14,6 @@ Evaluate the implementation for **functional correctness, design conformance, an
 2. **Design Conformance**: Does the implementation match the design specification? Check type safety, error handling, API contracts.
 3. **Integration Points**: Are module boundaries and interfaces correct? Check data flow between components.
 4. **Edge Cases**: Are edge cases from the verification plan properly handled?
-
-### What NOT to Verify
-
-- Build compilation (already verified by system)
-- Test suite passing (already verified by system)
-- Lint/format compliance (already verified by system)
-- Vague qualities like "good performance" or "secure code" unless specific criteria exist
 
 ## Output Format
 

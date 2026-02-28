@@ -42,7 +42,6 @@ use super::PhaseContext;
 /// ```
 pub async fn create_pr(ctx: &mut PhaseContext) -> Result<TaskResult, CoreError> {
     let design_spec = ctx.load_spec("design.md")?;
-    let checks = &ctx.config.checks;
     let start = Instant::now();
 
     let squashed = !ctx.pre_squash_commits.is_empty();
@@ -52,10 +51,8 @@ pub async fn create_pr(ctx: &mut PhaseContext) -> Result<TaskResult, CoreError> 
         ctx.get_commits().await?
     };
 
-    let all_checks_passed = ctx.verification_summary.checks_passed
-        == ctx.verification_summary.checks_total
-        && ctx.verification_summary.checks_total > 0;
-    let is_draft = !all_checks_passed;
+    let verified = ctx.verification_summary.verified;
+    let is_draft = !verified;
     let model = &ctx.config.agent.model;
     let coda_version = env!("CARGO_PKG_VERSION");
 
@@ -68,10 +65,9 @@ pub async fn create_pr(ctx: &mut PhaseContext) -> Result<TaskResult, CoreError> 
             squashed => squashed,
             original_commits => if squashed { &ctx.pre_squash_commits } else { &commits },
             state => &state_snapshot,
-            checks => checks,
             review_summary => &ctx.review_summary,
             verification_summary => &ctx.verification_summary,
-            all_checks_passed => all_checks_passed,
+            verified => verified,
             is_draft => is_draft,
             model => model,
             coda_version => coda_version,

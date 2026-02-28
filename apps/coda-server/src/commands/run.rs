@@ -5,7 +5,7 @@
 //! updates to respect rate limits (~1 `chat.update` per second).
 //!
 //! Phase transitions (`PhaseStarting`, `PhaseCompleted`, `PhaseFailed`)
-//! and sub-events (`ReviewRound`, `VerifyAttempt`, `CreatingPr`,
+//! and sub-events (`ReviewRound`, `CreatingPr`,
 //! `PrCreated`) trigger an immediate `chat.update`. High-frequency events
 //! (`AgentTextDelta`, `TurnCompleted`, `ToolActivity`) are batched with
 //! updates at most every 3 seconds.
@@ -669,10 +669,7 @@ async fn consume_run_events(
                         streamer.on_phase_failed(error).await;
                         true
                     }
-                    RunEvent::ReviewRound { .. }
-                    | RunEvent::VerifyAttempt { .. }
-                    | RunEvent::CheckStarting { .. }
-                    | RunEvent::CheckCompleted { .. } => true,
+                    RunEvent::ReviewRound { .. } => true,
                     RunEvent::CreatingPr => {
                         tracker.phases.push(RunPhaseDisplay {
                             name: "create-pr".to_string(),

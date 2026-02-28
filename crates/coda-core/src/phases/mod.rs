@@ -496,14 +496,12 @@ pub struct ReviewSummary {
 /// use coda_core::phases::VerificationSummary;
 ///
 /// let summary = VerificationSummary::default();
-/// assert_eq!(summary.checks_passed, 0);
+/// assert!(!summary.verified);
 /// ```
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct VerificationSummary {
-    /// Number of checks that passed.
-    pub checks_passed: u32,
-    /// Total number of checks.
-    pub checks_total: u32,
+    /// Whether AI verification passed.
+    pub verified: bool,
 }
 
 /// Incremental metrics from a single agent interaction.

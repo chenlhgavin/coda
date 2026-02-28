@@ -366,7 +366,6 @@ impl PlanSession {
                 "plan/verification",
                 minijinja::context!(
                     design_spec => &design,
-                    checks => &self.config.checks,
                     feature_slug => &self.feature_slug,
                 ),
             )?;

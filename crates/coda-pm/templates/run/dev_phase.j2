@@ -53,21 +53,6 @@ Implement all code changes described in this phase.
    - Cover happy path, error cases, and edge cases
 3. **Verify** — Run tests and ensure all pass
 
-{% if not dev_phase_checks %}
-## After Implementation
-
-Run the following checks and fix any issues:
-{% for check in checks %}
-- `{{ check }}`
-{% endfor %}
-
-If any check fails:
-1. Read the error output carefully
-2. Fix the issue
-3. Re-run the checks
-4. Repeat until all checks pass
-{% endif %}
-
 ## Commit
 
 Once all checks pass, commit with an appropriate conventional commit message:

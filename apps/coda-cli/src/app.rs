@@ -921,21 +921,6 @@ impl App {
                             );
                         }
                     }
-                    RunEvent::VerifyAttempt {
-                        attempt,
-                        max_attempts,
-                        passed,
-                    } => {
-                        if passed {
-                            println!(
-                                "      Verify attempt {attempt}/{max_attempts}: all checks passed"
-                            );
-                        } else {
-                            println!(
-                                "      Verify attempt {attempt}/{max_attempts}: failures found, fixing..."
-                            );
-                        }
-                    }
                     RunEvent::CreatingPr => {
                         println!("  [▸] create-pr              Running...");
                     }
