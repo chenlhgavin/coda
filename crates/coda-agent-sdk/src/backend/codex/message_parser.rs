@@ -8,10 +8,10 @@
 //! | Codex Event / Notification | SDK Message |
 //! |---|---|
 //! | `thread/started` | `SystemMessage { subtype: "init" }` |
-//! | `item/completed` (agent_message) | `AssistantMessage { content: [TextBlock] }` |
+//! | `item/completed` (agent_message / agentMessage) | `AssistantMessage { content: [TextBlock] }` |
 //! | `item/completed` (reasoning) | `AssistantMessage { content: [ThinkingBlock] }` |
-//! | `item/completed` (command_execution) | `AssistantMessage { content: [ToolUseBlock, ToolResultBlock] }` |
-//! | `item/completed` (file_change) | `AssistantMessage { content: [ToolUseBlock, ToolResultBlock] }` |
+//! | `item/completed` (command_execution / commandExecution) | `AssistantMessage { content: [ToolUseBlock, ToolResultBlock] }` |
+//! | `item/completed` (file_change / fileChange) | `AssistantMessage { content: [ToolUseBlock, ToolResultBlock] }` |
 //! | `turn/completed` | `ResultMessage { usage, duration_ms, ... }` |
 //! | `item/agentMessage/delta` | `StreamEvent { content_block_delta }` (streaming) |
 
@@ -224,7 +224,7 @@ fn parse_item_completed(params: &Value) -> Result<Option<Message>> {
     let item_type = item.get("type").and_then(|v| v.as_str()).unwrap_or("");
 
     match item_type {
-        "agent_message" | "message" => {
+        "agent_message" | "agentMessage" | "message" => {
             let content_arr = item.get("content").and_then(|v| v.as_array());
             let text = if let Some(arr) = content_arr {
                 arr.iter()
@@ -266,7 +266,12 @@ fn parse_item_completed(params: &Value) -> Result<Option<Message>> {
                 .and_then(|v| v.as_array())
                 .map(|arr| {
                     arr.iter()
-                        .filter_map(|c| c.get("text").and_then(|v| v.as_str()))
+                        .filter_map(|c| {
+                            // New format: plain string elements
+                            c.as_str()
+                                // Old format: objects with "text" field
+                                .or_else(|| c.get("text").and_then(|v| v.as_str()))
+                        })
                         .collect::<Vec<_>>()
                         .join("")
                 })
@@ -287,7 +292,7 @@ fn parse_item_completed(params: &Value) -> Result<Option<Message>> {
                 error: None,
             })))
         }
-        "command_execution" => {
+        "command_execution" | "commandExecution" => {
             let id = item
                 .get("id")
                 .and_then(|v| v.as_str())
@@ -320,7 +325,7 @@ fn parse_item_completed(params: &Value) -> Result<Option<Message>> {
                 error: None,
             })))
         }
-        "file_change" => {
+        "file_change" | "fileChange" => {
             let id = item
                 .get("id")
                 .and_then(|v| v.as_str())
@@ -761,5 +766,131 @@ mod tests {
         let params = json!({});
         let msg = parse_app_server_notification("item/agentMessage/delta", &params).unwrap();
         assert!(msg.is_none());
+    }
+
+    // ── camelCase item type alias tests (Codex v0.106.0+) ──────
+
+    #[test]
+    fn test_should_parse_camel_case_agent_message() {
+        let params = json!({
+            "item": {
+                "type": "agentMessage",
+                "id": "msg_abc",
+                "text": "hello from v0.106",
+                "phase": "final_answer"
+            }
+        });
+        let msg = parse_app_server_notification("item/completed", &params).unwrap();
+        let msg = msg.expect("should parse agentMessage");
+        match msg {
+            Message::Assistant(a) => match &a.content[0] {
+                ContentBlock::Text(t) => assert_eq!(t.text, "hello from v0.106"),
+                _ => panic!("expected TextBlock"),
+            },
+            _ => panic!("expected AssistantMessage"),
+        }
+    }
+
+    #[test]
+    fn test_should_parse_camel_case_command_execution() {
+        let params = json!({
+            "item": {
+                "type": "commandExecution",
+                "id": "cmd-2",
+                "command": "echo hi",
+                "output": "hi\n",
+                "exitCode": 0
+            }
+        });
+        let msg = parse_app_server_notification("item/completed", &params).unwrap();
+        let msg = msg.expect("should parse commandExecution");
+        match msg {
+            Message::Assistant(a) => {
+                assert_eq!(a.content.len(), 2);
+                match &a.content[0] {
+                    ContentBlock::ToolUse(t) => {
+                        assert_eq!(t.name, "Bash");
+                        assert_eq!(t.input["command"], "echo hi");
+                    }
+                    _ => panic!("expected ToolUseBlock"),
+                }
+            }
+            _ => panic!("expected AssistantMessage"),
+        }
+    }
+
+    #[test]
+    fn test_should_parse_camel_case_file_change() {
+        let params = json!({
+            "item": {
+                "type": "fileChange",
+                "id": "fc-1",
+                "filePath": "/tmp/test.rs"
+            }
+        });
+        let msg = parse_app_server_notification("item/completed", &params).unwrap();
+        let msg = msg.expect("should parse fileChange");
+        match msg {
+            Message::Assistant(a) => {
+                assert_eq!(a.content.len(), 2);
+                match &a.content[0] {
+                    ContentBlock::ToolUse(t) => {
+                        assert_eq!(t.name, "Edit");
+                        assert_eq!(t.input["file_path"], "/tmp/test.rs");
+                    }
+                    _ => panic!("expected ToolUseBlock"),
+                }
+            }
+            _ => panic!("expected AssistantMessage"),
+        }
+    }
+
+    // ── reasoning summary format tests ─────────────────────────
+
+    #[test]
+    fn test_should_parse_reasoning_with_plain_string_summary() {
+        let params = json!({
+            "item": {
+                "type": "reasoning",
+                "id": "rs_1",
+                "summary": ["Thinking about the problem", "Considering alternatives"],
+                "content": []
+            }
+        });
+        let msg = parse_app_server_notification("item/completed", &params).unwrap();
+        let msg = msg.expect("should parse reasoning with plain strings");
+        match msg {
+            Message::Assistant(a) => match &a.content[0] {
+                ContentBlock::Thinking(t) => {
+                    assert_eq!(
+                        t.thinking,
+                        "Thinking about the problemConsidering alternatives"
+                    );
+                }
+                _ => panic!("expected ThinkingBlock"),
+            },
+            _ => panic!("expected AssistantMessage"),
+        }
+    }
+
+    #[test]
+    fn test_should_parse_reasoning_with_object_summary() {
+        let params = json!({
+            "item": {
+                "type": "reasoning",
+                "id": "rs_2",
+                "summary": [{"text": "old format thinking"}],
+                "content": []
+            }
+        });
+        let msg = parse_app_server_notification("item/completed", &params).unwrap();
+        let msg = msg.expect("should parse reasoning with object summary");
+        match msg {
+            Message::Assistant(a) => match &a.content[0] {
+                ContentBlock::Thinking(t) => assert_eq!(t.thinking, "old format thinking"),
+                _ => panic!("expected ThinkingBlock"),
+            },
+            _ => panic!("expected AssistantMessage"),
+        }
     }
 }
