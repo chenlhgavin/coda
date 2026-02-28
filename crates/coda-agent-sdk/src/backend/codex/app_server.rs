@@ -84,11 +84,40 @@ impl CodexSession {
 
         let mut cmd_args = vec!["app-server".to_string()];
 
-        if let Some(ref codex_opts) = options.codex
-            && let Some(ref policy) = codex_opts.approval_policy
-        {
+        if let Some(ref m) = options.model {
             cmd_args.push("-c".to_string());
-            cmd_args.push(format!("approval_policy=\"{}\"", policy));
+            cmd_args.push(format!("model=\"{}\"", m));
+        }
+
+        if let Some(ref codex_opts) = options.codex {
+            if let Some(ref policy) = codex_opts.approval_policy {
+                cmd_args.push("-c".to_string());
+                cmd_args.push(format!("approval_policy=\"{}\"", policy));
+            }
+
+            if let Some(ref sandbox) = codex_opts.sandbox_mode {
+                let permissions = match sandbox.as_str() {
+                    "read-only" => vec![],
+                    "workspace-write" => vec!["disk-full-read-access", "disk-write-cwd"],
+                    "danger-full-access" => {
+                        vec![
+                            "disk-full-read-access",
+                            "disk-full-write-access",
+                            "network-full-access",
+                        ]
+                    }
+                    _ => vec![],
+                };
+                if !permissions.is_empty() {
+                    let perm_str = permissions
+                        .iter()
+                        .map(|p| format!("\"{}\"", p))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    cmd_args.push("-c".to_string());
+                    cmd_args.push(format!("sandbox_permissions=[{}]", perm_str));
+                }
+            }
         }
 
         // Translate system_prompt → developer_instructions
@@ -101,6 +130,17 @@ impl CodexSession {
                 "developer_instructions={}",
                 toml_escape(instructions)
             ));
+        }
+
+        // Forward extra_args as -c config overrides
+        for (key, value) in &options.extra_args {
+            if let Some(v) = value {
+                // extra_args with key "config" and value "key=value" → -c key=value
+                if key == "config" {
+                    cmd_args.push("-c".to_string());
+                    cmd_args.push(v.clone());
+                }
+            }
         }
 
         let mut child_cmd = tokio::process::Command::new(&cli_path);
@@ -172,6 +212,19 @@ impl CodexSession {
                 };
 
                 if jsonrpc::is_response(&data) {
+                    // Surface error responses so streams don't silently hang
+                    if let Some((code, message)) = jsonrpc::extract_error(&data) {
+                        tracing::warn!(
+                            code,
+                            message = message.as_str(),
+                            "Codex JSON-RPC error response",
+                        );
+                        let _ = msg_tx.send(AppServerMessage::Error(format!(
+                            "Codex error (code {}): {}",
+                            code, message
+                        )));
+                    }
+                    // Always forward the response for session setup handlers
                     let _ = msg_tx.send(AppServerMessage::Response(data));
                     continue;
                 }
@@ -403,8 +456,8 @@ impl CodexSession {
             serde_json::json!({
                 "threadId": thread_id,
                 "input": [{
-                    "role": "user",
-                    "content": prompt,
+                    "type": "text",
+                    "text": prompt,
                 }],
             }),
         );

@@ -172,9 +172,12 @@ fn parse_exec_function_output(data: &Value) -> Result<Option<Message>> {
 pub fn parse_app_server_notification(method: &str, params: &Value) -> Result<Option<Message>> {
     match method {
         "thread/started" => {
+            // New format: params.thread.id; old format: params.threadId
             let thread_id = params
-                .get("threadId")
+                .get("thread")
+                .and_then(|t| t.get("id"))
                 .and_then(|v| v.as_str())
+                .or_else(|| params.get("threadId").and_then(|v| v.as_str()))
                 .unwrap_or("")
                 .to_string();
             let mut data = serde_json::Map::new();
