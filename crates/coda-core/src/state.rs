@@ -75,12 +75,12 @@ pub struct FeatureState {
     pub total: TotalStats,
 }
 
-/// Minimum number of phases: at least 1 dev phase + review + verify + update-docs.
-const MIN_PHASE_COUNT: usize = 4;
+/// Minimum number of phases: at least 1 dev phase + review + verify.
+const MIN_PHASE_COUNT: usize = 3;
 
-/// Required terminal quality phases in order. The last 3 phases must always be
-/// `review -> verify -> update-docs`, all with [`PhaseKind::Quality`].
-const TERMINAL_QUALITY_PHASES: &[&str] = &["review", "verify", "update-docs"];
+/// Required terminal quality phases in order. The last 2 phases must always be
+/// `review -> verify`, all with [`PhaseKind::Quality`].
+const TERMINAL_QUALITY_PHASES: &[&str] = &["review", "verify"];
 
 impl FeatureState {
     /// Returns the total cost already spent across all completed phases.
@@ -124,11 +124,10 @@ impl FeatureState {
 
     /// Migrates legacy state files to the current schema.
     ///
-    /// Detects states created before the `update-docs` phase was introduced
-    /// and appends missing terminal quality phases. After appending, sorts
-    /// all quality phases into the canonical order defined by
-    /// [`TERMINAL_QUALITY_PHASES`] so that misordered legacy states are
-    /// corrected (e.g., `[verify, review]` → `[review, verify, update-docs]`).
+    /// Appends missing terminal quality phases and sorts all quality phases
+    /// into the canonical order defined by [`TERMINAL_QUALITY_PHASES`] so
+    /// that misordered legacy states are corrected
+    /// (e.g., `[verify, review]` → `[review, verify]`).
     pub fn migrate(&mut self) {
         // Collect names of all quality phases anywhere in the list.
         let existing_quality_names: Vec<String> = self
@@ -191,7 +190,7 @@ impl FeatureState {
     /// Validates structural invariants after deserialization.
     ///
     /// Checks that `phases` has at least [`MIN_PHASE_COUNT`] entries
-    /// (1+ dev phases + review + verify + update-docs), `current_phase`
+    /// (1+ dev phases + review + verify), `current_phase`
     /// is within bounds, `worktree_path` does not contain parent-directory
     /// references, and no `Dev` phase appears after the first `Quality`
     /// phase.
@@ -203,7 +202,7 @@ impl FeatureState {
         if self.phases.len() < MIN_PHASE_COUNT {
             return Err(format!(
                 "expected at least {MIN_PHASE_COUNT} phases \
-                 (dev + review + verify + update-docs), found {}",
+                 (dev + review + verify), found {}",
                 self.phases.len(),
             ));
         }
@@ -226,7 +225,7 @@ impl FeatureState {
             }
         }
 
-        // Enforce that the last 3 phases are the fixed quality sequence.
+        // Enforce that the last 2 phases are the fixed quality sequence.
         let n = self.phases.len();
         for (offset, expected_name) in TERMINAL_QUALITY_PHASES.iter().enumerate() {
             let idx = n - TERMINAL_QUALITY_PHASES.len() + offset;
@@ -298,7 +297,7 @@ pub struct GitInfo {
 pub enum PhaseKind {
     /// Development phase derived from the design spec's "Development Phases".
     Dev,
-    /// Fixed quality-assurance phase (review or verify).
+    /// Fixed quality-assurance phase (review, verify).
     Quality,
 }
 
@@ -966,7 +965,6 @@ mod tests {
             make_phase("dev-phase-1", PhaseKind::Dev),
             make_phase("review", PhaseKind::Quality),
             make_phase("verify", PhaseKind::Quality),
-            make_phase("update-docs", PhaseKind::Quality),
         ]);
         assert!(state.validate().is_ok());
     }
@@ -975,7 +973,7 @@ mod tests {
     fn test_should_reject_too_few_phases() {
         let state = make_test_state(vec![]);
         let err = state.validate().unwrap_err();
-        assert!(err.contains("at least 4 phases"));
+        assert!(err.contains("at least 3 phases"));
     }
 
     #[test]
@@ -998,7 +996,6 @@ mod tests {
                 make_phase("dev-1", PhaseKind::Dev),
                 make_phase("review", PhaseKind::Quality),
                 make_phase("verify", PhaseKind::Quality),
-                make_phase("update-docs", PhaseKind::Quality),
             ],
             pr: None,
             total: TotalStats::default(),
@@ -1009,12 +1006,11 @@ mod tests {
 
     #[test]
     fn test_should_reject_missing_terminal_quality_phases() {
-        // 4 phases but missing update-docs (legacy state with extra dev phase)
+        // 3 phases but missing verify (extra dev phase instead)
         let state = make_test_state(vec![
             make_phase("dev-1", PhaseKind::Dev),
             make_phase("dev-2", PhaseKind::Dev),
             make_phase("review", PhaseKind::Quality),
-            make_phase("verify", PhaseKind::Quality),
         ]);
         let err = state.validate().unwrap_err();
         assert!(err.contains("expected terminal quality phase"));
@@ -1028,7 +1024,6 @@ mod tests {
             make_phase("dev-1", PhaseKind::Dev),
             make_phase("verify", PhaseKind::Quality),
             make_phase("review", PhaseKind::Quality),
-            make_phase("update-docs", PhaseKind::Quality),
         ]);
         let err = state.validate().unwrap_err();
         assert!(err.contains("expected terminal quality phase"));
@@ -1042,46 +1037,23 @@ mod tests {
             make_phase("review", PhaseKind::Quality),
             make_phase("dev-2", PhaseKind::Dev),
             make_phase("verify", PhaseKind::Quality),
-            make_phase("update-docs", PhaseKind::Quality),
         ]);
         let err = state.validate().unwrap_err();
         assert!(err.contains("dev phase 'dev-2' at index 2 appears after first quality phase"));
     }
 
     #[test]
-    fn test_should_migrate_legacy_state_missing_update_docs() {
-        // Legacy state: review + verify but no update-docs
-        let mut state = make_test_state(vec![
-            make_phase("dev-1", PhaseKind::Dev),
-            make_phase("review", PhaseKind::Quality),
-            make_phase("verify", PhaseKind::Quality),
-        ]);
-        // Before migration: fails validation (too few phases)
-        assert!(state.validate().is_err());
-
-        state.migrate();
-
-        // After migration: update-docs appended, passes validation
-        assert_eq!(state.phases.len(), 4);
-        assert_eq!(state.phases[3].name, "update-docs");
-        assert_eq!(state.phases[3].kind, PhaseKind::Quality);
-        assert_eq!(state.phases[3].status, PhaseStatus::Pending);
-        assert!(state.validate().is_ok());
-    }
-
-    #[test]
     fn test_should_not_duplicate_phases_on_migrate() {
-        // Already has all quality phases
+        // Already has correct quality phases
         let mut state = make_test_state(vec![
             make_phase("dev-1", PhaseKind::Dev),
             make_phase("review", PhaseKind::Quality),
             make_phase("verify", PhaseKind::Quality),
-            make_phase("update-docs", PhaseKind::Quality),
         ]);
         state.migrate();
 
         // Should not add duplicates
-        assert_eq!(state.phases.len(), 4);
+        assert_eq!(state.phases.len(), 3);
         assert!(state.validate().is_ok());
     }
 
@@ -1098,14 +1070,13 @@ mod tests {
         state.migrate();
 
         // After migration: dev phases first, then quality in canonical order
-        assert_eq!(state.phases.len(), 5);
+        assert_eq!(state.phases.len(), 4);
         assert_eq!(state.phases[0].name, "dev1");
         assert_eq!(state.phases[0].kind, PhaseKind::Dev);
         assert_eq!(state.phases[1].name, "dev2");
         assert_eq!(state.phases[1].kind, PhaseKind::Dev);
         assert_eq!(state.phases[2].name, "review");
         assert_eq!(state.phases[3].name, "verify");
-        assert_eq!(state.phases[4].name, "update-docs");
         assert!(state.validate().is_ok());
     }
 
@@ -1147,7 +1118,6 @@ mod tests {
             make_completed_phase("dev-3", PhaseKind::Dev, 0.75),
             make_phase("review", PhaseKind::Quality),
             make_phase("verify", PhaseKind::Quality),
-            make_phase("update-docs", PhaseKind::Quality),
         ]);
 
         assert!((state.spent_budget() - 2.50).abs() < f64::EPSILON);
@@ -1163,7 +1133,6 @@ mod tests {
             make_completed_phase("dev-1", PhaseKind::Dev, 1.00),
             running_phase,
             make_phase("verify", PhaseKind::Quality),
-            make_phase("update-docs", PhaseKind::Quality),
         ]);
 
         // Only the completed phase counts
@@ -1176,7 +1145,6 @@ mod tests {
             make_phase("dev-1", PhaseKind::Dev),
             make_phase("review", PhaseKind::Quality),
             make_phase("verify", PhaseKind::Quality),
-            make_phase("update-docs", PhaseKind::Quality),
         ]);
         assert!((state.spent_budget() - 0.0).abs() < f64::EPSILON);
     }
@@ -1189,7 +1157,6 @@ mod tests {
             make_phase("dev-1", PhaseKind::Dev),
             make_phase("review", PhaseKind::Quality),
             make_phase("verify", PhaseKind::Quality),
-            make_phase("update-docs", PhaseKind::Quality),
         ]);
         assert_eq!(mgr.current_phase_index(), 0);
     }
@@ -1201,7 +1168,6 @@ mod tests {
             make_completed_phase("dev-2", PhaseKind::Dev, 0.5),
             make_phase("review", PhaseKind::Quality),
             make_phase("verify", PhaseKind::Quality),
-            make_phase("update-docs", PhaseKind::Quality),
         ]);
         assert_eq!(mgr.current_phase_index(), 2);
     }
@@ -1212,9 +1178,8 @@ mod tests {
             make_completed_phase("dev-1", PhaseKind::Dev, 1.0),
             make_completed_phase("review", PhaseKind::Quality, 0.5),
             make_completed_phase("verify", PhaseKind::Quality, 0.3),
-            make_completed_phase("update-docs", PhaseKind::Quality, 0.2),
         ]);
-        assert_eq!(mgr.current_phase_index(), 4);
+        assert_eq!(mgr.current_phase_index(), 3);
     }
 
     #[test]
@@ -1223,7 +1188,6 @@ mod tests {
             make_completed_phase("dev-1", PhaseKind::Dev, 1.0),
             make_running_phase("review", PhaseKind::Quality),
             make_phase("verify", PhaseKind::Quality),
-            make_phase("update-docs", PhaseKind::Quality),
         ]);
         // Running is not Completed, so current is at that index
         assert_eq!(mgr.current_phase_index(), 1);
@@ -1235,7 +1199,6 @@ mod tests {
             make_phase("dev-1", PhaseKind::Dev),
             make_phase("review", PhaseKind::Quality),
             make_phase("verify", PhaseKind::Quality),
-            make_phase("update-docs", PhaseKind::Quality),
         ]);
         let result = mgr.mark_phase_running(0);
         assert!(result.is_ok());
@@ -1249,7 +1212,6 @@ mod tests {
             make_running_phase("dev-1", PhaseKind::Dev),
             make_phase("review", PhaseKind::Quality),
             make_phase("verify", PhaseKind::Quality),
-            make_phase("update-docs", PhaseKind::Quality),
         ]);
         let result = mgr.mark_phase_running(0);
         assert!(result.is_ok());
@@ -1262,7 +1224,6 @@ mod tests {
             make_phase("dev-1", PhaseKind::Dev),
             make_phase("review", PhaseKind::Quality),
             make_phase("verify", PhaseKind::Quality),
-            make_phase("update-docs", PhaseKind::Quality),
         ]);
         // Simulate a previous failure
         mgr.fail_phase(0).expect("fail_phase");
@@ -1279,7 +1240,6 @@ mod tests {
             make_completed_phase("dev-1", PhaseKind::Dev, 1.0),
             make_phase("review", PhaseKind::Quality),
             make_phase("verify", PhaseKind::Quality),
-            make_phase("update-docs", PhaseKind::Quality),
         ]);
         let result = mgr.mark_phase_running(0);
         assert!(result.is_err());
@@ -1294,7 +1254,6 @@ mod tests {
             make_running_phase("dev-1", PhaseKind::Dev),
             make_phase("review", PhaseKind::Quality),
             make_phase("verify", PhaseKind::Quality),
-            make_phase("update-docs", PhaseKind::Quality),
         ]);
         let outcome = PhaseOutcome {
             turns: 5,
@@ -1321,7 +1280,6 @@ mod tests {
             make_phase("dev-1", PhaseKind::Dev),
             make_phase("review", PhaseKind::Quality),
             make_phase("verify", PhaseKind::Quality),
-            make_phase("update-docs", PhaseKind::Quality),
         ]);
         let outcome = PhaseOutcome {
             turns: 1,
@@ -1344,7 +1302,6 @@ mod tests {
             make_running_phase("dev-1", PhaseKind::Dev),
             make_phase("review", PhaseKind::Quality),
             make_phase("verify", PhaseKind::Quality),
-            make_phase("update-docs", PhaseKind::Quality),
         ]);
         mgr.fail_phase(0).expect("fail_phase");
         assert_eq!(mgr.state().phases[0].status, PhaseStatus::Failed);
@@ -1356,7 +1313,6 @@ mod tests {
             make_completed_phase("dev-1", PhaseKind::Dev, 0.0),
             make_phase("review", PhaseKind::Quality),
             make_phase("verify", PhaseKind::Quality),
-            make_phase("update-docs", PhaseKind::Quality),
         ]);
         // Circuit breaker: retroactively fail a completed phase
         mgr.fail_phase(0).expect("fail_phase");
@@ -1441,7 +1397,6 @@ mod tests {
             make_completed_phase("dev-2", PhaseKind::Dev, 0.50),
             make_phase("review", PhaseKind::Quality),
             make_phase("verify", PhaseKind::Quality),
-            make_phase("update-docs", PhaseKind::Quality),
         ]);
         mgr.update_totals();
         assert_eq!(mgr.state().total.turns, 2);
@@ -1468,7 +1423,6 @@ mod tests {
             make_completed_phase("dev-2", PhaseKind::Dev, 0.75),
             make_phase("review", PhaseKind::Quality),
             make_phase("verify", PhaseKind::Quality),
-            make_phase("update-docs", PhaseKind::Quality),
         ]);
         assert!((mgr.spent_budget() - 2.00).abs() < f64::EPSILON);
     }
@@ -1484,7 +1438,6 @@ mod tests {
                 make_completed_phase("dev-1", PhaseKind::Dev, 1.0),
                 make_phase("review", PhaseKind::Quality),
                 make_phase("verify", PhaseKind::Quality),
-                make_phase("update-docs", PhaseKind::Quality),
             ]),
             path.clone(),
         );

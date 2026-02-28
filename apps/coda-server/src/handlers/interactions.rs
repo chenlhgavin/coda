@@ -15,7 +15,8 @@ use crate::commands;
 use crate::formatter::{
     self, CLEAN_CONFIRM_ACTION, CONFIG_KEY_SELECT_ACTION, CONFIG_VALUE_SELECT_ACTION, CleanTarget,
     INIT_BACKEND_SELECT_ACTION, INIT_EFFORT_SELECT_ACTION, INIT_MODEL_SELECT_ACTION,
-    INIT_MODIFY_ACTION, INIT_OP_SELECT_ACTION, INIT_START_ACTION, REPO_SELECT_ACTION,
+    INIT_MODIFY_ACTION, INIT_OP_SELECT_ACTION, INIT_PHASE_TOGGLE_ACTION, INIT_START_ACTION,
+    REPO_SELECT_ACTION,
 };
 use crate::state::AppState;
 
@@ -200,6 +201,18 @@ pub async fn handle_interaction(state: Arc<AppState>, payload: serde_json::Value
                 .await;
             } else {
                 debug!("Init effort select action received without selected_option");
+            }
+        } else if action.action_id == INIT_PHASE_TOGGLE_ACTION {
+            if let Some(ref selected) = action.selected_option {
+                handle_init_phase_toggle(
+                    &state,
+                    &interaction.channel.id,
+                    &interaction.message.ts,
+                    &selected.value,
+                )
+                .await;
+            } else {
+                debug!("Init phase toggle action received without selected_option");
             }
         } else {
             debug!(action_id = %action.action_id, "Unknown interaction action, ignoring");
@@ -504,13 +517,20 @@ async fn handle_init_op_select(
                 Ok(engine) => {
                     let summaries = engine.config().operation_summaries();
                     if let Some(op_summary) = summaries.iter().find(|s| s.name == op) {
-                        info!(channel_id, op, "Showing init backend select");
-                        formatter::init_config_backend_select(
-                            op,
-                            &op_summary.backend_options,
-                            &op_summary.backend,
-                            force,
-                        )
+                        if let Some(enabled) = op_summary.enabled {
+                            // Quality phase — show enable/disable toggle first
+                            info!(channel_id, op, enabled, "Showing init phase toggle");
+                            formatter::init_config_phase_toggle(op, enabled, force)
+                        } else {
+                            // Core operation — go directly to backend select
+                            info!(channel_id, op, "Showing init backend select");
+                            formatter::init_config_backend_select(
+                                op,
+                                &op_summary.backend_options,
+                                &op_summary.backend,
+                                force,
+                            )
+                        }
                     } else {
                         formatter::error(&format!("Unknown operation: `{op}`"))
                     }
@@ -604,9 +624,8 @@ async fn handle_init_model_select(
                     let summaries = engine.config().operation_summaries();
                     let op_summary = summaries.iter().find(|s| s.name == op);
 
-                    let effort_options = op_summary
-                        .map(|s| s.effort_options.as_slice())
-                        .unwrap_or(&[]);
+                    // Use backend-specific effort options instead of stored ones
+                    let effort_options = coda_core::config::effort_options_for_backend(backend);
                     let current_effort = op_summary.map_or("", |s| s.effort.as_str());
 
                     info!(channel_id, op, backend, model, "Showing init effort select");
@@ -614,7 +633,7 @@ async fn handle_init_model_select(
                         op,
                         backend,
                         model,
-                        effort_options,
+                        &effort_options,
                         current_effort,
                         force,
                     )
@@ -713,6 +732,96 @@ async fn apply_init_config(
         .map_err(|e| format!("Failed to reload config: {e}"))?;
 
     Ok(engine.config_show())
+}
+
+/// Handles the phase toggle selection in the init config flow.
+///
+/// Parses `"{op}|{enabled}|{force}"` from the dropdown value. Applies
+/// the `{op}.enabled` config change, then:
+/// - If enabling → shows the backend select to continue configuration.
+/// - If disabling → returns to the config preview.
+async fn handle_init_phase_toggle(
+    state: &AppState,
+    channel_id: &str,
+    message_ts: &str,
+    selected_value: &str,
+) {
+    let blocks = match parse_pipe_segments(selected_value, 3) {
+        Some(segments) => {
+            let op = segments[0];
+            let enabled = segments[1] == "true";
+            let force = parse_force(segments[2]);
+
+            match apply_phase_toggle(state, channel_id, op, enabled).await {
+                Ok((summary, summaries)) => {
+                    if enabled {
+                        // Enabling — let user configure backend/model/effort
+                        if let Some(op_summary) = summaries.iter().find(|s| s.name == op) {
+                            info!(channel_id, op, "Phase enabled, showing backend select");
+                            formatter::init_config_backend_select(
+                                op,
+                                &op_summary.backend_options,
+                                &op_summary.backend,
+                                force,
+                            )
+                        } else {
+                            // Shouldn't happen, but fall back to preview
+                            formatter::init_config_preview(&summary, force)
+                        }
+                    } else {
+                        // Disabling — return to preview
+                        info!(channel_id, op, "Phase disabled, showing preview");
+                        formatter::init_config_preview(&summary, force)
+                    }
+                }
+                Err(msg) => formatter::error(&msg),
+            }
+        }
+        None => formatter::error(&format!("Invalid phase toggle value: `{selected_value}`")),
+    };
+
+    if let Err(e) = state
+        .slack()
+        .update_message(channel_id, message_ts, blocks)
+        .await
+    {
+        warn!(error = %e, channel_id, "Failed to update init phase toggle message");
+    }
+}
+
+/// Applies a phase enabled/disabled toggle, reloads config, and returns
+/// both the resolved config summary and the updated operation summaries.
+async fn apply_phase_toggle(
+    state: &AppState,
+    channel_id: &str,
+    op: &str,
+    enabled: bool,
+) -> Result<
+    (
+        coda_core::ResolvedConfigSummary,
+        Vec<coda_core::OperationSummary>,
+    ),
+    String,
+> {
+    let repo_path = state.bindings().get(channel_id).ok_or(
+        "Channel binding was removed. Use `/coda repos` to clone and bind a repository first.",
+    )?;
+
+    let mut engine = coda_core::Engine::new(repo_path)
+        .await
+        .map_err(|e| format!("Failed to initialize engine: {e}"))?;
+
+    let key = format!("{op}.enabled");
+    let value = if enabled { "true" } else { "false" };
+    engine
+        .config_set(&key, value)
+        .map_err(|e| format!("Failed to set `{key}`: {e}"))?;
+
+    engine
+        .reload_config()
+        .map_err(|e| format!("Failed to reload config: {e}"))?;
+
+    Ok((engine.config_show(), engine.config().operation_summaries()))
 }
 
 #[cfg(test)]

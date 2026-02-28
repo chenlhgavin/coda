@@ -1017,7 +1017,6 @@ impl Engine {
             verify: self.config.resolve_verify(),
             review_enabled: self.config.review.enabled,
             verify_enabled: self.config.verify.enabled,
-            docs_enabled: self.config.docs.enabled,
         }
     }
 
@@ -1111,8 +1110,6 @@ pub struct ResolvedConfigSummary {
     pub review_enabled: bool,
     /// Whether the verify phase is enabled.
     pub verify_enabled: bool,
-    /// Whether the update-docs phase is enabled.
-    pub docs_enabled: bool,
 }
 
 /// Resolves a dot-path (e.g., `"agents.run.model"`) against a YAML value tree.
@@ -1637,18 +1634,6 @@ mod tests {
                 },
                 PhaseRecord {
                     name: "verify".to_string(),
-                    kind: PhaseKind::Quality,
-                    status: PhaseStatus::Pending,
-                    started_at: None,
-                    completed_at: None,
-                    turns: 0,
-                    cost_usd: 0.0,
-                    cost: TokenCost::default(),
-                    duration_secs: 0,
-                    details: serde_json::json!({}),
-                },
-                PhaseRecord {
-                    name: "update-docs".to_string(),
                     kind: PhaseKind::Quality,
                     status: PhaseStatus::Pending,
                     started_at: None,

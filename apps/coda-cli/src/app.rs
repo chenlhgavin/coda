@@ -381,15 +381,19 @@ impl App {
                     let summaries = self.engine.config().operation_summaries();
                     let pairs = crate::interactive_config::prompt_operation_config(&summaries)?;
 
-                    // pairs is exactly 3: backend, model, effort
-                    let op_name = pairs[0]
-                        .0
-                        .strip_prefix("agents.")
-                        .and_then(|s| s.split('.').next())
+                    // Extract operation name from the first key
+                    let op_name = pairs
+                        .iter()
+                        .find_map(|(k, _)| {
+                            k.strip_prefix("agents.").and_then(|s| s.split('.').next())
+                        })
+                        .or_else(|| pairs.first().and_then(|(k, _)| k.split('.').next()))
                         .unwrap_or("?");
+
                     let mut backend_val = String::new();
                     let mut model_val = String::new();
                     let mut effort_val = String::new();
+                    let mut enabled_val: Option<String> = None;
 
                     for (key, value) in &pairs {
                         match self.engine.config_set(key, value) {
@@ -400,6 +404,8 @@ impl App {
                                     model_val.clone_from(value);
                                 } else if key.ends_with(".effort") {
                                     effort_val.clone_from(value);
+                                } else if key.ends_with(".enabled") {
+                                    enabled_val = Some(value.clone());
                                 }
                             }
                             Err(e) => {
@@ -409,10 +415,21 @@ impl App {
                         }
                     }
 
-                    println!(
-                        "\n  Updated {op_name}: backend={backend_val}, \
-                         model={model_val}, effort={effort_val}",
-                    );
+                    if let Some(enabled) = &enabled_val {
+                        if !backend_val.is_empty() {
+                            println!(
+                                "\n  Updated {op_name}: enabled={enabled}, backend={backend_val}, \
+                                 model={model_val}, effort={effort_val}",
+                            );
+                        } else {
+                            println!("\n  Updated {op_name}: enabled={enabled}");
+                        }
+                    } else {
+                        println!(
+                            "\n  Updated {op_name}: backend={backend_val}, \
+                             model={model_val}, effort={effort_val}",
+                        );
+                    }
                     Ok(())
                 }
             },
@@ -1093,13 +1110,6 @@ fn print_config_table(summary: &coda_core::ResolvedConfigSummary) {
             resolved.model,
             resolved.effort,
         );
-    }
-
-    // Docs has no dedicated agent config, just show enabled status
-    if summary.docs_enabled {
-        println!("  {:<16}", "docs");
-    } else {
-        println!("  {:<16}", "docs (off)");
     }
 
     println!();

@@ -6,14 +6,14 @@ An AI-driven CLI that orchestrates the full feature development lifecycle: analy
 
 CODA orchestrates feature development using Claude AI. You describe a feature, CODA plans it interactively via a TUI, then executes the full development cycle — coding, reviewing, verifying, and opening a pull request — autonomously.
 
-Each feature gets an isolated git worktree and branch. Execution proceeds through dynamic development phases (derived from the design spec), followed by fixed review, verify, and update-docs phases. State is persisted to `state.yml` so interrupted runs can resume from the last completed phase.
+Each feature gets an isolated git worktree and branch. Execution proceeds through dynamic development phases (derived from the design spec), followed by fixed review and verify phases. State is persisted to `state.yml` so interrupted runs can resume from the last completed phase.
 
 CODA turns a feature description into a reviewed, tested pull request with minimal human intervention. It supports parallel features via worktrees, cost tracking per phase, graceful cancellation with Ctrl+C, and configurable quality checks.
 
 ## Features
 
 - **Interactive planning** — Multi-turn TUI conversation with Claude to produce a design spec and verification plan
-- **Phased execution** — Dynamic development phases followed by review, verify, update-docs, and PR creation
+- **Phased execution** — Dynamic development phases followed by review, verify, and PR creation
 - **Crash recovery** — State persisted after each phase; interrupted runs resume from the last completed phase
 - **Budget tracking** — Per-phase cost tracking with budget limits, accurate across resumed sessions
 - **Graceful cancellation** — Ctrl+C saves progress and exits cleanly; resume with `coda run`
@@ -105,23 +105,21 @@ coda run add-user-auth
   CODA Run: add-user-auth
   ═══════════════════════════════════════
 
-  Phases: auth-types → auth-middleware → review → verify → update-docs → PR
+  Phases: auth-types → auth-middleware → review → verify → PR
 
-  [▸] auth-types              Running...  (1/5)
+  [▸] auth-types              Running...  (1/4)
   [✓] auth-types              5m 12s    3 turns  $0.1200
-  [▸] auth-middleware          Running...  (2/5)
+  [▸] auth-middleware          Running...  (2/4)
   [✓] auth-middleware          12m 03s   12 turns  $1.8500
-  [▸] review                  Running...  (3/5)
+  [▸] review                  Running...  (3/4)
   [✓] review                  3m 45s    5 turns  $0.5200
-  [▸] verify                  Running...  (4/5)
+  [▸] verify                  Running...  (4/4)
   [✓] verify                  2m 30s    4 turns  $0.3800
-  [▸] update-docs             Running...  (5/5)
-  [✓] update-docs             1m 15s    2 turns  $0.1500
   [▸] create-pr              Running...
   [✓] create-pr              PR: https://github.com/org/repo/pull/42
 
   ─────────────────────────────────────
-  Total: 24m 45s elapsed, 26 turns, $3.0200 USD
+  Total: 23m 30s elapsed, 24 turns, $2.8700 USD
   ═══════════════════════════════════════
 ```
 
@@ -173,7 +171,6 @@ coda status add-user-auth
   auth-middl…  ● completed        12   $1.8500   12m 03s
   review       ● completed         5   $0.5200    3m 45s
   verify       ● completed         4   $0.3800    2m 30s
-  update-docs  ● completed         2   $0.1500    1m 15s
 
   Pull Request
   ─────────────────────────────────────
@@ -182,8 +179,8 @@ coda status add-user-auth
 
   Summary
   ─────────────────────────────────────
-  Total turns:    26
-  Total cost:     $3.0200 USD
+  Total turns:    24
+  Total cost:     $2.8700 USD
   Total duration: 24m 45s
   Tokens:         160000 in / 48000 out
   ═══════════════════════════════════════

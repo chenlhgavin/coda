@@ -103,8 +103,13 @@ fn prompt_input(descriptor: &ConfigKeyDescriptor) -> Result<String> {
 
 /// Prompts the user to select an operation, then configures backend/model/effort together.
 ///
+/// For core operations (init/plan/run), returns backend/model/effort pairs.
+/// For quality phases (review/verify), first shows an enable/disable toggle,
+/// then optionally continues to backend/model/effort configuration.
+///
 /// Returns a vec of `(key, value)` pairs to set, e.g.:
 /// `[("agents.run.backend", "claude"), ("agents.run.model", "claude-opus-4-6"), ...]`
+/// or `[("review.enabled", "true"), ("agents.review.backend", "codex"), ...]`
 ///
 /// # Errors
 ///
@@ -116,9 +121,13 @@ pub fn prompt_operation_config(ops: &[OperationSummary]) -> Result<Vec<(String, 
     let items: Vec<String> = ops
         .iter()
         .map(|op| {
+            let status = match op.enabled {
+                Some(false) => " (off)".to_string(),
+                _ => String::new(),
+            };
             format!(
-                "{:<8} [{} / {} / {}]",
-                op.name, op.backend, op.model, op.effort,
+                "{}{:<8} [{} / {} / {}]",
+                op.name, status, op.backend, op.model, op.effort,
             )
         })
         .collect();
@@ -132,14 +141,78 @@ pub fn prompt_operation_config(ops: &[OperationSummary]) -> Result<Vec<(String, 
 
     let op = &ops[op_idx];
 
-    // Step 2: Select backend
+    // Step 2: Quality phase toggle — if this is a toggleable phase
+    if let Some(currently_enabled) = op.enabled {
+        return prompt_quality_phase_config(&theme, op, currently_enabled);
+    }
+
+    // Step 3: Core operation — configure backend/model/effort
+    prompt_agent_config(&theme, op)
+}
+
+/// Prompts enable/disable toggle for a quality phase, then optionally
+/// continues to backend/model/effort configuration.
+fn prompt_quality_phase_config(
+    theme: &ColorfulTheme,
+    op: &OperationSummary,
+    currently_enabled: bool,
+) -> Result<Vec<(String, String)>> {
+    let enabled_key = format!("{}.enabled", op.name);
+
+    if currently_enabled {
+        // Phase is ON — offer to configure or disable
+        let items = ["Configure backend/model/effort", "Disable"];
+        let choice = Select::with_theme(theme)
+            .with_prompt(format!("{} is enabled", op.label))
+            .items(&items)
+            .default(0)
+            .interact()
+            .context("Toggle selection cancelled")?;
+
+        if choice == 1 {
+            // Disable
+            return Ok(vec![(enabled_key, "false".to_string())]);
+        }
+
+        // Configure — continue to backend/model/effort
+        let mut pairs = vec![(enabled_key, "true".to_string())];
+        pairs.extend(prompt_agent_config(theme, op)?);
+        Ok(pairs)
+    } else {
+        // Phase is OFF — offer to enable or keep disabled
+        let items = ["Enable", "Keep disabled"];
+        let choice = Select::with_theme(theme)
+            .with_prompt(format!("{} is disabled", op.label))
+            .items(&items)
+            .default(0)
+            .interact()
+            .context("Toggle selection cancelled")?;
+
+        if choice == 1 {
+            // Keep disabled
+            return Ok(vec![(enabled_key, "false".to_string())]);
+        }
+
+        // Enable — continue to backend/model/effort
+        let mut pairs = vec![(enabled_key, "true".to_string())];
+        pairs.extend(prompt_agent_config(theme, op)?);
+        Ok(pairs)
+    }
+}
+
+/// Prompts for backend, model, and effort selection for an operation.
+fn prompt_agent_config(
+    theme: &ColorfulTheme,
+    op: &OperationSummary,
+) -> Result<Vec<(String, String)>> {
+    // Select backend
     let backend_default = op
         .backend_options
         .iter()
         .position(|b| *b == op.backend)
         .unwrap_or(0);
 
-    let backend_idx = Select::with_theme(&theme)
+    let backend_idx = Select::with_theme(theme)
         .with_prompt("Backend")
         .items(&op.backend_options)
         .default(backend_default)
@@ -148,7 +221,7 @@ pub fn prompt_operation_config(ops: &[OperationSummary]) -> Result<Vec<(String, 
 
     let selected_backend = &op.backend_options[backend_idx];
 
-    // Step 3: Select model — rebuild suggestions based on selected backend
+    // Select model — rebuild suggestions based on selected backend
     let model_suggestions = coda_core::config::model_suggestions_for_backend(selected_backend);
     let mut model_items: Vec<String> = model_suggestions.clone();
     model_items.push("Custom...".to_string());
@@ -158,7 +231,7 @@ pub fn prompt_operation_config(ops: &[OperationSummary]) -> Result<Vec<(String, 
         .position(|m| *m == op.model)
         .unwrap_or(0);
 
-    let model_idx = Select::with_theme(&theme)
+    let model_idx = Select::with_theme(theme)
         .with_prompt("Model")
         .items(&model_items)
         .default(model_default)
@@ -167,7 +240,7 @@ pub fn prompt_operation_config(ops: &[OperationSummary]) -> Result<Vec<(String, 
 
     let selected_model = if model_idx == model_suggestions.len() {
         // "Custom..." selected
-        let input: String = Input::with_theme(&theme)
+        let input: String = Input::with_theme(theme)
             .with_prompt("Enter custom model name")
             .interact_text()
             .context("Model input cancelled")?;
@@ -176,21 +249,21 @@ pub fn prompt_operation_config(ops: &[OperationSummary]) -> Result<Vec<(String, 
         model_items[model_idx].clone()
     };
 
-    // Step 4: Select effort
-    let effort_default = op
-        .effort_options
+    // Select effort — rebuild options based on selected backend
+    let effort_options = coda_core::config::effort_options_for_backend(selected_backend);
+    let effort_default = effort_options
         .iter()
         .position(|e| *e == op.effort)
         .unwrap_or(2); // default to "high" index
 
-    let effort_idx = Select::with_theme(&theme)
+    let effort_idx = Select::with_theme(theme)
         .with_prompt("Effort")
-        .items(&op.effort_options)
+        .items(&effort_options)
         .default(effort_default)
         .interact()
         .context("Effort selection cancelled")?;
 
-    let selected_effort = &op.effort_options[effort_idx];
+    let selected_effort = &effort_options[effort_idx];
 
     Ok(vec![
         (

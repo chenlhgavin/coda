@@ -43,6 +43,9 @@ pub const INIT_MODEL_SELECT_ACTION: &str = "coda_init_model_select";
 /// Action ID for the init effort select dropdown.
 pub const INIT_EFFORT_SELECT_ACTION: &str = "coda_init_effort_select";
 
+/// Action ID for the init quality phase enable/disable toggle dropdown.
+pub const INIT_PHASE_TOGGLE_ACTION: &str = "coda_init_phase_toggle";
+
 /// Serializable representation of a clean candidate for button payloads.
 ///
 /// Encoded as JSON in the clean confirm button's `value` field and
@@ -1266,27 +1269,39 @@ pub fn init_config_preview(
 ) -> Vec<serde_json::Value> {
     let force_str = if force { "true" } else { "false" };
 
+    let off_label = |name: &str, enabled: bool| -> String {
+        if enabled {
+            name.to_string()
+        } else {
+            format!("{name} (off)")
+        }
+    };
+
     let rows: Vec<String> = [
-        ("init", &summary.init),
-        ("plan", &summary.plan),
-        ("run", &summary.run),
-        ("review", &summary.review),
-        ("verify", &summary.verify),
+        ("init", &summary.init, None),
+        ("plan", &summary.plan, None),
+        ("run", &summary.run, None),
+        ("review", &summary.review, Some(summary.review_enabled)),
+        ("verify", &summary.verify, Some(summary.verify_enabled)),
     ]
     .iter()
-    .map(|(name, resolved)| {
+    .map(|(name, resolved, enabled)| {
+        let label = match enabled {
+            Some(e) => off_label(name, *e),
+            None => (*name).to_string(),
+        };
         format!(
-            "  {:<10} {:<10} {:<26} {}",
-            name, resolved.backend, resolved.model, resolved.effort,
+            "  {:<14} {:<10} {:<26} {}",
+            label, resolved.backend, resolved.model, resolved.effort,
         )
     })
     .collect();
 
     let table_header = format!(
-        "  {:<10} {:<10} {:<26} {}",
+        "  {:<14} {:<10} {:<26} {}",
         "Operation", "Backend", "Model", "Effort"
     );
-    let separator = format!("  {}", "─".repeat(56));
+    let separator = format!("  {}", "─".repeat(60));
     let table = format!("```\n{table_header}\n{separator}\n{}\n```", rows.join("\n"));
 
     vec![
@@ -1326,7 +1341,14 @@ pub fn init_config_op_select(
     let options: Vec<serde_json::Value> = summaries
         .iter()
         .map(|op| {
-            let desc = format!("{} / {} / {}", op.backend, op.model, op.effort);
+            let status_prefix = match op.enabled {
+                Some(false) => "(off) ",
+                _ => "",
+            };
+            let desc = format!(
+                "{status_prefix}{} / {} / {}",
+                op.backend, op.model, op.effort
+            );
             serde_json::json!({
                 "text": { "type": "plain_text", "text": &op.label },
                 "description": { "type": "plain_text", "text": truncate_str(&desc, SELECT_OPTION_TEXT_MAX) },
@@ -1502,6 +1524,55 @@ pub fn init_config_effort_select(
         }),
         context(&format!(
             "_Current: `{current}` · Backend: `{backend}` · Model: `{model}`_"
+        )),
+    ]
+}
+
+/// Builds an enable/disable toggle dropdown for a quality phase.
+///
+/// The selected value encodes `"{op}|{enabled}|{force}"` where `enabled`
+/// is `"true"` or `"false"`. When enabling a phase that has agent config
+/// (review/verify), the handler continues to the backend select step.
+pub fn init_config_phase_toggle(
+    op: &str,
+    currently_enabled: bool,
+    force: bool,
+) -> Vec<serde_json::Value> {
+    let force_str = if force { "true" } else { "false" };
+    let status = if currently_enabled {
+        "enabled"
+    } else {
+        "disabled"
+    };
+
+    let options: Vec<serde_json::Value> = vec![
+        serde_json::json!({
+            "text": { "type": "plain_text", "text": "Enable" },
+            "value": format!("{op}|true|{force_str}"),
+        }),
+        serde_json::json!({
+            "text": { "type": "plain_text", "text": "Disable" },
+            "value": format!("{op}|false|{force_str}"),
+        }),
+    ];
+
+    let initial_idx = if currently_enabled { 0 } else { 1 };
+    let initial_option = options[initial_idx].clone();
+
+    vec![
+        header(&format!("Init — {op} (currently {status})")),
+        serde_json::json!({
+            "type": "actions",
+            "elements": [{
+                "type": "static_select",
+                "placeholder": { "type": "plain_text", "text": "Enable or disable..." },
+                "action_id": INIT_PHASE_TOGGLE_ACTION,
+                "options": options,
+                "initial_option": initial_option,
+            }],
+        }),
+        context(&format!(
+            "_Toggle the `{op}` quality phase on or off. Enabling will also let you configure its backend/model/effort._"
         )),
     ]
 }
@@ -2499,17 +2570,23 @@ mod tests {
             },
             review_enabled: false,
             verify_enabled: false,
-            docs_enabled: false,
         }
     }
 
     fn make_operation_summaries() -> Vec<coda_core::OperationSummary> {
         let backend_opts = vec!["claude".to_string(), "codex".to_string()];
-        let effort_opts = vec![
+        let claude_effort_opts = vec![
             "low".to_string(),
             "medium".to_string(),
             "high".to_string(),
             "max".to_string(),
+        ];
+        let codex_effort_opts = vec![
+            "minimal".to_string(),
+            "low".to_string(),
+            "medium".to_string(),
+            "high".to_string(),
+            "xhigh".to_string(),
         ];
 
         vec![
@@ -2521,7 +2598,8 @@ mod tests {
                 effort: "high".to_string(),
                 backend_options: backend_opts.clone(),
                 model_suggestions: vec!["claude-opus-4-6".to_string()],
-                effort_options: effort_opts.clone(),
+                effort_options: claude_effort_opts,
+                enabled: None,
             },
             coda_core::OperationSummary {
                 name: "run".to_string(),
@@ -2529,9 +2607,21 @@ mod tests {
                 backend: "codex".to_string(),
                 model: "gpt-5.3-codex".to_string(),
                 effort: "high".to_string(),
+                backend_options: backend_opts.clone(),
+                model_suggestions: vec!["gpt-5.3-codex".to_string()],
+                effort_options: codex_effort_opts.clone(),
+                enabled: None,
+            },
+            coda_core::OperationSummary {
+                name: "review".to_string(),
+                label: "Review".to_string(),
+                backend: "codex".to_string(),
+                model: "gpt-5.3-codex".to_string(),
+                effort: "high".to_string(),
                 backend_options: backend_opts,
                 model_suggestions: vec!["gpt-5.3-codex".to_string()],
-                effort_options: effort_opts,
+                effort_options: codex_effort_opts,
+                enabled: Some(false),
             },
         ]
     }
@@ -2593,11 +2683,19 @@ mod tests {
         assert_eq!(select["action_id"], INIT_OP_SELECT_ACTION);
 
         let options = select["options"].as_array().unwrap();
-        assert_eq!(options.len(), 2);
+        assert_eq!(options.len(), 3);
 
         // Verify pipe-delimited encoding: "{op}|{force}"
         assert_eq!(options[0]["value"], "init|false");
         assert_eq!(options[1]["value"], "run|false");
+        assert_eq!(options[2]["value"], "review|false");
+
+        // Verify disabled phase shows "(off)" in description
+        let review_desc = options[2]["description"]["text"].as_str().unwrap();
+        assert!(
+            review_desc.starts_with("(off)"),
+            "Disabled phase should show (off) prefix"
+        );
     }
 
     #[test]
@@ -2682,5 +2780,54 @@ mod tests {
         let select = &blocks[1]["elements"][0];
         // initial_option should not be present when current isn't in the list
         assert!(select.get("initial_option").is_none());
+    }
+
+    #[test]
+    fn test_should_build_init_config_phase_toggle_disabled() {
+        let blocks = init_config_phase_toggle("review", false, true);
+
+        // header + actions + context
+        assert_eq!(blocks.len(), 3);
+        assert_eq!(blocks[0]["type"], "header");
+        assert_eq!(blocks[1]["type"], "actions");
+
+        let select = &blocks[1]["elements"][0];
+        assert_eq!(select["action_id"], INIT_PHASE_TOGGLE_ACTION);
+
+        let options = select["options"].as_array().unwrap();
+        assert_eq!(options.len(), 2);
+
+        // Verify pipe-delimited encoding: "{op}|{enabled}|{force}"
+        assert_eq!(options[0]["value"], "review|true|true");
+        assert_eq!(options[1]["value"], "review|false|true");
+
+        // Initial option should be "Disable" since currently disabled
+        let initial = &select["initial_option"];
+        assert_eq!(initial["value"], "review|false|true");
+        assert_eq!(initial["text"]["text"], "Disable");
+
+        // Header should show "currently disabled"
+        let header_text = blocks[0]["text"]["text"].as_str().unwrap();
+        assert!(header_text.contains("disabled"));
+    }
+
+    #[test]
+    fn test_should_build_init_config_phase_toggle_enabled() {
+        let blocks = init_config_phase_toggle("verify", true, false);
+
+        let select = &blocks[1]["elements"][0];
+        let options = select["options"].as_array().unwrap();
+
+        assert_eq!(options[0]["value"], "verify|true|false");
+        assert_eq!(options[1]["value"], "verify|false|false");
+
+        // Initial option should be "Enable" since currently enabled
+        let initial = &select["initial_option"];
+        assert_eq!(initial["value"], "verify|true|false");
+        assert_eq!(initial["text"]["text"], "Enable");
+
+        // Header should show "currently enabled"
+        let header_text = blocks[0]["text"]["text"].as_str().unwrap();
+        assert!(header_text.contains("enabled"));
     }
 }

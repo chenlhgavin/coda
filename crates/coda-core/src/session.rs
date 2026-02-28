@@ -653,11 +653,20 @@ impl AgentSession {
         if let Some(ref result) = resp.result
             && result.is_error
         {
-            let detail = resp.text.chars().take(200).collect::<String>();
+            let text_preview: String = resp.text.chars().take(200).collect();
+
+            // Prefer the SDK's error description over LLM conversation text
+            let detail = result
+                .result
+                .as_deref()
+                .filter(|s| !s.is_empty())
+                .unwrap_or(&text_preview);
+
             error!(
                 is_error = result.is_error,
                 turns = result.num_turns,
-                text_preview = %detail,
+                text_preview = %text_preview,
+                sdk_error = ?result.result,
                 "Agent session returned error result",
             );
             return Err(CoreError::AgentError(format!(
@@ -1310,7 +1319,115 @@ mod tests {
             }),
         };
         let err = session.validate_response(&resp).unwrap_err();
-        assert!(matches!(err, CoreError::AgentError(_)));
+        match &err {
+            CoreError::AgentError(msg) => {
+                assert!(
+                    msg.contains("Error occurred"),
+                    "expected fallback to resp.text, got: {msg}",
+                );
+            }
+            other => panic!("expected AgentError, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_should_prefer_sdk_error_over_llm_text() {
+        let config = SessionConfig {
+            idle_timeout_secs: 300,
+            tool_execution_timeout_secs: 600,
+            idle_retries: 3,
+            max_budget_usd: 100.0,
+            max_alive_idle_secs: 1800,
+        };
+        let session = AgentSession::new(
+            AgentSdkClient::new(
+                Some(
+                    coda_agent_sdk::AgentOptions::builder()
+                        .system_prompt("test")
+                        .build(),
+                ),
+                None,
+            ),
+            config,
+        );
+        let resp = AgentResponse {
+            text: "I'll start by reading existing files and creating directories".to_string(),
+            tool_output: String::new(),
+            result: Some(ResultMessage {
+                subtype: "error".to_string(),
+                duration_ms: 100,
+                duration_api_ms: 80,
+                is_error: true,
+                num_turns: 1,
+                session_id: "test".to_string(),
+                total_cost_usd: None,
+                usage: None,
+                result: Some("Tool execution timed out".to_string()),
+                structured_output: None,
+            }),
+        };
+        let err = session.validate_response(&resp).unwrap_err();
+        match &err {
+            CoreError::AgentError(msg) => {
+                assert!(
+                    msg.contains("Tool execution timed out"),
+                    "expected SDK error in message, got: {msg}",
+                );
+                assert!(
+                    !msg.contains("reading existing files"),
+                    "should not contain LLM text, got: {msg}",
+                );
+            }
+            other => panic!("expected AgentError, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_should_fallback_to_text_when_sdk_error_is_empty() {
+        let config = SessionConfig {
+            idle_timeout_secs: 300,
+            tool_execution_timeout_secs: 600,
+            idle_retries: 3,
+            max_budget_usd: 100.0,
+            max_alive_idle_secs: 1800,
+        };
+        let session = AgentSession::new(
+            AgentSdkClient::new(
+                Some(
+                    coda_agent_sdk::AgentOptions::builder()
+                        .system_prompt("test")
+                        .build(),
+                ),
+                None,
+            ),
+            config,
+        );
+        let resp = AgentResponse {
+            text: "Some fallback text".to_string(),
+            tool_output: String::new(),
+            result: Some(ResultMessage {
+                subtype: "error".to_string(),
+                duration_ms: 100,
+                duration_api_ms: 80,
+                is_error: true,
+                num_turns: 1,
+                session_id: "test".to_string(),
+                total_cost_usd: None,
+                usage: None,
+                result: Some(String::new()),
+                structured_output: None,
+            }),
+        };
+        let err = session.validate_response(&resp).unwrap_err();
+        match &err {
+            CoreError::AgentError(msg) => {
+                assert!(
+                    msg.contains("Some fallback text"),
+                    "expected fallback to resp.text, got: {msg}",
+                );
+            }
+            other => panic!("expected AgentError, got: {other:?}"),
+        }
     }
 
     #[test]

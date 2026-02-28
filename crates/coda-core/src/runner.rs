@@ -7,7 +7,7 @@
 //!
 //! The agent interaction logic (streaming, timeout, reconnect) is delegated
 //! to [`AgentSession`](crate::session::AgentSession). Phase-specific behaviour
-//! (dev, review, verify, docs) lives in [`crate::phases`].
+//! (dev, review, verify) lives in [`crate::phases`].
 //!
 //! # State Management
 //!
@@ -42,7 +42,6 @@ use crate::config::CodaConfig;
 use crate::gh::GhOps;
 use crate::git::GitOps;
 use crate::phases::dev::DevPhaseExecutor;
-use crate::phases::docs::DocsPhaseExecutor;
 use crate::phases::pr::{create_pr, prepare_squash};
 use crate::phases::review::ReviewPhaseExecutor;
 use crate::phases::verify::VerifyPhaseExecutor;
@@ -424,7 +423,7 @@ impl Runner {
             .map_err(|e| CoreError::StateError(format!("Cannot read state.yml: {e}")))?;
         let mut state: FeatureState = serde_yaml_ng::from_str(&state_content)?;
 
-        // Migrate legacy states (e.g. missing update-docs phase) before validation.
+        // Migrate legacy states (e.g. deprecated phases) before validation.
         state.migrate();
 
         state.validate().map_err(|e| {
@@ -582,8 +581,8 @@ impl Runner {
     /// dispatching each phase to the appropriate [`PhaseExecutor`]:
     ///
     /// - **Dev** phases → [`DevPhaseExecutor`]
-    /// - **Quality** phases → [`ReviewPhaseExecutor`], [`VerifyPhaseExecutor`],
-    ///   or [`DocsPhaseExecutor`] by name
+    /// - **Quality** phases → [`ReviewPhaseExecutor`] or [`VerifyPhaseExecutor`]
+    ///   by name
     ///
     /// After all phases complete, creates a PR via [`create_pr`].
     ///
@@ -753,7 +752,6 @@ impl Runner {
                 PhaseKind::Quality => match phase_name.as_str() {
                     "review" => ReviewPhaseExecutor.execute(&mut self.ctx, phase_idx).await,
                     "verify" => VerifyPhaseExecutor.execute(&mut self.ctx, phase_idx).await,
-                    "update-docs" => DocsPhaseExecutor.execute(&mut self.ctx, phase_idx).await,
                     _ => Err(CoreError::AgentError(format!(
                         "Unknown quality phase: {phase_name}"
                     ))),

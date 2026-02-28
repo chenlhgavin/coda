@@ -64,9 +64,6 @@ pub struct CodaConfig {
     /// Verification phase configuration.
     pub verify: VerifyConfig,
 
-    /// Documentation update phase configuration.
-    pub docs: DocsConfig,
-
     /// Per-operation agent backend overrides.
     ///
     /// Each operation (`init`, `plan`, `run`, `review`, `verify`) can
@@ -117,8 +114,8 @@ pub struct AgentConfig {
     /// this cap is reached. Defaults to 1800 (30 min).
     pub max_alive_idle_secs: u64,
 
-    /// When `true` (default), quality phases (review, verify, update-docs)
-    /// use isolated session IDs instead of the main dev session. This
+    /// When `true` (default), quality phases (review, verify) use isolated
+    /// session IDs instead of the main dev session. This
     /// significantly reduces input token consumption because quality phases
     /// do not carry the accumulated dev conversation history. Their prompt
     /// templates are self-contained with all necessary context.
@@ -290,8 +287,12 @@ impl<'de> serde::Deserialize<'de> for AgentBackend {
 /// passed through to the CLI backend (e.g., as `--effort` for Claude,
 /// or `-c model_reasoning_effort=<value>` for Codex).
 ///
-/// Deserialization is case-insensitive and accepts legacy aliases:
-/// `minimal` maps to `Low`, `xhigh` maps to `High`.
+/// Deserialization is case-insensitive with `moderate` as a legacy alias
+/// for `Medium`.
+///
+/// Not all variants are valid for all backends:
+/// - **Claude**: `Low`, `Medium`, `High`, `Max`
+/// - **Codex**: `Minimal`, `Low`, `Medium`, `High`, `XHigh`
 ///
 /// # Examples
 ///
@@ -302,11 +303,13 @@ impl<'de> serde::Deserialize<'de> for AgentBackend {
 /// assert_eq!(effort, ReasoningEffort::High);
 /// assert_eq!(effort.to_string(), "high");
 ///
-/// // Legacy aliases are accepted
+/// // Codex-only variants
 /// let minimal: ReasoningEffort = "minimal".parse().unwrap();
-/// assert_eq!(minimal, ReasoningEffort::Low);
+/// assert_eq!(minimal, ReasoningEffort::Minimal);
+/// let xhigh: ReasoningEffort = "xhigh".parse().unwrap();
+/// assert_eq!(xhigh, ReasoningEffort::XHigh);
 ///
-/// // Max variant (maps to SDK Effort::Max)
+/// // Claude-only variant
 /// let max: ReasoningEffort = "max".parse().unwrap();
 /// assert_eq!(max, ReasoningEffort::Max);
 ///
@@ -317,13 +320,17 @@ impl<'de> serde::Deserialize<'de> for AgentBackend {
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReasoningEffort {
-    /// Minimal reasoning — fastest, cheapest, least thorough.
+    /// Least reasoning — Codex only, even less than `Low`.
+    Minimal,
+    /// Low reasoning — fastest, cheapest, least thorough.
     Low,
     /// Moderate reasoning — balanced between speed and thoroughness.
     Medium,
     /// Deep reasoning — most thorough, slowest, most expensive.
     High,
-    /// Maximum reasoning — deepest possible reasoning, highest cost.
+    /// Extra-high reasoning — Codex only, above `High`.
+    XHigh,
+    /// Maximum reasoning — Claude only, deepest possible reasoning.
     Max,
 }
 
@@ -336,8 +343,8 @@ impl serde::Serialize for ReasoningEffort {
 
 /// Custom deserialization: case-insensitive with legacy alias support.
 ///
-/// Accepts canonical values (`low`, `medium`, `high`) and legacy aliases
-/// (`minimal` → `Low`, `xhigh` → `High`) regardless of case.
+/// Accepts all canonical values (`minimal`, `low`, `medium`, `high`,
+/// `xhigh`, `max`) and the legacy alias `moderate` → `Medium`.
 impl<'de> serde::Deserialize<'de> for ReasoningEffort {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let s = String::deserialize(deserializer)?;
@@ -350,9 +357,11 @@ impl ReasoningEffort {
     /// Converts to the SDK's [`Effort`] enum.
     pub fn to_sdk_effort(self) -> Effort {
         match self {
+            Self::Minimal => Effort::Minimal,
             Self::Low => Effort::Low,
             Self::Medium => Effort::Medium,
             Self::High => Effort::High,
+            Self::XHigh => Effort::XHigh,
             Self::Max => Effort::Max,
         }
     }
@@ -361,9 +370,11 @@ impl ReasoningEffort {
 impl std::fmt::Display for ReasoningEffort {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::Minimal => write!(f, "minimal"),
             Self::Low => write!(f, "low"),
             Self::Medium => write!(f, "medium"),
             Self::High => write!(f, "high"),
+            Self::XHigh => write!(f, "xhigh"),
             Self::Max => write!(f, "max"),
         }
     }
@@ -374,9 +385,11 @@ impl FromStr for ReasoningEffort {
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s.to_lowercase().as_str() {
-            "low" | "minimal" => Ok(Self::Low),
+            "minimal" => Ok(Self::Minimal),
+            "low" => Ok(Self::Low),
             "medium" | "moderate" => Ok(Self::Medium),
-            "high" | "xhigh" => Ok(Self::High),
+            "high" => Ok(Self::High),
+            "xhigh" => Ok(Self::XHigh),
             "max" => Ok(Self::Max),
             other => Err(format!("unknown reasoning effort: {other}")),
         }
@@ -410,6 +423,32 @@ fn model_suggestions_for(backend: Option<AgentBackend>) -> Vec<String> {
 pub fn model_suggestions_for_backend(backend_name: &str) -> Vec<String> {
     let backend = backend_name.parse::<AgentBackend>().ok();
     model_suggestions_for(backend)
+}
+
+/// Valid effort levels for the Claude backend.
+const CLAUDE_EFFORTS: &[&str] = &["low", "medium", "high", "max"];
+
+/// Valid effort levels for the Codex backend.
+const CODEX_EFFORTS: &[&str] = &["minimal", "low", "medium", "high", "xhigh"];
+
+/// Returns valid effort options for the given backend.
+///
+/// Falls back to Claude effort options when the backend is `None`.
+fn effort_options_for(backend: Option<AgentBackend>) -> Vec<String> {
+    let efforts = match backend.unwrap_or_default() {
+        AgentBackend::Claude => CLAUDE_EFFORTS,
+        AgentBackend::Codex => CODEX_EFFORTS,
+    };
+    efforts.iter().map(|s| (*s).to_string()).collect()
+}
+
+/// Returns valid effort options for a backend specified by name string.
+///
+/// Falls back to Claude effort options when the backend name is unrecognized.
+/// This is the public API for use by CLI and server interactive prompts.
+pub fn effort_options_for_backend(backend_name: &str) -> Vec<String> {
+    let backend = backend_name.parse::<AgentBackend>().ok();
+    effort_options_for(backend)
 }
 
 /// The type of value a config key accepts.
@@ -543,25 +582,6 @@ pub struct ReviewConfig {
 
     /// Reasoning effort level for Codex CLI reviews.
     pub codex_reasoning_effort: ReasoningEffort,
-}
-
-/// Documentation update phase configuration.
-///
-/// # Examples
-///
-/// ```
-/// use coda_core::config::DocsConfig;
-///
-/// let config = DocsConfig::default();
-/// assert!(!config.enabled);
-/// ```
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(default)]
-pub struct DocsConfig {
-    /// Whether the update-docs phase is enabled.
-    ///
-    /// When `false` (default), the update-docs phase is skipped entirely.
-    pub enabled: bool,
 }
 
 impl Default for AgentConfig {
@@ -847,9 +867,11 @@ impl CodaConfig {
     pub fn config_keys(&self) -> Vec<ConfigKeyDescriptor> {
         let backend_options = vec!["claude".to_string(), "codex".to_string()];
         let effort_options = vec![
+            "minimal".to_string(),
             "low".to_string(),
             "medium".to_string(),
             "high".to_string(),
+            "xhigh".to_string(),
             "max".to_string(),
         ];
 
@@ -1010,14 +1032,6 @@ impl CodaConfig {
             current_value: self.verify.max_verify_retries.to_string(),
         });
 
-        // Docs keys
-        keys.push(ConfigKeyDescriptor {
-            key: "docs.enabled".to_string(),
-            label: "Docs enabled".to_string(),
-            value_type: ConfigValueType::Bool,
-            current_value: self.docs.enabled.to_string(),
-        });
-
         keys
     }
 
@@ -1027,42 +1041,42 @@ impl CodaConfig {
     /// configuration alongside each operation name.
     pub fn operation_summaries(&self) -> Vec<OperationSummary> {
         let backend_options: Vec<String> = vec!["claude".to_string(), "codex".to_string()];
-        let effort_options: Vec<String> = vec![
-            "low".to_string(),
-            "medium".to_string(),
-            "high".to_string(),
-            "max".to_string(),
-        ];
 
-        let build =
-            |name: &str, label: &str, resolved: ResolvedAgentConfig, op: &OperationAgentConfig| {
-                OperationSummary {
-                    name: name.to_string(),
-                    label: label.to_string(),
-                    backend: resolved.backend.to_string(),
-                    model: resolved.model,
-                    effort: resolved.effort.to_string(),
-                    backend_options: backend_options.clone(),
-                    model_suggestions: model_suggestions_for(op.backend),
-                    effort_options: effort_options.clone(),
-                }
-            };
+        let build = |name: &str,
+                     label: &str,
+                     resolved: ResolvedAgentConfig,
+                     op: &OperationAgentConfig,
+                     enabled: Option<bool>| {
+            OperationSummary {
+                name: name.to_string(),
+                label: label.to_string(),
+                backend: resolved.backend.to_string(),
+                model: resolved.model,
+                effort: resolved.effort.to_string(),
+                backend_options: backend_options.clone(),
+                model_suggestions: model_suggestions_for(op.backend),
+                effort_options: effort_options_for(Some(resolved.backend)),
+                enabled,
+            }
+        };
 
         vec![
-            build("init", "Init", self.resolve_init(), &self.agents.init),
-            build("plan", "Plan", self.resolve_plan(), &self.agents.plan),
-            build("run", "Run", self.resolve_run(), &self.agents.run),
+            build("init", "Init", self.resolve_init(), &self.agents.init, None),
+            build("plan", "Plan", self.resolve_plan(), &self.agents.plan, None),
+            build("run", "Run", self.resolve_run(), &self.agents.run, None),
             build(
                 "review",
                 "Review",
                 self.resolve_review(),
                 &self.agents.review,
+                Some(self.review.enabled),
             ),
             build(
                 "verify",
                 "Verify",
                 self.resolve_verify(),
                 &self.agents.verify,
+                Some(self.verify.enabled),
             ),
         ]
     }
@@ -1090,6 +1104,11 @@ pub struct OperationSummary {
     pub model_suggestions: Vec<String>,
     /// Available effort options.
     pub effort_options: Vec<String>,
+    /// Whether this is a toggleable quality phase, and its current state.
+    ///
+    /// `None` for core operations (init/plan/run), `Some(bool)` for
+    /// quality phases (review/verify).
+    pub enabled: Option<bool>,
 }
 
 impl Default for CodaConfig {
@@ -1106,7 +1125,6 @@ impl Default for CodaConfig {
             git: GitConfig::default(),
             review: ReviewConfig::default(),
             verify: VerifyConfig::default(),
-            docs: DocsConfig::default(),
             agents: AgentsConfig::default(),
         }
     }
@@ -1128,7 +1146,6 @@ mod tests {
         assert!(!config.review.enabled);
         assert!(!config.verify.enabled);
         assert_eq!(config.verify.max_verify_retries, 3);
-        assert!(!config.docs.enabled);
     }
 
     #[test]
@@ -1280,6 +1297,10 @@ verify:
     #[test]
     fn test_should_serialize_reasoning_effort_lowercase() {
         assert_eq!(
+            serde_json::to_string(&ReasoningEffort::Minimal).unwrap(),
+            "\"minimal\""
+        );
+        assert_eq!(
             serde_json::to_string(&ReasoningEffort::Low).unwrap(),
             "\"low\""
         );
@@ -1292,6 +1313,10 @@ verify:
             "\"high\""
         );
         assert_eq!(
+            serde_json::to_string(&ReasoningEffort::XHigh).unwrap(),
+            "\"xhigh\""
+        );
+        assert_eq!(
             serde_json::to_string(&ReasoningEffort::Max).unwrap(),
             "\"max\""
         );
@@ -1299,6 +1324,10 @@ verify:
 
     #[test]
     fn test_should_deserialize_reasoning_effort_lowercase() {
+        assert_eq!(
+            serde_json::from_str::<ReasoningEffort>("\"minimal\"").unwrap(),
+            ReasoningEffort::Minimal
+        );
         assert_eq!(
             serde_json::from_str::<ReasoningEffort>("\"low\"").unwrap(),
             ReasoningEffort::Low
@@ -1312,6 +1341,10 @@ verify:
             ReasoningEffort::High
         );
         assert_eq!(
+            serde_json::from_str::<ReasoningEffort>("\"xhigh\"").unwrap(),
+            ReasoningEffort::XHigh
+        );
+        assert_eq!(
             serde_json::from_str::<ReasoningEffort>("\"max\"").unwrap(),
             ReasoningEffort::Max
         );
@@ -1320,9 +1353,11 @@ verify:
     #[test]
     fn test_should_round_trip_reasoning_effort_serde() {
         for effort in [
+            ReasoningEffort::Minimal,
             ReasoningEffort::Low,
             ReasoningEffort::Medium,
             ReasoningEffort::High,
+            ReasoningEffort::XHigh,
             ReasoningEffort::Max,
         ] {
             let json = serde_json::to_string(&effort).unwrap();
@@ -1333,14 +1368,20 @@ verify:
 
     #[test]
     fn test_should_display_reasoning_effort_lowercase() {
+        assert_eq!(ReasoningEffort::Minimal.to_string(), "minimal");
         assert_eq!(ReasoningEffort::Low.to_string(), "low");
         assert_eq!(ReasoningEffort::Medium.to_string(), "medium");
         assert_eq!(ReasoningEffort::High.to_string(), "high");
+        assert_eq!(ReasoningEffort::XHigh.to_string(), "xhigh");
         assert_eq!(ReasoningEffort::Max.to_string(), "max");
     }
 
     #[test]
     fn test_should_parse_reasoning_effort_from_str_case_insensitive() {
+        assert_eq!(
+            "MINIMAL".parse::<ReasoningEffort>().unwrap(),
+            ReasoningEffort::Minimal
+        );
         assert_eq!(
             "Low".parse::<ReasoningEffort>().unwrap(),
             ReasoningEffort::Low
@@ -1352,6 +1393,10 @@ verify:
         assert_eq!(
             "high".parse::<ReasoningEffort>().unwrap(),
             ReasoningEffort::High
+        );
+        assert_eq!(
+            "XHIGH".parse::<ReasoningEffort>().unwrap(),
+            ReasoningEffort::XHigh
         );
         assert_eq!(
             "MAX".parse::<ReasoningEffort>().unwrap(),
@@ -1367,9 +1412,11 @@ verify:
     #[test]
     fn test_should_display_and_from_str_roundtrip_for_reasoning_effort() {
         for effort in [
+            ReasoningEffort::Minimal,
             ReasoningEffort::Low,
             ReasoningEffort::Medium,
             ReasoningEffort::High,
+            ReasoningEffort::XHigh,
             ReasoningEffort::Max,
         ] {
             let displayed = effort.to_string();
@@ -1381,9 +1428,11 @@ verify:
     #[test]
     fn test_should_deserialize_all_reasoning_effort_variants_from_yaml() {
         for (yaml_val, expected) in [
+            ("minimal", ReasoningEffort::Minimal),
             ("low", ReasoningEffort::Low),
             ("medium", ReasoningEffort::Medium),
             ("high", ReasoningEffort::High),
+            ("xhigh", ReasoningEffort::XHigh),
             ("max", ReasoningEffort::Max),
         ] {
             let yaml = format!("version: 1\nreview:\n  codex_reasoning_effort: {yaml_val}\n");
@@ -1394,16 +1443,6 @@ verify:
 
     #[test]
     fn test_should_deserialize_legacy_reasoning_effort_aliases() {
-        // "minimal" should map to Low
-        let yaml = "version: 1\nreview:\n  codex_reasoning_effort: minimal\n";
-        let config: CodaConfig = serde_yaml_ng::from_str(yaml).unwrap();
-        assert_eq!(config.review.codex_reasoning_effort, ReasoningEffort::Low);
-
-        // "xhigh" should map to High
-        let yaml = "version: 1\nreview:\n  codex_reasoning_effort: xhigh\n";
-        let config: CodaConfig = serde_yaml_ng::from_str(yaml).unwrap();
-        assert_eq!(config.review.codex_reasoning_effort, ReasoningEffort::High);
-
         // "moderate" should map to Medium
         let yaml = "version: 1\nreview:\n  codex_reasoning_effort: moderate\n";
         let config: CodaConfig = serde_yaml_ng::from_str(yaml).unwrap();
@@ -1719,8 +1758,8 @@ agents:
     fn test_should_return_config_keys_for_default_config() {
         let config = CodaConfig::default();
         let keys = config.config_keys();
-        // 5 ops * 3 keys + 8 agent + 4 git + 3 review + 3 verify + 1 docs = 34
-        assert_eq!(keys.len(), 34);
+        // 5 ops * 3 keys + 8 agent + 4 git + 3 review + 3 verify = 33
+        assert_eq!(keys.len(), 33);
     }
 
     #[test]

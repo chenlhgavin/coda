@@ -1,7 +1,7 @@
 //! Phase executor framework for decomposed runner logic.
 //!
 //! Provides the [`PhaseExecutor`] trait and [`PhaseContext`] struct that
-//! allow each phase type (dev, review, verify, docs, PR) to be implemented
+//! allow each phase type (dev, review, verify, PR) to be implemented
 //! as a focused, testable component rather than methods on the monolithic
 //! `Runner` struct.
 //!
@@ -22,7 +22,6 @@
 //! invariants and keeps `current_phase` derived from phase statuses.
 
 pub mod dev;
-pub mod docs;
 pub mod pr;
 pub mod review;
 pub mod verify;
@@ -53,7 +52,7 @@ pub use crate::state::PhaseOutcome;
 
 /// Trait for phase-specific execution logic.
 ///
-/// Each phase type (dev, review, verify, docs, PR) implements this trait.
+/// Each phase type (dev, review, verify, PR) implements this trait.
 /// The `Runner` creates the appropriate executor and calls `execute()`
 /// with a shared [`PhaseContext`].
 ///
@@ -100,7 +99,7 @@ pub trait PhaseExecutor: Send {
 
 /// Completes a phase as skipped (disabled) with a zero-cost outcome.
 ///
-/// Used by quality phases (review, verify, docs) when the corresponding
+/// Used by quality phases (review, verify) when the corresponding
 /// config flag is `false`. Marks the phase completed in `StateManager`
 /// and returns a no-op `TaskResult`.
 ///

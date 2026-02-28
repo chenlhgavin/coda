@@ -51,21 +51,32 @@ impl From<String> for PermissionMode {
 }
 
 /// Effort level for thinking depth.
+///
+/// Not all variants are valid for all backends:
+/// - **Claude**: `Low`, `Medium`, `High`, `Max`
+/// - **Codex**: `Minimal`, `Low`, `Medium`, `High`, `XHigh`
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Effort {
+    /// Least reasoning — Codex only, even less than `Low`.
+    Minimal,
     Low,
     Medium,
     High,
+    /// Extra-high reasoning — Codex only, above `High`.
+    XHigh,
+    /// Maximum reasoning — Claude only.
     Max,
 }
 
 impl fmt::Display for Effort {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Minimal => write!(f, "minimal"),
             Self::Low => write!(f, "low"),
             Self::Medium => write!(f, "medium"),
             Self::High => write!(f, "high"),
+            Self::XHigh => write!(f, "xhigh"),
             Self::Max => write!(f, "max"),
         }
     }
@@ -74,9 +85,11 @@ impl fmt::Display for Effort {
 impl From<&str> for Effort {
     fn from(s: &str) -> Self {
         match s {
+            "minimal" => Self::Minimal,
             "low" => Self::Low,
             "medium" => Self::Medium,
             "high" => Self::High,
+            "xhigh" => Self::XHigh,
             "max" => Self::Max,
             _ => Self::Medium,
         }
