@@ -457,9 +457,7 @@ impl Runner {
             });
         }
 
-        // Load .coda.md for system prompt context
-        let coda_md = std::fs::read_to_string(project_root.join(".coda.md")).unwrap_or_default();
-        let system_prompt = pm.render("run/system", minijinja::context!(coda_md => coda_md))?;
+        let system_prompt = pm.render("run/system", minijinja::context!())?;
 
         // Create client with Coder profile, cwd = worktree
         let resolved = config.resolve_run();
