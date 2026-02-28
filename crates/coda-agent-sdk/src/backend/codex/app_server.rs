@@ -232,8 +232,10 @@ impl CodexSession {
             init_id,
             "initialize",
             serde_json::json!({
-                "clientName": "code-agent-sdk",
-                "clientVersion": env!("CARGO_PKG_VERSION"),
+                "clientInfo": {
+                    "name": "code-agent-sdk",
+                    "version": env!("CARGO_PKG_VERSION"),
+                },
             }),
         );
 
@@ -271,7 +273,12 @@ impl CodexSession {
         .await
         .map_err(|_| Error::Other("Initialize timeout".to_string()))??;
 
-        let _ = init_result; // Could extract server capabilities here
+        if let Some((code, message)) = jsonrpc::extract_error(&init_result) {
+            return Err(Error::Other(format!(
+                "Codex app-server initialize failed (code {}): {}",
+                code, message
+            )));
+        }
 
         // Send initialized notification
         let initialized_notif = jsonrpc::build_notification("initialized", serde_json::json!({}));
@@ -330,12 +337,30 @@ impl CodexSession {
         .await
         .map_err(|_| Error::Other("thread/start timeout".to_string()))??;
 
+        if let Some((code, message)) = jsonrpc::extract_error(&thread_resp) {
+            return Err(Error::Other(format!(
+                "Codex app-server thread/start failed (code {}): {}",
+                code, message
+            )));
+        }
+
+        // Try new format (result.thread.id) first, fallback to old format (result.threadId)
         let thread_id = thread_resp
             .get("result")
-            .and_then(|r| r.get("threadId"))
-            .and_then(|v| v.as_str())
+            .and_then(|r| {
+                r.get("thread")
+                    .and_then(|t| t.get("id"))
+                    .and_then(|v| v.as_str())
+                    .or_else(|| r.get("threadId").and_then(|v| v.as_str()))
+            })
             .unwrap_or("")
             .to_string();
+
+        if thread_id.is_empty() {
+            return Err(Error::Other(
+                "Codex app-server thread/start returned empty thread ID".to_string(),
+            ));
+        }
 
         session.thread_id = Some(thread_id.clone());
 

@@ -75,6 +75,21 @@ pub fn build_error_response(id: Value, code: i64, message: &str) -> Value {
     })
 }
 
+/// Extract error code and message from a JSON-RPC response, if present.
+///
+/// Returns `Some((code, message))` if the response contains an `error` object,
+/// `None` if it is a successful response.
+pub fn extract_error(resp: &Value) -> Option<(i64, String)> {
+    let err = resp.get("error")?;
+    let code = err.get("code").and_then(|v| v.as_i64()).unwrap_or(-1);
+    let message = err
+        .get("message")
+        .and_then(|v| v.as_str())
+        .unwrap_or("Unknown error")
+        .to_string();
+    Some((code, message))
+}
+
 /// Check if a JSON-RPC message is a response (has `id` and `result` or `error`).
 pub fn is_response(msg: &Value) -> bool {
     msg.get("id").is_some() && (msg.get("result").is_some() || msg.get("error").is_some())
@@ -106,11 +121,16 @@ mod tests {
 
     #[test]
     fn test_should_build_request_with_correct_format() {
-        let req = build_request(1, "initialize", serde_json::json!({"clientName": "sdk"}));
+        let req = build_request(
+            1,
+            "initialize",
+            serde_json::json!({"clientInfo": {"name": "sdk", "version": "1.0"}}),
+        );
         assert_eq!(req["jsonrpc"], "2.0");
         assert_eq!(req["id"], 1);
         assert_eq!(req["method"], "initialize");
-        assert_eq!(req["params"]["clientName"], "sdk");
+        assert_eq!(req["params"]["clientInfo"]["name"], "sdk");
+        assert_eq!(req["params"]["clientInfo"]["version"], "1.0");
     }
 
     #[test]
@@ -146,6 +166,19 @@ mod tests {
 
         assert!(is_response(&response));
         assert!(!is_notification(&response));
+    }
+
+    #[test]
+    fn test_should_extract_error_from_error_response() {
+        let resp = build_error_response(serde_json::json!(1), -32600, "Invalid request");
+        let err = extract_error(&resp);
+        assert_eq!(err, Some((-32600, "Invalid request".to_string())));
+    }
+
+    #[test]
+    fn test_should_return_none_for_success_response() {
+        let resp = build_response(serde_json::json!(1), serde_json::json!({"status": "ok"}));
+        assert!(extract_error(&resp).is_none());
     }
 
     #[test]
