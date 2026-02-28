@@ -483,23 +483,16 @@ pub struct ConfigKeyDescriptor {
 /// use coda_core::config::VerifyConfig;
 ///
 /// let config = VerifyConfig::default();
-/// assert!(!config.enabled);
 /// assert!(config.ai_verification);
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct VerifyConfig {
-    /// Whether the verify phase is enabled.
-    ///
-    /// When `false` (default), the verify phase is skipped entirely and
-    /// `verification.md` is not generated during planning.
-    pub enabled: bool,
-
     /// Whether to run AI-assisted verification after dev phases complete.
     ///
     /// When `true` (default), a Codex session evaluates functional
     /// correctness, design conformance, and integration points against
-    /// the verification plan generated during `coda plan`.
+    /// the verification section in the design spec.
     #[serde(default = "default_true")]
     pub ai_verification: bool,
 }
@@ -512,7 +505,6 @@ const fn default_true() -> bool {
 impl Default for VerifyConfig {
     fn default() -> Self {
         Self {
-            enabled: false,
             ai_verification: true,
         }
     }
@@ -959,14 +951,6 @@ impl CodaConfig {
             current_value: self.review.max_review_rounds.to_string(),
         });
 
-        // Verify keys
-        keys.push(ConfigKeyDescriptor {
-            key: "verify.enabled".to_string(),
-            label: "Verify enabled".to_string(),
-            value_type: ConfigValueType::Bool,
-            current_value: self.verify.enabled.to_string(),
-        });
-
         keys
     }
 
@@ -1011,7 +995,7 @@ impl CodaConfig {
                 "Verify",
                 self.resolve_verify(),
                 &self.agents.verify,
-                Some(self.verify.enabled),
+                None,
             ),
         ]
     }
@@ -1073,7 +1057,6 @@ mod tests {
         assert!(config.git.auto_commit);
         assert!(config.git.squash_before_push);
         assert!(!config.review.enabled);
-        assert!(!config.verify.enabled);
     }
 
     #[test]
@@ -1650,8 +1633,8 @@ agents:
     fn test_should_return_config_keys_for_default_config() {
         let config = CodaConfig::default();
         let keys = config.config_keys();
-        // 5 ops * 3 keys + 7 agent + 4 git + 3 review + 1 verify = 30
-        assert_eq!(keys.len(), 30);
+        // 5 ops * 3 keys + 7 agent + 4 git + 3 review = 29
+        assert_eq!(keys.len(), 29);
     }
 
     #[test]

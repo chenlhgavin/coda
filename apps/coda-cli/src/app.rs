@@ -238,8 +238,8 @@ impl App {
     /// Handles the `coda plan <feature_slug>` command.
     ///
     /// Opens an interactive ratatui chat interface for multi-turn
-    /// conversation with the planning agent. When the user types `/done`,
-    /// the session is finalized and artifacts are generated.
+    /// conversation with the planning agent. When the user types `/approve`,
+    /// the plan is saved and a worktree is created.
     ///
     /// # Errors
     ///
@@ -292,9 +292,6 @@ impl App {
                 drop(ui);
                 println!("Planning complete!");
                 println!("  Design spec: {}", output.design_spec.display());
-                if let Some(ref verification) = output.verification {
-                    println!("  Verification: {}", verification.display());
-                }
                 println!("  State: {}", output.state.display());
                 println!("  Worktree: {}", output.worktree.display());
                 println!("\nNext step: run `coda run {feature_slug}` to execute the plan.");
@@ -1076,26 +1073,19 @@ fn print_config_table(summary: &coda_core::ResolvedConfigSummary) {
         );
     }
 
-    let off_label = |name: &str, enabled: bool| -> String {
-        if enabled {
-            name.to_string()
-        } else {
-            format!("{name} (off)")
-        }
+    let review_label = if summary.review_enabled {
+        "review"
+    } else {
+        "review (off)"
     };
-
-    for (name, resolved, enabled) in [
-        ("review", &summary.review, summary.review_enabled),
-        ("verify", &summary.verify, summary.verify_enabled),
-    ] {
-        println!(
-            "  {:<16} {:<10} {:<26} {:<8}",
-            off_label(name, enabled),
-            resolved.backend,
-            resolved.model,
-            resolved.effort,
-        );
-    }
+    println!(
+        "  {:<16} {:<10} {:<26} {:<8}",
+        review_label, summary.review.backend, summary.review.model, summary.review.effort,
+    );
+    println!(
+        "  {:<16} {:<10} {:<26} {:<8}",
+        "verify", summary.verify.backend, summary.verify.model, summary.verify.effort,
+    );
 
     println!();
 }

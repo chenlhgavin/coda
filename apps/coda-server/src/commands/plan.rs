@@ -7,8 +7,7 @@
 //! [`handlers::events`](crate::handlers::events).
 //!
 //! Special keywords in thread replies:
-//! - `approve` — formalizes the design spec and generates a verification plan
-//! - `done` — finalizes the session, creates the worktree and writes specs
+//! - `approve` — saves the plan and creates a worktree
 //! - `quit` — disconnects the session without finalizing
 
 use std::sync::Arc;
@@ -80,8 +79,7 @@ pub async fn handle_plan(
          Describe your feature requirements and I'll help design it.\n\n\
          _Thread commands:_\n\
          \u{2022} Type your requirements to discuss the design\n\
-         \u{2022} `approve` \u{2014} formalize the design spec\n\
-         \u{2022} `done` \u{2014} finalize and create the worktree\n\
+         \u{2022} `approve` \u{2014} save the plan and create a worktree\n\
          \u{2022} `quit` \u{2014} cancel this session"
     );
     if let Err(e) = state
@@ -113,7 +111,6 @@ pub async fn handle_thread_message(
 
     match trimmed.as_str() {
         "approve" => handle_approve(state, channel, thread_ts).await,
-        "done" => handle_done(state, channel, thread_ts).await,
         "quit" => handle_quit(state, channel, thread_ts).await,
         _ => handle_conversation(state, channel, thread_ts, user_ts, text).await,
     }
@@ -361,9 +358,25 @@ async fn consume_streaming_updates(
     }
 }
 
-/// Handles the `approve` keyword: formalizes design and verification.
+/// Handles the `approve` keyword: saves the plan and creates a worktree.
 #[instrument(skip(state), fields(channel = %channel, thread_ts = %thread_ts))]
 async fn handle_approve(state: Arc<AppState>, channel: &str, thread_ts: &str) {
+    // Acquire repo lock for worktree creation
+    let repo_path = state.bindings().get(channel);
+    if let Some(ref path) = repo_path
+        && let Err(holder) = state.repo_locks().try_lock(path, "plan approve")
+    {
+        let _ = state
+            .slack()
+            .post_thread_reply(
+                channel,
+                thread_ts,
+                &format!(":warning: Repository is busy (`{holder}`). Try again later."),
+            )
+            .await;
+        return;
+    }
+
     // Add thinking indicator to the thread parent
     let _ = state
         .slack()
@@ -375,6 +388,9 @@ async fn handle_approve(state: Arc<AppState>, channel: &str, thread_ts: &str) {
         Some(arc) => arc,
         None => {
             warn!(channel, thread_ts, "Session not found for approve");
+            if let Some(ref path) = repo_path {
+                state.repo_locks().unlock(path);
+            }
             return;
         }
     };
@@ -394,135 +410,7 @@ async fn handle_approve(state: Arc<AppState>, channel: &str, thread_ts: &str) {
         "session.approve() completed",
     );
 
-    let _ = state
-        .slack()
-        .remove_reaction(channel, thread_ts, "hourglass_flowing_sand")
-        .await;
-
-    match result {
-        Ok((design, verification)) => {
-            info!(channel, thread_ts, "Plan approved");
-
-            // Update thread parent to show Approved status
-            let header_blocks = formatter::plan_thread_header(&slug, "Approved", None);
-            let _ = state
-                .slack()
-                .update_message(channel, thread_ts, header_blocks)
-                .await;
-
-            // Post design spec (inline or as file)
-            post_content_or_file(
-                &state,
-                channel,
-                thread_ts,
-                &design,
-                "Design Specification",
-                "design-spec.md",
-                "markdown",
-            )
-            .await;
-
-            // Post verification plan (inline or as file) — only when verify is enabled
-            if let Some(ref verification) = verification {
-                post_content_or_file(
-                    &state,
-                    channel,
-                    thread_ts,
-                    verification,
-                    "Verification Plan",
-                    "verification-plan.md",
-                    "markdown",
-                )
-                .await;
-            }
-
-            let _ = state
-                .slack()
-                .post_thread_reply(
-                    channel,
-                    thread_ts,
-                    "Design approved. Type `done` to finalize and create the worktree, \
-                     or continue discussing to refine.",
-                )
-                .await;
-        }
-        Err(e) => {
-            warn!(error = %e, channel, thread_ts, "PlanSession::approve failed");
-            let error_msg = format!(":warning: Approve failed: {e}");
-            let _ = state
-                .slack()
-                .post_thread_reply(channel, thread_ts, &error_msg)
-                .await;
-        }
-    }
-}
-
-/// Handles the `done` keyword: finalizes the session, creates worktree.
-#[instrument(skip(state), fields(channel = %channel, thread_ts = %thread_ts))]
-async fn handle_done(state: Arc<AppState>, channel: &str, thread_ts: &str) {
-    // Acquire session Arc (briefly touches DashMap, then releases shard lock)
-    let session_arc = match state.sessions().acquire(channel, thread_ts) {
-        Some(arc) => arc,
-        None => {
-            warn!(channel, thread_ts, "Session not found for done");
-            return;
-        }
-    };
-
-    // Check if approved (brief mutex lock, no DashMap lock)
-    let is_approved = {
-        let session = session_arc.lock().await;
-        session.is_approved()
-    };
-
-    if !is_approved {
-        let _ = state
-            .slack()
-            .post_thread_reply(
-                channel,
-                thread_ts,
-                ":warning: Cannot finalize — design has not been approved yet. \
-                 Type `approve` first.",
-            )
-            .await;
-        return;
-    }
-
-    // Acquire repo lock for worktree creation
-    let repo_path = state.bindings().get(channel);
-    if let Some(ref path) = repo_path
-        && let Err(holder) = state.repo_locks().try_lock(path, "plan finalize")
-    {
-        let _ = state
-            .slack()
-            .post_thread_reply(
-                channel,
-                thread_ts,
-                &format!(":warning: Repository is busy (`{holder}`). Try again later."),
-            )
-            .await;
-        return;
-    }
-
-    let _ = state
-        .slack()
-        .add_reaction(channel, thread_ts, "hourglass_flowing_sand")
-        .await;
-
-    // Run finalize with only the tokio Mutex held (no DashMap lock)
-    debug!("Calling session.finalize()");
-    let start = Instant::now();
-    let result = {
-        let mut session = session_arc.lock().await;
-        session.finalize().await
-    };
-    debug!(
-        duration_ms = start.elapsed().as_millis(),
-        success = result.is_ok(),
-        "session.finalize() completed",
-    );
-
-    // Release repo lock immediately after finalize
+    // Release repo lock immediately after approve
     if let Some(ref path) = repo_path {
         state.repo_locks().unlock(path);
     }
@@ -538,30 +426,20 @@ async fn handle_done(state: Arc<AppState>, channel: &str, thread_ts: &str) {
                 channel,
                 thread_ts,
                 worktree = %output.worktree.display(),
-                "Plan finalized successfully"
+                "Plan approved and finalized"
             );
 
             // Update thread parent to show Finalized status
-            let slug = output
-                .worktree
-                .file_name()
-                .map(|n| n.to_string_lossy().to_string())
-                .unwrap_or_default();
             let header_blocks = formatter::plan_thread_header(&slug, "Finalized", None);
             let _ = state
                 .slack()
                 .update_message(channel, thread_ts, header_blocks)
                 .await;
 
-            let verification_line = output
-                .verification
-                .as_ref()
-                .map(|v| format!("\n\u{2022} Verification: `{}`", v.display()))
-                .unwrap_or_default();
             let summary = format!(
                 ":white_check_mark: *Planning finalized!*\n\n\
                  \u{2022} Worktree: `{}`\n\
-                 \u{2022} Design: `{}`{verification_line}\n\
+                 \u{2022} Design: `{}`\n\
                  \u{2022} State: `{}`\n\n\
                  Use `/coda run {}` to start development.",
                 output.worktree.display(),
@@ -578,8 +456,8 @@ async fn handle_done(state: Arc<AppState>, channel: &str, thread_ts: &str) {
             state.sessions().remove(channel, thread_ts);
         }
         Err(e) => {
-            warn!(error = %e, channel, thread_ts, "PlanSession::finalize failed");
-            let error_msg = format!(":warning: Finalize failed: {e}");
+            warn!(error = %e, channel, thread_ts, "PlanSession::approve failed");
+            let error_msg = format!(":warning: Approve failed: {e}");
             let _ = state
                 .slack()
                 .post_thread_reply(channel, thread_ts, &error_msg)
@@ -633,51 +511,12 @@ async fn handle_quit(state: Arc<AppState>, channel: &str, thread_ts: &str) {
     }
 }
 
-/// Posts content inline, splitting into multiple messages if too long.
-///
-/// Wraps each chunk in a code block with a label. For multi-part content,
-/// each part includes a `(N/M)` suffix in the header.
-async fn post_content_or_file(
-    state: &AppState,
-    channel: &str,
-    thread_ts: &str,
-    content: &str,
-    label: &str,
-    _filename: &str,
-    _filetype: &str,
-) {
-    // Reserve space for the code block wrapper: "*Label (N/M):*\n```\n...\n```"
-    let wrapper_overhead = label.len() + 30;
-    let chunk_limit = SLACK_SECTION_CHAR_LIMIT.saturating_sub(wrapper_overhead);
-    let chunks = split_into_chunks(content, chunk_limit);
-    let total = chunks.len();
-
-    for (i, chunk) in chunks.iter().enumerate() {
-        let header = if total == 1 {
-            format!("*{label}:*")
-        } else {
-            format!("*{label} ({}/{}):*", i + 1, total)
-        };
-        let msg = format!("{header}\n```\n{chunk}\n```");
-        let _ = state
-            .slack()
-            .post_thread_reply(channel, thread_ts, &msg)
-            .await;
-    }
-}
-
 #[cfg(test)]
 mod tests {
     #[test]
     fn test_should_recognize_approve_keyword() {
         let trimmed = "approve".trim().to_lowercase();
         assert_eq!(trimmed, "approve");
-    }
-
-    #[test]
-    fn test_should_recognize_done_keyword() {
-        let trimmed = "done".trim().to_lowercase();
-        assert_eq!(trimmed, "done");
     }
 
     #[test]
@@ -701,6 +540,6 @@ mod tests {
     #[test]
     fn test_should_route_regular_text_to_conversation() {
         let trimmed = "design a REST API for auth".trim().to_lowercase();
-        assert!(trimmed != "approve" && trimmed != "done" && trimmed != "quit");
+        assert!(trimmed != "approve" && trimmed != "quit");
     }
 }

@@ -52,11 +52,6 @@ pub struct PlanOutput {
     /// Path to the generated design spec (`<worktree>/.coda/<slug>/specs/design.md`).
     pub design_spec: PathBuf,
 
-    /// Path to the generated verification plan (`<worktree>/.coda/<slug>/specs/verification.md`).
-    ///
-    /// `None` when `verify.enabled` is `false` in the config.
-    pub verification: Option<PathBuf>,
-
     /// Path to the feature state file (`<worktree>/.coda/<slug>/state.yml`).
     pub state: PathBuf,
 
@@ -123,18 +118,14 @@ const PLAN_SESSION_FILE: &str = "plan-session.json";
 ///
 /// 1. Create via [`PlanSession::new`]
 /// 2. Call [`send`](Self::send) repeatedly for conversation turns
-/// 3. Call [`approve`](Self::approve) to formalize the approved design
-/// 4. Call [`finalize`](Self::finalize) to write specs and create a worktree
+/// 3. Call [`approve`](Self::approve) to save the plan and create a worktree
 pub struct PlanSession {
     session: AgentSession,
     feature_slug: String,
     project_root: PathBuf,
-    pm: PromptManager,
     config: CodaConfig,
-    /// The formalized design spec produced by [`approve`](Self::approve).
-    approved_design: Option<String>,
-    /// The verification plan produced by [`approve`](Self::approve).
-    approved_verification: Option<String>,
+    /// The last assistant response, captured for use by [`approve`](Self::approve).
+    last_assistant_response: Option<String>,
     /// Git operations implementation (async wrapper for blocking safety).
     git: AsyncGitOps,
     /// Accumulated API cost in USD across all planning turns.
@@ -199,10 +190,8 @@ impl PlanSession {
             session,
             feature_slug,
             project_root,
-            pm: pm.clone(),
             config: config.clone(),
-            approved_design: None,
-            approved_verification: None,
+            last_assistant_response: None,
             git: AsyncGitOps::new(git),
             planning_cost_usd: 0.0,
             planning_turns: 0,
@@ -332,103 +321,34 @@ impl PlanSession {
             self.planning_turns += result.num_turns;
         }
 
+        // Capture the last assistant response for approve()
+        self.last_assistant_response = Some(resp.text.clone());
+
         Ok(resp.text)
     }
 
-    /// Formalizes the approved design and generates a verification plan.
+    /// Approves and finalizes the plan in one step.
     ///
-    /// First asks the agent to produce a structured design specification
-    /// document, then optionally generates a verification plan based on
-    /// the design (only when `verify.enabled` is `true` in the config).
-    /// Results are stored so [`finalize`](Self::finalize) can write them
-    /// directly without re-generating.
-    ///
-    /// Returns `(design, Option<verification>)` so the UI can display both.
+    /// Captures the last assistant response as the design spec, creates
+    /// a git worktree, writes artifacts, and returns `PlanOutput`.
+    /// No re-generation prompt is sent to the AI — the plan from Phase B
+    /// is used directly.
     ///
     /// # Errors
     ///
-    /// Returns `CoreError` if template rendering or agent communication fails.
-    pub async fn approve(&mut self) -> Result<(String, Option<String>), CoreError> {
-        // Step 1: Generate formal design spec
-        let approve_prompt = self.pm.render(
-            "plan/approve",
-            minijinja::context!(
-                feature_slug => &self.feature_slug,
-            ),
-        )?;
+    /// Returns `CoreError` if no assistant response exists, or if git
+    /// operations, directory creation, or file writes fail.
+    pub async fn approve(&mut self) -> Result<PlanOutput, CoreError> {
+        let design_content = self.last_assistant_response.clone().ok_or_else(|| {
+            CoreError::PlanError(
+                "Cannot approve: no plan has been discussed yet. Send a message first.".to_string(),
+            )
+        })?;
+        info!("Design approved, finalizing");
 
-        let design = self.send(&approve_prompt).await?;
-        info!("Design approved and formalized");
-
-        // Step 2: Generate verification plan (only when verify is enabled)
-        let verification = if self.config.verify.enabled {
-            let verification_prompt = self.pm.render(
-                "plan/verification",
-                minijinja::context!(
-                    design_spec => &design,
-                    feature_slug => &self.feature_slug,
-                ),
-            )?;
-
-            let v = match self.send(&verification_prompt).await {
-                Ok(v) => v,
-                Err(e) => {
-                    // Both must succeed atomically; don't leave partial state
-                    return Err(e);
-                }
-            };
-            info!("Verification plan generated");
-            Some(v)
-        } else {
-            info!("Verify disabled, skipping verification plan generation");
-            None
-        };
-
-        // Store results only after everything succeeds
-        self.approved_design = Some(design.clone());
-        self.approved_verification = verification.clone();
-
-        Ok((design, verification))
-    }
-
-    /// Returns `true` if the design has been approved (and verification
-    /// too, when verify is enabled) via [`approve`](Self::approve).
-    pub fn is_approved(&self) -> bool {
-        self.approved_design.is_some()
-            && (self.approved_verification.is_some() || !self.config.verify.enabled)
-    }
-
-    /// Finalizes the planning session by creating a worktree and writing specs.
-    ///
-    /// This method:
-    /// 1. Creates a git worktree from the base branch
-    /// 2. Writes the approved design spec into the worktree
-    /// 3. Writes the approved verification plan into the worktree
-    /// 4. Writes the initial `state.yml` into the worktree
-    ///
-    /// All feature artifacts are written under `<worktree>/.coda/<slug>/`
-    /// so they travel with the feature branch and merge cleanly into main.
-    ///
-    /// Git operations are run via `spawn_blocking` to avoid blocking
-    /// the async runtime.
-    ///
-    /// # Errors
-    ///
-    /// Returns `CoreError` if git operations, directory creation, or
-    /// file writes fail.
-    pub async fn finalize(&mut self) -> Result<PlanOutput, CoreError> {
         let slug = self.feature_slug.clone();
         let worktree_abs = self.project_root.join(".trees").join(&slug);
         let worktree_rel = PathBuf::from(".trees").join(&slug);
-
-        // Guard: design must be approved before finalizing.
-        // Clone instead of take so a retry is possible if a later step fails.
-        let design_content = self.approved_design.clone().ok_or_else(|| {
-            CoreError::PlanError(
-                "Cannot finalize: design has not been approved. Use /approve first.".to_string(),
-            )
-        })?;
-        let verification_content = self.approved_verification.clone();
 
         // 1. Create git worktree
         let base_branch = if self.config.git.base_branch == "auto" {
@@ -438,8 +358,6 @@ impl PlanSession {
         };
 
         // Pre-flight: verify CODA config is committed to the base branch.
-        // If missing (e.g., user used --no-commit or modified files after
-        // init), auto-commit the init artifacts as a fallback.
         if !self
             .git
             .file_exists_in_ref(&base_branch, ".coda/config.yml")
@@ -458,7 +376,6 @@ impl PlanSession {
             )
             .await?;
 
-            // Re-check: if still missing, the files don't exist at all
             if !self
                 .git
                 .file_exists_in_ref(&base_branch, ".coda/config.yml")
@@ -499,18 +416,7 @@ impl PlanSession {
             .map_err(CoreError::IoError)?;
         debug!(path = %design_spec_path.display(), "Wrote design spec");
 
-        let verification_path = if let Some(ref content) = verification_content {
-            let path = specs_dir.join("verification.md");
-            tokio::fs::write(&path, content)
-                .await
-                .map_err(CoreError::IoError)?;
-            debug!(path = %path.display(), "Wrote verification plan");
-            Some(path)
-        } else {
-            None
-        };
-
-        // 3. Write initial state.yml (store relative worktree path for portability)
+        // 3. Write initial state.yml
         let dev_phases = extract_dev_phases(&design_content);
         let state = build_initial_state(&InitialStateParams {
             feature_slug: &self.feature_slug,
@@ -529,7 +435,7 @@ impl PlanSession {
             .map_err(CoreError::IoError)?;
         debug!(path = %state_path.display(), "Wrote state.yml");
 
-        // 4. Initial commit so planning artifacts are version-controlled
+        // 4. Initial commit
         commit_coda_artifacts_async(
             &self.git,
             &worktree_abs,
@@ -538,18 +444,13 @@ impl PlanSession {
         )
         .await?;
 
-        // 5. Clear approved state only after everything succeeded
-        self.approved_design = None;
-        self.approved_verification = None;
-
-        // 6. Disconnect client
+        // 5. Disconnect client
         self.disconnect().await;
 
         info!("Planning session finalized successfully");
 
         Ok(PlanOutput {
             design_spec: design_spec_path,
-            verification: verification_path,
             state: state_path,
             worktree: worktree_abs,
         })
@@ -761,13 +662,14 @@ pub fn extract_structured_phases(design_content: &str) -> Option<Vec<StructuredP
 
 /// Extracts development phase names from a design specification.
 ///
-/// Prefers structured extraction from a `yaml-phases` code block. Falls back
-/// to heading-based regex matching if no structured block is found.
+/// Uses the following priority order:
+/// 1. Structured `yaml-phases` code block
+/// 2. `## Changes` numbered items (e.g., `1. Change title`)
+/// 3. Heading-based `### Phase N: <name>` matching
+/// 4. Falls back to a single `"default"` phase
 ///
-/// Matches headings like `## Phase 1: <name>`, `### Phase 1: <name>`, or
-/// `#### Phase 1: <name>` (2–4 `#` levels). Parenthetical annotations
-/// such as `(Day 1)` or `(Day 1-2)` are stripped before slugifying.
-/// Falls back to a single `"default"` phase if no phase headings are found.
+/// Parenthetical annotations such as `(Day 1)` or `(Day 1-2)` are stripped
+/// before slugifying.
 ///
 /// # Examples
 ///
@@ -778,7 +680,7 @@ pub fn extract_structured_phases(design_content: &str) -> Option<Vec<StructuredP
 /// assert_eq!(phases, vec!["type-definitions", "transport-layer"]);
 /// ```
 pub fn extract_dev_phases(design_content: &str) -> Vec<String> {
-    // Prefer structured extraction from yaml-phases block
+    // Priority 1: Structured yaml-phases block
     if let Some(structured) = extract_structured_phases(design_content) {
         let names: Vec<String> = structured
             .iter()
@@ -790,7 +692,13 @@ pub fn extract_dev_phases(design_content: &str) -> Vec<String> {
         }
     }
 
-    // Fall back to heading-based extraction
+    // Priority 2: Changes section numbered items
+    let changes_phases = extract_changes_section_phases(design_content);
+    if !changes_phases.is_empty() {
+        return changes_phases;
+    }
+
+    // Priority 3: Heading-based extraction
     let mut phases = Vec::new();
 
     for line in design_content.lines() {
@@ -819,6 +727,60 @@ pub fn extract_dev_phases(design_content: &str) -> Vec<String> {
 
     if phases.is_empty() {
         phases.push("default".to_string());
+    }
+
+    phases
+}
+
+/// Extracts phase names from a `## Changes` section with numbered items.
+///
+/// Looks for a `## Changes` heading, then matches lines like `1. Change title`
+/// (number followed by dot and title text). Stops at the next `##` heading.
+///
+/// # Examples
+///
+/// ```
+/// # use coda_core::planner::extract_changes_section_phases;
+/// let design = "## Changes\n1. Add config fields\n   File: src/config.rs\n2. Update parser\n";
+/// let phases = extract_changes_section_phases(design);
+/// assert_eq!(phases, vec!["add-config-fields", "update-parser"]);
+/// ```
+pub fn extract_changes_section_phases(design_content: &str) -> Vec<String> {
+    let mut in_changes = false;
+    let mut phases = Vec::new();
+
+    for line in design_content.lines() {
+        let trimmed = line.trim();
+
+        if trimmed == "## Changes" {
+            in_changes = true;
+            continue;
+        }
+
+        // Stop at the next ## heading
+        if in_changes && trimmed.starts_with("## ") {
+            break;
+        }
+
+        if !in_changes {
+            continue;
+        }
+
+        // Match lines like "1. Change title" or "10. Another change"
+        // Must start at column 0 (no leading whitespace beyond trim)
+        if let Some(rest) = trimmed.strip_prefix(|c: char| c.is_ascii_digit()) {
+            // Consume remaining digits
+            let rest = rest.trim_start_matches(|c: char| c.is_ascii_digit());
+            if let Some(title) = rest.strip_prefix(". ") {
+                let title = title.trim();
+                if !title.is_empty() {
+                    let slug = slugify_phase_name(title);
+                    if !slug.is_empty() {
+                        phases.push(slug);
+                    }
+                }
+            }
+        }
     }
 
     phases
@@ -925,9 +887,8 @@ pub(crate) fn build_initial_state(params: &InitialStateParams<'_>) -> FeatureSta
     if params.config.review.enabled {
         phases.push(make_record("review", PhaseKind::Quality));
     }
-    if params.config.verify.enabled {
-        phases.push(make_record("verify", PhaseKind::Quality));
-    }
+    // Verify is always enabled
+    phases.push(make_record("verify", PhaseKind::Quality));
 
     FeatureState {
         feature: FeatureInfo {
@@ -966,7 +927,6 @@ mod tests {
         ];
         let mut config = CodaConfig::default();
         config.review.enabled = true;
-        config.verify.enabled = true;
 
         let state = build_initial_state(&InitialStateParams {
             feature_slug: "add-auth",
@@ -990,7 +950,7 @@ mod tests {
         assert_eq!(state.git.branch, "feature/add-auth");
         assert_eq!(state.git.base_branch, "main");
 
-        // Phases: 3 dev + 2 quality = 5
+        // Phases: 3 dev + review + verify = 5
         assert_eq!(state.phases.len(), 5);
         let names: Vec<&str> = state.phases.iter().map(|p| p.name.as_str()).collect();
         assert_eq!(
@@ -1021,10 +981,10 @@ mod tests {
     }
 
     #[test]
-    fn test_should_build_initial_state_with_no_quality_phases_when_disabled() {
+    fn test_should_always_include_verify_phase() {
         let worktree = PathBuf::from(".trees/add-auth");
         let dev_phases = vec!["implementation".to_string()];
-        let config = CodaConfig::default(); // all quality phases disabled by default
+        let config = CodaConfig::default(); // review disabled, verify always on
 
         let state = build_initial_state(&InitialStateParams {
             feature_slug: "add-auth",
@@ -1037,10 +997,12 @@ mod tests {
             config: &config,
         });
 
-        // Only dev phases, no quality phases
-        assert_eq!(state.phases.len(), 1);
+        // Dev phase + verify (always enabled) = 2
+        assert_eq!(state.phases.len(), 2);
         assert_eq!(state.phases[0].name, "implementation");
         assert_eq!(state.phases[0].kind, PhaseKind::Dev);
+        assert_eq!(state.phases[1].name, "verify");
+        assert_eq!(state.phases[1].kind, PhaseKind::Quality);
     }
 
     #[test]
@@ -1049,7 +1011,6 @@ mod tests {
         let dev_phases = vec!["phase-one".to_string(), "phase-two".to_string()];
         let mut config = CodaConfig::default();
         config.review.enabled = true;
-        config.verify.enabled = true;
 
         let state = build_initial_state(&InitialStateParams {
             feature_slug: "new-feature",
@@ -1069,6 +1030,7 @@ mod tests {
         assert!(yaml.contains("review"));
         assert!(yaml.contains("verify"));
 
+        // 2 dev + review + verify = 4
         let deserialized: FeatureState = serde_yaml_ng::from_str(&yaml).unwrap();
         assert_eq!(deserialized.phases.len(), 4);
         assert_eq!(deserialized.status, FeatureStatus::Planned);
@@ -1129,6 +1091,67 @@ mod tests {
         let design = "# Feature without phases\nJust some text.";
         let phases = extract_dev_phases(design);
         assert_eq!(phases, vec!["default"]);
+    }
+
+    #[test]
+    fn test_should_extract_phases_from_changes_section() {
+        let design = r#"
+## Context
+Some context about the task.
+
+## Changes
+1. Add config fields
+   File: src/config.rs
+   Change: Add new configuration fields
+
+2. Update parser
+   File: src/parser.rs
+   Change: Parse the new format
+
+3. Fix tests
+   File: tests/config_test.rs
+   Change: Update test expectations
+
+## Files to Modify
+File: src/config.rs
+Change: add fields
+"#;
+        let phases = extract_dev_phases(design);
+        assert_eq!(
+            phases,
+            vec!["add-config-fields", "update-parser", "fix-tests"]
+        );
+    }
+
+    #[test]
+    fn test_should_prefer_yaml_phases_over_changes_section() {
+        let design = r#"
+## Changes
+1. Some change
+
+```yaml-phases
+phases:
+  - name: "YAML Phase"
+    goal: "goal"
+    files: []
+```
+"#;
+        let phases = extract_dev_phases(design);
+        assert_eq!(phases, vec!["yaml-phase"]);
+    }
+
+    #[test]
+    fn test_should_extract_empty_from_changes_section_without_numbered_items() {
+        let design = "## Changes\nSome text without numbered items.\n## Files\n";
+        let phases = extract_changes_section_phases(design);
+        assert!(phases.is_empty());
+    }
+
+    #[test]
+    fn test_should_stop_at_next_heading_in_changes_section() {
+        let design = "## Changes\n1. First change\n## Verification\n2. Not a change\n";
+        let phases = extract_changes_section_phases(design);
+        assert_eq!(phases, vec!["first-change"]);
     }
 
     #[test]

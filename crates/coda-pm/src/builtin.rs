@@ -13,7 +13,7 @@ use crate::PromptTemplate;
 ///
 /// Used for verification in tests. Update this constant when adding or
 /// removing template files.
-pub const BUILTIN_TEMPLATE_COUNT: usize = 13;
+pub const BUILTIN_TEMPLATE_COUNT: usize = 11;
 
 /// Returns all built-in prompt templates, compiled into the binary.
 ///
@@ -26,7 +26,7 @@ pub const BUILTIN_TEMPLATE_COUNT: usize = 13;
 /// use coda_pm::builtin::builtin_templates;
 ///
 /// let templates = builtin_templates();
-/// assert_eq!(templates.len(), 13);
+/// assert_eq!(templates.len(), 11);
 /// assert!(templates.iter().any(|t| t.name == "init/system"));
 /// ```
 pub fn builtin_templates() -> Vec<PromptTemplate> {
@@ -41,11 +41,6 @@ pub fn builtin_templates() -> Vec<PromptTemplate> {
             include_str!("../templates/init/setup_project.j2"),
         ),
         PromptTemplate::new("plan/system", include_str!("../templates/plan/system.j2")),
-        PromptTemplate::new("plan/approve", include_str!("../templates/plan/approve.j2")),
-        PromptTemplate::new(
-            "plan/verification",
-            include_str!("../templates/plan/verification.j2"),
-        ),
         PromptTemplate::new("run/system", include_str!("../templates/run/system.j2")),
         PromptTemplate::new(
             "run/dev_phase",
@@ -85,8 +80,6 @@ mod tests {
             "init/system",
             "init/setup_project",
             "plan/system",
-            "plan/approve",
-            "plan/verification",
             "run/system",
             "run/dev_phase",
             "run/review",

@@ -40,12 +40,8 @@ enum PlanPhase {
     Discussing,
     /// Agent is processing a response.
     Thinking,
-    /// Agent is formalizing the approved design.
+    /// Approving and finalizing the plan.
     Approving,
-    /// Design has been approved, ready to finalize.
-    Approved,
-    /// Generating final specs and worktree.
-    Finalizing,
 }
 
 impl PlanPhase {
@@ -55,8 +51,6 @@ impl PlanPhase {
             Self::Discussing => "Discussing",
             Self::Thinking => "Thinking",
             Self::Approving => "Approving",
-            Self::Approved => "Approved",
-            Self::Finalizing => "Finalizing",
         }
     }
 
@@ -64,8 +58,7 @@ impl PlanPhase {
     fn color(self) -> Color {
         match self {
             Self::Discussing => Color::White,
-            Self::Thinking | Self::Approving | Self::Finalizing => Color::Yellow,
-            Self::Approved => Color::Green,
+            Self::Thinking | Self::Approving => Color::Yellow,
         }
     }
 }
@@ -213,16 +206,6 @@ impl PlanUi {
                     }
 
                     if input == "/approve" {
-                        if session.is_approved() {
-                            self.messages.push(ChatMessage {
-                                role: AGENT_ROLE.to_string(),
-                                content: "Design is already approved. Type /done to finalize."
-                                    .to_string(),
-                            });
-                            self.scroll_to_bottom();
-                            continue;
-                        }
-
                         self.messages.push(ChatMessage {
                             role: USER_ROLE.to_string(),
                             content: "/approve".to_string(),
@@ -233,26 +216,13 @@ impl PlanUi {
                             .run_with_spinner(
                                 session.approve(),
                                 PlanPhase::Approving,
-                                "Approving design...",
+                                "Approving and creating worktree...",
                             )
                             .await;
 
                         match result {
-                            Ok(Some((design, verification))) => {
-                                self.messages.push(ChatMessage {
-                                    role: AGENT_ROLE.to_string(),
-                                    content: design,
-                                });
-                                if let Some(verification) = verification {
-                                    self.messages.push(ChatMessage {
-                                        role: AGENT_ROLE.to_string(),
-                                        content: format!(
-                                            "---\n\n**Verification Plan:**\n\n{verification}"
-                                        ),
-                                    });
-                                }
-                                self.scroll_to_bottom();
-                                self.phase = PlanPhase::Approved;
+                            Ok(Some(output)) => {
+                                return Ok(Some(output));
                             }
                             Ok(None) => {
                                 session.disconnect().await;
@@ -268,24 +238,6 @@ impl PlanUi {
                             }
                         }
                         continue;
-                    }
-
-                    if input == "/done" {
-                        if !session.is_approved() {
-                            self.messages.push(ChatMessage {
-                                role: AGENT_ROLE.to_string(),
-                                content: "Design has not been approved yet. Type /approve first."
-                                    .to_string(),
-                            });
-                            self.scroll_to_bottom();
-                            continue;
-                        }
-
-                        self.phase = PlanPhase::Finalizing;
-                        self.draw()?;
-
-                        let output = session.finalize().await?;
-                        return Ok(Some(output));
                     }
 
                     // Add user message to history
@@ -604,20 +556,12 @@ fn render_help_bar(frame: &mut Frame, area: Rect, phase: PlanPhase) {
 
     let help = match phase {
         PlanPhase::Discussing => Line::from(Span::styled(
-            " [Enter] Send  [/approve] Lock design  [/done] Finalize  [Ctrl+C] Quit  [↑↓] Scroll",
-            help_style,
-        )),
-        PlanPhase::Approved => Line::from(Span::styled(
-            " [/done] Finalize & create worktree  [Enter] Continue discussing  [Ctrl+C] Quit  [↑↓] Scroll",
+            " [Enter] Send  [/approve] Approve & create worktree  [Ctrl+C] Quit  [↑↓] Scroll",
             help_style,
         )),
         PlanPhase::Thinking | PlanPhase::Approving => {
             Line::from(Span::styled(" [Ctrl+C] Cancel", help_style))
         }
-        PlanPhase::Finalizing => Line::from(Span::styled(
-            " Finalizing — writing specs and creating worktree...",
-            help_style,
-        )),
     };
     let paragraph = Paragraph::new(help);
     frame.render_widget(paragraph, area);

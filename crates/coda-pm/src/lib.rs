@@ -49,7 +49,7 @@ mod tests {
         // Verify a sample of templates are accessible by name
         assert!(pm.get_template("init/system").is_some());
         assert!(pm.get_template("run/dev_phase").is_some());
-        assert!(pm.get_template("plan/approve").is_some());
+        assert!(pm.get_template("plan/system").is_some());
     }
 
     #[test]

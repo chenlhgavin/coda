@@ -1282,7 +1282,7 @@ pub fn init_config_preview(
         ("plan", &summary.plan, None),
         ("run", &summary.run, None),
         ("review", &summary.review, Some(summary.review_enabled)),
-        ("verify", &summary.verify, Some(summary.verify_enabled)),
+        ("verify", &summary.verify, None),
     ]
     .iter()
     .map(|(name, resolved, enabled)| {
@@ -2569,7 +2569,6 @@ mod tests {
                 effort: ReasoningEffort::High,
             },
             review_enabled: false,
-            verify_enabled: false,
         }
     }
 

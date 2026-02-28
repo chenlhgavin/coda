@@ -438,6 +438,38 @@ impl Engine {
             return Err(CoreError::AgentError(msg));
         }
 
+        if !self.project_root.join(".coda.md").exists() {
+            let msg = "Setup phase completed but .coda.md was not created. \
+                       This file is required as the project architecture reference."
+                .to_string();
+            emit(
+                &progress_tx,
+                InitEvent::PhaseFailed {
+                    name: INIT_PHASE_SETUP.to_string(),
+                    index: 1,
+                    error: msg.clone(),
+                },
+            );
+            emit(&progress_tx, InitEvent::InitFinished { success: false });
+            return Err(CoreError::AgentError(msg));
+        }
+
+        if !self.project_root.join("CLAUDE.md").exists() {
+            let msg = "Setup phase completed but CLAUDE.md was not created. \
+                       This file is required as the project guidelines for the AI agent."
+                .to_string();
+            emit(
+                &progress_tx,
+                InitEvent::PhaseFailed {
+                    name: INIT_PHASE_SETUP.to_string(),
+                    index: 1,
+                    error: msg.clone(),
+                },
+            );
+            emit(&progress_tx, InitEvent::InitFinished { success: false });
+            return Err(CoreError::AgentError(msg));
+        }
+
         // Check cancellation before committing init artifacts
         if cancel_token.is_cancelled() {
             emit(&progress_tx, InitEvent::InitFinished { success: false });
@@ -600,7 +632,7 @@ impl Engine {
         let mut options = AgentProfile::Coder.to_options(
             system_prompt,
             self.project_root.clone(),
-            10, // max_turns for setup
+            15, // max_turns for setup
             self.config.agent.max_budget_usd,
             &resolved,
         );
@@ -1016,7 +1048,6 @@ impl Engine {
             review: self.config.resolve_review(),
             verify: self.config.resolve_verify(),
             review_enabled: self.config.review.enabled,
-            verify_enabled: self.config.verify.enabled,
         }
     }
 
@@ -1108,8 +1139,6 @@ pub struct ResolvedConfigSummary {
     pub verify: crate::config::ResolvedAgentConfig,
     /// Whether the review phase is enabled.
     pub review_enabled: bool,
-    /// Whether the verify phase is enabled.
-    pub verify_enabled: bool,
 }
 
 /// Resolves a dot-path (e.g., `"agents.run.model"`) against a YAML value tree.

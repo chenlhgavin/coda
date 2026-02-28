@@ -2,7 +2,7 @@
 //!
 //! Uses the verify backend (typically Codex) to evaluate functional
 //! correctness, design conformance, and integration points against
-//! the verification plan generated during `coda plan`. If issues are
+//! the Verification section in the design spec. If issues are
 //! found, Claude (run session) fixes them.
 
 use tracing::{info, warn};
@@ -11,13 +11,48 @@ use crate::CoreError;
 use crate::parser::parse_ai_verification;
 use crate::task::{Task, TaskResult, TaskStatus};
 
-use super::{PhaseContext, PhaseExecutor, PhaseMetricsAccumulator, skip_disabled_phase};
+use super::{PhaseContext, PhaseExecutor, PhaseMetricsAccumulator};
+
+/// Extracts the `## Verification` section from a design spec.
+///
+/// Parses the content between `## Verification` and the next `##` heading
+/// (or end of document). Returns the section content, or a fallback message
+/// if no Verification section is found.
+fn extract_verification_section(design_content: &str) -> String {
+    let mut in_section = false;
+    let mut lines = Vec::new();
+
+    for line in design_content.lines() {
+        let trimmed = line.trim();
+
+        if trimmed == "## Verification" {
+            in_section = true;
+            continue;
+        }
+
+        if in_section && trimmed.starts_with("## ") {
+            break;
+        }
+
+        if in_section {
+            lines.push(line);
+        }
+    }
+
+    let content = lines.join("\n").trim().to_string();
+    if content.is_empty() {
+        "No verification steps specified in design spec.".to_string()
+    } else {
+        content
+    }
+}
 
 /// Executes the verify phase with AI-assisted verification.
 ///
 /// Uses the verify backend (typically Codex) to evaluate functional
 /// correctness, design conformance, and integration points against
-/// the verification plan. Findings are fixed by Claude (run session).
+/// the verification section from the design spec. Findings are fixed
+/// by Claude (run session).
 ///
 /// # Example
 ///
@@ -37,17 +72,8 @@ impl PhaseExecutor for VerifyPhaseExecutor {
     ) -> Result<TaskResult, CoreError> {
         ctx.state_manager.mark_phase_running(phase_idx)?;
 
-        if !ctx.config.verify.enabled {
-            info!("Verify phase disabled, skipping");
-            let feature_slug = ctx.state().feature.slug.clone();
-            return skip_disabled_phase(
-                &mut ctx.state_manager,
-                phase_idx,
-                Task::Verify { feature_slug },
-            );
-        }
-
-        let verification_spec = ctx.load_spec("verification.md")?;
+        let design_content = ctx.load_spec("design.md")?;
+        let verification_section = extract_verification_section(&design_content);
         let ai_verification_enabled = ctx.config.verify.ai_verification;
         let session_id = if ctx.config.agent.isolate_quality_phases {
             Some("verify-fix")
@@ -59,7 +85,8 @@ impl PhaseExecutor for VerifyPhaseExecutor {
 
         // ── AI-Assisted Verification ──────────────────────────────
         if ai_verification_enabled {
-            let passed = run_ai_verification(ctx, &verification_spec, session_id, &mut acc).await?;
+            let passed =
+                run_ai_verification(ctx, &verification_section, session_id, &mut acc).await?;
             ctx.verification_summary.verified = passed;
         } else {
             info!("AI verification disabled, skipping");
@@ -95,7 +122,7 @@ impl PhaseExecutor for VerifyPhaseExecutor {
 /// Returns `true` if verification passed, `false` otherwise.
 async fn run_ai_verification(
     ctx: &mut PhaseContext,
-    verification_spec: &str,
+    verification_section: &str,
     session_id: Option<&str>,
     acc: &mut PhaseMetricsAccumulator,
 ) -> Result<bool, CoreError> {
@@ -124,7 +151,7 @@ async fn run_ai_verification(
     let verify_prompt = ctx.pm.render(
         "run/verify",
         minijinja::context!(
-            verification_spec => verification_spec,
+            verification_section => verification_section,
         ),
     )?;
 
@@ -175,7 +202,7 @@ async fn run_ai_verification(
              1. Analyze each finding and determine the root cause\n\
              2. Fix the code to address each issue\n\
              3. Ensure all tests still pass after your fixes\n\n\
-             Refer to the design specification and verification plan provided earlier.",
+             Refer to the design specification provided earlier.",
         );
 
         // Fix via Claude (run session)
@@ -193,4 +220,48 @@ async fn run_ai_verification(
     }
 
     Ok(passed)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_should_extract_verification_section() {
+        let design = r#"
+## Context
+Some context.
+
+## Changes
+1. Do something
+
+## Verification
+1. Run cargo test
+2. Check output format
+3. Verify error handling
+
+## Files to Modify
+File: src/lib.rs
+"#;
+        let section = extract_verification_section(design);
+        assert!(section.contains("Run cargo test"));
+        assert!(section.contains("Check output format"));
+        assert!(section.contains("Verify error handling"));
+        assert!(!section.contains("Files to Modify"));
+    }
+
+    #[test]
+    fn test_should_return_fallback_when_no_verification_section() {
+        let design = "## Context\nSome text.\n## Changes\n1. Do something\n";
+        let section = extract_verification_section(design);
+        assert_eq!(section, "No verification steps specified in design spec.");
+    }
+
+    #[test]
+    fn test_should_handle_verification_at_end_of_document() {
+        let design = "## Verification\n1. Step one\n2. Step two\n";
+        let section = extract_verification_section(design);
+        assert!(section.contains("Step one"));
+        assert!(section.contains("Step two"));
+    }
 }
